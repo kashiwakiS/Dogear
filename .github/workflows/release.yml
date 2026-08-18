@@ -96,9 +96,6 @@ jobs:
             "$RUNNER_TEMP/DogearRelease/Build/Products/Release/Dogear.app" \
             "$output/Dogear-$version-macOS-universal.zip"
           (cd "$output" && shasum -a 256 Dogear-*.zip > SHA256SUMS)
-          sha256="$(awk '{print $1}' "$output/SHA256SUMS")"
-          sed -e "s/@VERSION@/$version/g" -e "s/@SHA256@/$sha256/g" \
-            packaging/homebrew/dogear.rb.template > "$output/dogear.rb"
 
       - name: Create draft GitHub release
         env:

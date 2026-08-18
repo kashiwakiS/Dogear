@@ -8,8 +8,9 @@ Dogear is a native macOS PDF workbench for people who read deeply: navigate
 long papers, annotate with standard PDF markup, organize a local library, and
 perform page-level work without silently changing the original file.
 
-> Dogear 0.1 is in release preparation. Download links will appear here after
-> the first signed and notarized GitHub release is published.
+> Dogear 0.1 is preparing for its first public source release. Prebuilt
+> downloads will follow after the GitHub build, signing, and notarization flow
+> has been proven end to end.
 
 ![Dogear reader in Simplified Chinese with Library, outline rail, PDF canvas, and annotation tools](assets/screenshots/dogear-reader.jpeg)
 
@@ -46,17 +47,32 @@ perform page-level work without silently changing the original file.
   deterministic keyword outline.
 - English and Simplified Chinese UI, including an app-only language override.
 
-## Install
+## Build from source
 
-The first public build will be distributed through GitHub Releases and a
-Homebrew Cask. Until the signed and notarized `v0.1.0` assets exist, build from
-source:
+Dogear currently has no public binary download. Clone the repository and run
+the same unsigned build entry point used by CI:
 
 ```bash
 git clone https://github.com/kashiwakiS/PDFWorkbench.git
 cd PDFWorkbench
+scripts/check-sensitive-info.sh
 scripts/build.sh --debug
 ```
+
+The app is written to
+`${TMPDIR:-/tmp}/DogearDerivedData/Build/Products/Debug/Dogear.app`. The build
+does not require an Apple Developer certificate. To work in Xcode instead,
+open `PDFWorkBench.xcodeproj` and select the shared `PDFWorkBench` scheme.
+
+Before submitting a release-affecting change, also build both supported CPU
+architectures:
+
+```bash
+scripts/build.sh --release --clean --universal
+```
+
+Every push and pull request repeats the sensitive-information audit, Debug
+build, universal Release build, and app metadata checks in GitHub Actions.
 
 ## Requirements
 
@@ -82,8 +98,8 @@ lowered by weakening or removing current behavior.
 
 ## Roadmap
 
-- **0.1.x — Public foundation:** signed/notarized delivery, Homebrew Cask,
-  file-safety hardening, crash and compatibility fixes.
+- **0.1.x — Public foundation:** reproducible source builds, signed/notarized
+  GitHub delivery, file-safety hardening, crash and compatibility fixes.
 - **0.2–0.8 — Workbench depth:** page reorder/rotate/duplicate and partial
   export, Dog-ear markers, annotation ergonomics, selective Apple Vision OCR,
   and broader automated tests.
@@ -102,6 +118,9 @@ an annotated `vX.Y.Z` tag identifies the single audited release commit.
 Feature priorities are discussed openly in [GitHub Discussions](https://github.com/kashiwakiS/PDFWorkbench/discussions).
 Use Ideas for proposals and Polls for roadmap votes; implementation-ready bugs
 belong in Issues.
+
+Homebrew distribution is intentionally deferred until the signed GitHub
+release process has been exercised and its downloadable artifact is stable.
 
 ## Privacy and file safety
 
