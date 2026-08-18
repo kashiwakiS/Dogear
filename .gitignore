@@ -1,0 +1,28 @@
+.DS_Store
+
+# Xcode user state and build products
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+*.xcarchive
+*.xcresult
+
+# Local credentials and app data
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.pem
+*.mobileprovision
+*Secrets.xcconfig
+ai-configuration.json
+library-state*.json
+WorkingCopies/
+
+# Logs, documents, and release output
+*.log
+*.pdf
+dist/
+releases/

@@ -1,0 +1,13 @@
+cask "dogear" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/kashiwakiS/PDFWorkbench/releases/download/v#{version}/Dogear-#{version}-macOS-universal.zip"
+  name "Dogear"
+  desc "Native PDF workbench for deep reading and safe page operations"
+  homepage "https://github.com/kashiwakiS/PDFWorkbench"
+
+  depends_on macos: ">= :sonoma"
+
+  app "Dogear.app"
+end

@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Debug and universal Release
+    runs-on: macos-26
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Audit repository
+        run: |
+          git diff --check
+          bash -n scripts/*.sh
+          scripts/check-sensitive-info.sh
+          scripts/check-sensitive-info.sh --history
+
+      - name: Build Debug
+        run: scripts/build.sh --debug --derived-data "$RUNNER_TEMP/DogearDebug"
+
+      - name: Build universal Release
+        run: scripts/build.sh --release --universal --derived-data "$RUNNER_TEMP/DogearRelease"
+
+      - name: Verify release metadata
+        run: |
+          app="$RUNNER_TEMP/DogearRelease/Build/Products/Release/Dogear.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$app/Contents/Info.plist")" = "Dogear"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "14.0"
+          test "$(lipo -archs "$app/Contents/MacOS/Dogear")" = "x86_64 arm64" -o \
+               "$(lipo -archs "$app/Contents/MacOS/Dogear")" = "arm64 x86_64"
