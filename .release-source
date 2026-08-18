@@ -1,3 +1,3 @@
 source_branch=release/phase-1-mvp
 source_commit=1ba5196096606d0fda6a688d6f405d0c0b8211c3
-status=development-snapshot-do-not-publish
+status=release-candidate-v0.1.1
