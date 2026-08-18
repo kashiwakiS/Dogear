@@ -1,6 +1,6 @@
 # Dogear
 
-[![Build](https://github.com/kashiwakiS/PDFWorkbench/actions/workflows/build.yml/badge.svg)](https://github.com/kashiwakiS/PDFWorkbench/actions/workflows/build.yml)
+[![Build](https://github.com/kashiwakiS/Dogear/actions/workflows/build.yml/badge.svg)](https://github.com/kashiwakiS/Dogear/actions/workflows/build.yml)
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black.svg)](#requirements)
 
@@ -53,8 +53,8 @@ Dogear currently has no public binary download. Clone the repository and run
 the same unsigned build entry point used by CI:
 
 ```bash
-git clone https://github.com/kashiwakiS/PDFWorkbench.git
-cd PDFWorkbench
+git clone https://github.com/kashiwakiS/Dogear.git
+cd Dogear
 scripts/check-sensitive-info.sh
 scripts/build.sh --debug
 ```
@@ -115,7 +115,7 @@ unfinished interfaces, `0.9.x` is the stabilization line, and `1.0.0` begins
 the stable compatibility promise. Commit count is never used as an app version;
 an annotated `vX.Y.Z` tag identifies the single audited release commit.
 
-Feature priorities are discussed openly in [GitHub Discussions](https://github.com/kashiwakiS/PDFWorkbench/discussions).
+Feature priorities are discussed openly in [GitHub Discussions](https://github.com/kashiwakiS/Dogear/discussions).
 Use Ideas for proposals and Polls for roadmap votes; implementation-ready bugs
 belong in Issues.
 

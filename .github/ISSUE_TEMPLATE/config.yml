@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Feature ideas and roadmap votes
-    url: https://github.com/kashiwakiS/PDFWorkbench/discussions
+    url: https://github.com/kashiwakiS/Dogear/discussions
     about: Propose and upvote ideas or participate in roadmap polls.
   - name: Security report
-    url: https://github.com/kashiwakiS/PDFWorkbench/security
+    url: https://github.com/kashiwakiS/Dogear/security
     about: Use private vulnerability reporting; do not disclose secrets publicly.
