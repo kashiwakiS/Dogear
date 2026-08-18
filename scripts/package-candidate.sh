@@ -44,8 +44,8 @@ Architectures: $(lipo -archs "$temporary/DerivedData/Build/Products/Release/Doge
 Signing: unsigned candidate
 Notarization: not performed
 
-Do not publish this archive or use it in Homebrew. The tag workflow must create
-a Developer ID signed, notarized, and stapled archive.
+Do not publish this archive. The tag workflow must create a Developer ID
+signed, notarized, and stapled archive.
 EOF
 
 echo "Created non-publishable candidate: $destination"
