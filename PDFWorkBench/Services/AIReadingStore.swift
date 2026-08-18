@@ -11,12 +11,16 @@ final class AIReadingStore: ObservableObject {
     @Published private(set) var progressDescription = ""
     @Published private(set) var errorMessage: String?
     @Published private(set) var capturedSelection: AIContextPackage?
+    @Published private(set) var activeTaskKind: AIReadingTaskKind?
+    @Published private(set) var activeQuestion: String?
+    @Published private(set) var elapsedTime: TimeInterval = 0
     @Published var questionText = ""
 
     private let configurationStore: AIConfigurationStore
     private let contextBuilder: AIContextBuilding
     private let resultStore: AIResultStoring
     private var runningTask: Task<Void, Never>?
+    private var elapsedTask: Task<Void, Never>?
     private var documentIdentity: String?
 
     convenience init() {
@@ -81,7 +85,7 @@ final class AIReadingStore: ObservableObject {
         }
     }
 
-    func prepareQuestion(from store: PDFDocumentStore) {
+    func sendQuestion(from store: PDFDocumentStore) {
         let question = questionText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else {
             errorMessage = "Enter a question first."
@@ -101,14 +105,7 @@ final class AIReadingStore: ObservableObject {
                 capturedSelection = context
             }
 
-            pendingRequest = AIPendingRequest(
-                id: UUID(),
-                kind: .askSelection,
-                context: context,
-                question: question,
-                previewText: questionInput(question, context: context),
-                estimatedRequestCount: 1
-            )
+            startQuestion(question, context: context)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -131,12 +128,17 @@ final class AIReadingStore: ObservableObject {
         guard let pendingRequest, !isRunning else { return }
         self.pendingRequest = nil
         isRunning = true
+        activeTaskKind = pendingRequest.kind
         errorMessage = nil
+        startElapsedTimer()
 
         runningTask = Task {
             defer {
                 isRunning = false
+                activeTaskKind = nil
+                activeQuestion = nil
                 progressDescription = ""
+                stopElapsedTimer()
             }
             do {
                 let provider = try configurationStore.provider()
@@ -149,7 +151,8 @@ final class AIReadingStore: ObservableObject {
                     resultStore.summaryMarkdown = summaryMarkdown
                 case .askSelection:
                     guard let question = pendingRequest.question else { return }
-                    let answer = try await ask(
+                    let startedAt = Date()
+                    let result = try await ask(
                         question,
                         context: pendingRequest.context,
                         provider: provider
@@ -157,7 +160,11 @@ final class AIReadingStore: ObservableObject {
                     let turn = AIConversationTurn(
                         id: UUID(),
                         question: question,
-                        answer: answer
+                        answer: result.text,
+                        selectionText: pendingRequest.context.text,
+                        pageNumbers: pendingRequest.context.pageNumbers,
+                        reasoningSummary: result.reasoningSummary,
+                        duration: Date().timeIntervalSince(startedAt)
                     )
                     conversation.append(turn)
                     if conversation.count > 8 {
@@ -169,7 +176,7 @@ final class AIReadingStore: ObservableObject {
             } catch is CancellationError {
                 errorMessage = "AI request canceled."
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = Task.isCancelled ? "AI request canceled." : error.localizedDescription
             }
         }
     }
@@ -180,6 +187,7 @@ final class AIReadingStore: ObservableObject {
 
     func cancel() {
         runningTask?.cancel()
+        elapsedTask?.cancel()
         runningTask = nil
         if isRunning || isPreparing {
             errorMessage = "AI operation canceled."
@@ -187,6 +195,9 @@ final class AIReadingStore: ObservableObject {
         isRunning = false
         isPreparing = false
         progressDescription = ""
+        activeTaskKind = nil
+        activeQuestion = nil
+        elapsedTime = 0
     }
 
     func documentDidChange(to identity: String?) {
@@ -224,14 +235,81 @@ final class AIReadingStore: ObservableObject {
         _ question: String,
         context: AIContextPackage,
         provider: AIProvider
-    ) async throws -> String {
+    ) async throws -> AIResponseResult {
         progressDescription = "Asking about the selected text..."
         return try await provider.respond(
             to: AIResponseRequest(
                 instructions: "Answer only from the selected PDF text and conversation. If the answer is not supported, say so. Cite the supplied page numbers. Reply in the language of the user's question.",
                 input: questionInput(question, context: context)
             )
-        ).text
+        )
+    }
+
+    private func startQuestion(_ question: String, context: AIContextPackage) {
+        guard !isRunning else { return }
+        pendingRequest = nil
+        isRunning = true
+        activeTaskKind = .askSelection
+        activeQuestion = question
+        errorMessage = nil
+        questionText = ""
+        startElapsedTimer()
+
+        runningTask = Task {
+            let startedAt = Date()
+            defer {
+                isRunning = false
+                activeTaskKind = nil
+                activeQuestion = nil
+                progressDescription = ""
+                stopElapsedTimer()
+            }
+            do {
+                let provider = try configurationStore.provider()
+                let result = try await ask(question, context: context, provider: provider)
+                let turn = AIConversationTurn(
+                    id: UUID(),
+                    question: question,
+                    answer: result.text,
+                    selectionText: context.text,
+                    pageNumbers: context.pageNumbers,
+                    reasoningSummary: result.reasoningSummary,
+                    duration: Date().timeIntervalSince(startedAt)
+                )
+                conversation.append(turn)
+                if conversation.count > 8 {
+                    conversation.removeFirst(conversation.count - 8)
+                }
+                resultStore.conversation = conversation
+            } catch is CancellationError {
+                errorMessage = "AI request canceled."
+            } catch {
+                if Task.isCancelled {
+                    errorMessage = "AI request canceled."
+                } else {
+                    errorMessage = error.localizedDescription
+                    questionText = question
+                }
+            }
+        }
+    }
+
+    private func startElapsedTimer() {
+        elapsedTask?.cancel()
+        elapsedTime = 0
+        let startedAt = Date()
+        elapsedTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+                elapsedTime = Date().timeIntervalSince(startedAt)
+            }
+        }
+    }
+
+    private func stopElapsedTimer() {
+        elapsedTask?.cancel()
+        elapsedTask = nil
     }
 
     private func questionInput(_ question: String, context: AIContextPackage) -> String {

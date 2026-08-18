@@ -2,13 +2,16 @@ import SwiftUI
 
 struct DocumentOutlineRailView: View {
     let entries: [DocumentOutlineEntry]
+    let dogears: [DogearMarker]
+    let pageCount: Int
     let currentPageIndex: Int
     let isLoading: Bool
     let isNightMode: Bool
     let selectedEntryID: DocumentOutlineEntry.ID?
     let onSelect: (DocumentOutlineEntry) -> Void
+    let onSelectDogear: (DogearMarker) -> Void
 
-    @State private var hoveredEntryID: DocumentOutlineEntry.ID?
+    @State private var hoveredRowID: RailRow.ID?
     @State private var hoverPosition: CGFloat?
 
     private let rowHeight: CGFloat = 13
@@ -23,10 +26,10 @@ struct DocumentOutlineRailView: View {
     }
 
     var preferredHeight: CGFloat {
-        if isLoading || entries.isEmpty {
+        if isLoading || railRows.isEmpty {
             return 40
         }
-        return min(340, max(56, CGFloat(entries.count) * 13 + 8))
+        return min(340, max(56, CGFloat(railRows.count) * rowHeight + 8))
     }
 
     var body: some View {
@@ -38,7 +41,7 @@ struct DocumentOutlineRailView: View {
                     .controlSize(.small)
                     .frame(maxWidth: .infinity)
                     .frame(maxHeight: .infinity)
-            } else if entries.isEmpty {
+            } else if railRows.isEmpty {
                 Image(systemName: "list.bullet.indent")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -48,8 +51,8 @@ struct DocumentOutlineRailView: View {
             } else {
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                            outlineButton(for: entry, at: index)
+                        ForEach(Array(railRows.enumerated()), id: \.element.id) { index, row in
+                            railButton(for: row, at: index)
                         }
                     }
                     .padding(.vertical, 4)
@@ -60,32 +63,39 @@ struct DocumentOutlineRailView: View {
         .frame(width: presentationWidth, height: preferredHeight, alignment: .leading)
     }
 
-    private func outlineButton(for entry: DocumentOutlineEntry, at index: Int) -> some View {
-        let isHovered = hoveredEntryID == entry.id
-        let isActive = activeEntryID == entry.id
+    private func railButton(for row: RailRow, at index: Int) -> some View {
+        let isHovered = hoveredRowID == row.id
+        let isActive = isRowActive(row)
+        let level = row.level
+        let fill = rowFill(row, isActive: isActive, isHovered: isHovered)
 
         return Button {
-            onSelect(entry)
+            switch row {
+            case .outline(let entry):
+                onSelect(entry)
+            case .dogear(let marker):
+                onSelectDogear(marker)
+            }
         } label: {
             Capsule()
-                .fill(isHovered || isActive ? Color.accentColor : inactiveLineColor)
+                .fill(fill)
                 .frame(
-                    width: lineWidth(for: entry.level, at: index, isActive: isActive),
+                    width: lineWidth(for: level, at: index, isActive: isActive),
                     height: isHovered || isActive ? 3 : 2
                 )
                 .frame(width: interactionWidth, height: rowHeight, alignment: .leading)
-                .padding(.leading, CGFloat(min(entry.level, 4)) * 2)
+                .padding(.leading, CGFloat(min(level, 4)) * 2)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(entry.title) — Page \(entry.pageNumber)")
+        .help(row.help)
         .overlay(alignment: .leading) {
             if isHovered {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.title)
+                    Text(row.title)
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
-                    Text("Page \(entry.pageNumber)")
+                    Text("Page \(row.pageNumber)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -100,17 +110,35 @@ struct DocumentOutlineRailView: View {
         .onContinuousHover { phase in
             switch phase {
             case .active(let location):
-                hoveredEntryID = entry.id
+                hoveredRowID = row.id
                 hoverPosition = CGFloat(index) + min(1, max(0, location.y / rowHeight))
             case .ended:
-                if hoveredEntryID == entry.id {
-                    hoveredEntryID = nil
+                if hoveredRowID == row.id {
+                    hoveredRowID = nil
                     hoverPosition = nil
                 }
             }
         }
-        .accessibilityLabel(entry.title)
-        .accessibilityValue("Page \(entry.pageNumber), level \(entry.level + 1)")
+        .accessibilityLabel(row.title)
+        .accessibilityValue(row.accessibilityValue)
+    }
+
+    private func isRowActive(_ row: RailRow) -> Bool {
+        switch row {
+        case .outline(let entry):
+            return activeEntryID == entry.id
+        case .dogear(let marker):
+            return marker.pageIndex == currentPageIndex
+        }
+    }
+
+    private func rowFill(_ row: RailRow, isActive: Bool, isHovered: Bool) -> Color {
+        switch row {
+        case .outline:
+            return isHovered || isActive ? Color.accentColor : inactiveLineColor
+        case .dogear:
+            return Color.yellow
+        }
     }
 
     private func lineWidth(for level: Int, at index: Int, isActive: Bool) -> CGFloat {
@@ -127,5 +155,102 @@ struct DocumentOutlineRailView: View {
 
     private var inactiveLineColor: Color {
         isNightMode ? Color(white: 0.52) : Color(white: 0.72)
+    }
+}
+
+private enum RailRow: Identifiable {
+    case outline(DocumentOutlineEntry)
+    case dogear(DogearMarker)
+
+    var id: String {
+        switch self {
+        case .outline(let entry):
+            return "outline.\(entry.id)"
+        case .dogear(let marker):
+            return "dogear.\(marker.id.uuidString)"
+        }
+    }
+
+    var pageIndex: Int {
+        switch self {
+        case .outline(let entry):
+            return entry.target.pageIndex
+        case .dogear(let marker):
+            return marker.pageIndex
+        }
+    }
+
+    var pageNumber: Int {
+        pageIndex + 1
+    }
+
+    var title: String {
+        switch self {
+        case .outline(let entry):
+            return entry.title
+        case .dogear(let marker):
+            return marker.displayTitle
+        }
+    }
+
+    var level: Int {
+        switch self {
+        case .outline(let entry):
+            return entry.level
+        case .dogear:
+            return 0
+        }
+    }
+
+    var help: String {
+        "\(title) — Page \(pageNumber)"
+    }
+
+    var accessibilityValue: String {
+        switch self {
+        case .outline(let entry):
+            return "Page \(pageNumber), level \(entry.level + 1)"
+        case .dogear:
+            return "Page \(pageNumber)"
+        }
+    }
+}
+
+private extension DocumentOutlineRailView {
+    struct RailItem {
+        let row: RailRow
+        let pageIndex: Int
+        let section: Int
+        let order: Int
+    }
+
+    var railRows: [RailRow] {
+        let outlineItems = entries.enumerated().map { index, entry in
+            RailItem(row: .outline(entry), pageIndex: entry.target.pageIndex, section: 1, order: index)
+        }
+
+        let sortedDogears = dogears.enumerated().sorted { lhs, rhs in
+            if lhs.element.pageIndex != rhs.element.pageIndex {
+                return lhs.element.pageIndex < rhs.element.pageIndex
+            }
+            if lhs.element.sortIndex != rhs.element.sortIndex {
+                return lhs.element.sortIndex < rhs.element.sortIndex
+            }
+            return lhs.element.title.localizedCaseInsensitiveCompare(rhs.element.title) == .orderedAscending
+        }
+
+        let dogearItems = sortedDogears.enumerated().map { index, item in
+            RailItem(row: .dogear(item.element), pageIndex: item.element.pageIndex, section: 0, order: index)
+        }
+
+        return (outlineItems + dogearItems).sorted { lhs, rhs in
+            if lhs.pageIndex != rhs.pageIndex {
+                return lhs.pageIndex < rhs.pageIndex
+            }
+            if lhs.section != rhs.section {
+                return lhs.section < rhs.section
+            }
+            return lhs.order < rhs.order
+        }.map(\.row)
     }
 }

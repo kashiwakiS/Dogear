@@ -204,7 +204,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "应用名称"
+            "value" : "应用此名称"
           }
         }
       }
@@ -534,7 +534,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "适合页面"
+            "value" : "适合整页"
           }
         }
       }
@@ -544,7 +544,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "适合宽度"
+            "value" : "适合页宽"
           }
         }
       }
@@ -564,7 +564,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "自由文本"
+            "value" : "文本注释"
           }
         }
       }
@@ -600,6 +600,16 @@
       }
     },
     "Hide Annotations and AI Sidebar" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隐藏批注与 AI 侧栏"
+          }
+        }
+      }
+    },
+    "Hide Annotation Sidebar" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -794,7 +804,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "没有匹配项"
+            "value" : "无匹配结果"
           }
         }
       }
@@ -1141,6 +1151,16 @@
         }
       }
     },
+    "Show Annotation Sidebar" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示批注与 AI 侧栏"
+          }
+        }
+      }
+    },
     "Show Library Navigator" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1343,6 +1363,276 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "放大"
+          }
+        }
+      }
+    },
+    "%lld × %lld pt · %lld°" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld × %2$lld 点 · %3$lld°"
+          }
+        }
+      }
+    },
+    "Current page" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前页"
+          }
+        }
+      }
+    },
+    "Done" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "完成"
+          }
+        }
+      }
+    },
+    "Drag to reorder. Hold Command or Shift to select multiple pages." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拖拽可调整顺序；按住 Command 或 Shift 可多选页面。"
+          }
+        }
+      }
+    },
+    "Duplicate" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制页面"
+          }
+        }
+      }
+    },
+    "Export Selected…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "导出所选页面…"
+          }
+        }
+      }
+    },
+    "Organize Pages" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "整理页面"
+          }
+        }
+      }
+    },
+    "Organize Pages…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "整理页面…"
+          }
+        }
+      }
+    },
+    "Page Organizer" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "页面组织器"
+          }
+        }
+      }
+    },
+    "Rotate Left" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "向左旋转"
+          }
+        }
+      }
+    },
+    "Rotate Right" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "向右旋转"
+          }
+        }
+      }
+    },
+    "Selected text · page(s) %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "所选文本 · 第 %@ 页"
+          }
+        }
+      }
+    },
+    "Send" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发送"
+          }
+        }
+      }
+    },
+    "The provider did not return a shareable reasoning summary." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "服务商没有返回可显示的思考摘要。"
+          }
+        }
+      }
+    },
+    "Thinking… %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "思考中… %@"
+          }
+        }
+      }
+    },
+    "Thought for %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "思考了 %@"
+          }
+        }
+      }
+    },
+    "Waiting for the provider…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在等待服务商响应…"
+          }
+        }
+      }
+    },
+    "Add Dog-ear" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加折角标"
+          }
+        }
+      }
+    },
+    "Add Dog-ear to Current Page" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "为当前页添加折角标"
+          }
+        }
+      }
+    },
+    "Dog-ears" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "折角索引"
+          }
+        }
+      }
+    },
+    "Index name" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "索引名称"
+          }
+        }
+      }
+    },
+    "Move Down" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下移"
+          }
+        }
+      }
+    },
+    "Move Up" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上移"
+          }
+        }
+      }
+    },
+    "Press D to add an index marker to the current page." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按 D 为当前页添加索引标记。"
+          }
+        }
+      }
+    },
+    "Remove Dog-ear" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除折角标"
+          }
+        }
+      }
+    },
+    "Remove Dog-ear from Current Page" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除当前页的折角标"
+          }
+        }
+      }
+    },
+    "Toggle Dog-ear" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "切换折角标"
           }
         }
       }

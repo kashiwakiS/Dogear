@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import CoreTransferable
 
 struct LibrarySidebarView: View {
     @ObservedObject var libraryStore: LibraryStore
@@ -17,7 +18,7 @@ struct LibrarySidebarView: View {
     @State private var expandedGroupIDs: Set<UUID> = []
     @State private var contentDropTargetGroupID: UUID?
     @State private var insertionDropTarget: GroupInsertionTarget?
-    @State private var draggedGroupID: UUID?
+    @State private var fileDropTarget: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -120,26 +121,46 @@ struct LibrarySidebarView: View {
         .contextMenu {
             groupContextMenu(for: group)
         }
-        .modifier(
-            GroupDragSourceModifier(
-                group: group,
-                draggedGroupID: $draggedGroupID
+        .modifier(ModernGroupDragSourceModifier(group: group))
+        .dropDestination(for: LibraryGroupDragItem.self) { items, _ in
+            guard !group.isSystemGroup,
+                  let source = items.first,
+                  source.groupID != group.id
+            else {
+                contentDropTargetGroupID = nil
+                return false
+            }
+            contentDropTargetGroupID = nil
+            libraryStore.mergeGroupContents(from: source.groupID, into: group.id)
+            return true
+        } isTargeted: { isTargeted in
+            contentDropTargetGroupID = isTargeted && !group.isSystemGroup ? group.id : nil
+        }
+        .dropDestination(for: LibraryFileDragItem.self) { items, _ in
+            guard !group.isSystemGroup, let source = items.first else {
+                contentDropTargetGroupID = nil
+                return false
+            }
+            contentDropTargetGroupID = nil
+            libraryStore.addFile(source.fileID, to: group.id)
+            return true
+        } isTargeted: { isTargeted in
+            if isTargeted && !group.isSystemGroup {
+                contentDropTargetGroupID = group.id
+            } else if contentDropTargetGroupID == group.id {
+                contentDropTargetGroupID = nil
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            FileDropSupport.loadFileURLs(
+                from: providers,
+                completion: { urls in onImportURLsToGroup(urls, group) }
             )
-        )
-        .onDrop(
-            of: [
-                UTType.fileURL,
-                .pdfWorkbenchGroupDragPayload,
-                .pdfWorkbenchFileDragPayload
-            ],
-            delegate: GroupContentDropDelegate(
-                targetGroup: group,
-                libraryStore: libraryStore,
-                activeTargetGroupID: $contentDropTargetGroupID,
-                draggedGroupID: $draggedGroupID,
-                onImportURLs: onImportURLsToGroup
-            )
-        )
+        }
+        .overlay(alignment: .top) {
+            groupInsertionTarget(relativeTo: group, placeAfterTarget: false)
+                .zIndex(2)
+        }
         .listRowInsets(EdgeInsets(top: 1, leading: 10, bottom: 1, trailing: 10))
         .listRowSeparator(.hidden)
         .listRowBackground(groupRowBackground(for: group))
@@ -160,23 +181,36 @@ struct LibrarySidebarView: View {
         .contextMenu {
             fileContextMenu(for: item, in: group)
         }
-        .onDrag {
-            LibraryDragPayload.provider(
-                for: .file(item.id, groupID: group.id)
+        .draggable(LibraryFileDragItem(fileID: item.id, groupID: group.id))
+        .dropDestination(for: LibraryFileDragItem.self) { items, location in
+            guard let source = items.first, source.fileID != item.id else {
+                fileDropTarget = nil
+                return false
+            }
+            guard source.groupID == group.id || group.id != LibraryGroup.ungroupedID else {
+                fileDropTarget = nil
+                return false
+            }
+            if source.groupID != group.id {
+                libraryStore.addFile(source.fileID, to: group.id)
+            }
+            libraryStore.reorderFile(
+                source.fileID,
+                relativeTo: item.id,
+                in: group.id,
+                placeAfterTarget: location.y > 12
             )
+            fileDropTarget = nil
+            return true
+        } isTargeted: { isTargeted in
+            fileDropTarget = isTargeted ? item.id : (fileDropTarget == item.id ? nil : fileDropTarget)
         }
-        .onDrop(
-            of: [.pdfWorkbenchFileDragPayload],
-            delegate: LibraryFileDropDelegate(
-                targetFileID: item.id,
-                targetGroupID: group.id,
-                libraryStore: libraryStore
-            )
-        )
         .listRowInsets(EdgeInsets(top: 1, leading: 42, bottom: 1, trailing: 10))
         .listRowSeparator(.hidden)
         .listRowBackground(
-            selectedURL?.libraryComparablePath == item.path
+            fileDropTarget == item.id
+                ? Color.accentColor.opacity(0.22)
+                : selectedURL?.libraryComparablePath == item.path
                 ? Color.accentColor.opacity(0.14)
                 : Color.clear
         )
@@ -194,24 +228,39 @@ struct LibrarySidebarView: View {
     }
 
     private func groupInsertionTarget(after group: LibraryGroup) -> some View {
+        groupInsertionTarget(relativeTo: group, placeAfterTarget: true)
+    }
+
+    private func groupInsertionTarget(
+        relativeTo group: LibraryGroup,
+        placeAfterTarget: Bool
+    ) -> some View {
         GroupInsertionOverlay(
             isActive: insertionDropTarget == GroupInsertionTarget(
                 groupID: group.id,
-                placeAfterTarget: true
+                placeAfterTarget: placeAfterTarget
             )
         )
-        .onDrop(
-            of: [.pdfWorkbenchGroupDragPayload],
-            delegate: GroupInsertionDropDelegate(
-                target: GroupInsertionTarget(
+        .dropDestination(for: LibraryGroupDragItem.self) { items, _ in
+            guard let source = items.first, source.groupID != group.id else {
+                insertionDropTarget = nil
+                return false
+            }
+            libraryStore.reorderGroup(
+                source.groupID,
+                relativeTo: group.id,
+                placeAfterTarget: placeAfterTarget
+            )
+            insertionDropTarget = nil
+            return true
+        } isTargeted: { isTargeted in
+            insertionDropTarget = isTargeted
+                ? GroupInsertionTarget(
                     groupID: group.id,
-                    placeAfterTarget: true
-                ),
-                libraryStore: libraryStore,
-                activeTarget: $insertionDropTarget,
-                draggedGroupID: $draggedGroupID
-            )
-        )
+                    placeAfterTarget: placeAfterTarget
+                )
+                : nil
+        }
     }
 
     private func displayedFiles(in group: LibraryGroup) -> [LibraryItem] {
@@ -442,6 +491,45 @@ private struct LibraryFileRow: View {
 private struct GroupInsertionTarget: Equatable {
     let groupID: UUID
     let placeAfterTarget: Bool
+}
+
+private struct LibraryGroupDragItem: Codable, Transferable {
+    let groupID: UUID
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .pdfWorkbenchModernGroupDragPayload)
+    }
+}
+
+private struct LibraryFileDragItem: Codable, Transferable {
+    let fileID: UUID
+    let groupID: UUID
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .pdfWorkbenchModernFileDragPayload)
+    }
+}
+
+private struct ModernGroupDragSourceModifier: ViewModifier {
+    let group: LibraryGroup
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if group.isSystemGroup {
+            content
+        } else {
+            content.draggable(LibraryGroupDragItem(groupID: group.id))
+        }
+    }
+}
+
+private extension UTType {
+    static let pdfWorkbenchModernGroupDragPayload = UTType(
+        exportedAs: "com.pdfworkbench.library-group"
+    )
+    static let pdfWorkbenchModernFileDragPayload = UTType(
+        exportedAs: "com.pdfworkbench.library-file"
+    )
 }
 
 private enum LibraryDragPayload: Sendable {

@@ -114,6 +114,7 @@ struct AIFileAttachment: Equatable {
 struct AIResponseResult: Equatable {
     let text: String
     let responseID: String?
+    let reasoningSummary: String?
 }
 
 protocol AIProvider {
@@ -141,6 +142,10 @@ struct AIConversationTurn: Identifiable, Equatable {
     let id: UUID
     let question: String
     let answer: String
+    let selectionText: String
+    let pageNumbers: [Int]
+    let reasoningSummary: String?
+    let duration: TimeInterval
 }
 
 struct AIContextPackage: Equatable {

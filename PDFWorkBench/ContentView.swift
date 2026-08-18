@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var didOpenLaunchArgument = false
     @State private var didApplyInitialGroup = false
     @State private var isShowingNewGroupSheet = false
+    @State private var isShowingPageOrganizer = false
     @State private var isLibraryNavigatorVisible = false
     @State private var annotationSidebarState = WindowAnnotationSidebarState()
     @State private var newGroupName = ""
@@ -104,6 +105,7 @@ struct ContentView: View {
         .background(
             HostingWindowAccessor { window in
                 windowFrameController.setWindow(window)
+                documentStore.setUndoManager(window?.undoManager)
                 nativeTabPreviewController.update(
                     window: window,
                     context: nativeTabPreviewContext,
@@ -132,6 +134,9 @@ struct ContentView: View {
             NewGroupSheet(groupName: $newGroupName) {
                 createGroupFromSheet()
             }
+        }
+        .sheet(isPresented: $isShowingPageOrganizer) {
+            PageOrganizerView(documentStore: documentStore)
         }
         .focusedValue(\.pdfWorkbenchCommandHandlers, commandHandlers)
         .onAppear {
@@ -302,6 +307,15 @@ struct ContentView: View {
             .help("Add Free Text Note")
 
             FlatToolbarIconControl(
+                title: "Page Organizer",
+                systemImage: "rectangle.stack",
+                isEnabled: documentStore.document != nil
+            ) {
+                isShowingPageOrganizer = true
+            }
+            .help("Organize Pages")
+
+            FlatToolbarIconControl(
                 title: "Delete Page",
                 systemImage: "trash",
                 isEnabled: documentStore.document != nil
@@ -350,6 +364,14 @@ struct ContentView: View {
             removeCurrentDocumentFromSelectedGroup: removeCurrentDocumentFromSelectedGroup,
             addFreeTextNote: {
                 documentStore.requestFreeTextNote(trigger: .command(shortcut: nil))
+            },
+            showPageOrganizer: {
+                isShowingPageOrganizer = true
+            },
+            toggleDogear: {
+                documentStore.toggleDogearOnCurrentPage(
+                    trigger: .command(shortcut: "D")
+                )
             },
             deleteCurrentPage: {
                 documentStore.deleteCurrentPageFromWorkingCopy(
@@ -444,10 +466,20 @@ struct ContentView: View {
                     zoomCommand: zoomCommand,
                     outlineNavigationRequest: documentStore.outlineNavigationRequest,
                     outlineEntries: documentStore.outlineEntries,
+                    dogears: documentStore.dogears,
                     isLoadingOutline: documentStore.isLoadingOutline,
                     isNightMode: isNightMode,
                     freeTextRequestID: documentStore.freeTextRequestID,
                     onSelectOutlineEntry: documentStore.navigate,
+                    onSelectDogear: documentStore.navigate,
+                    onToggleDogear: {
+                        documentStore.toggleDogearOnCurrentPage(
+                            trigger: .keyboard(shortcut: "D")
+                        )
+                    },
+                    onToggleDogearAtPage: { pageIndex in
+                        documentStore.toggleDogear(onPage: pageIndex, trigger: .pointer)
+                    },
                     onHighlightCreated: {
                         documentStore.markAnnotationsChanged(
                             message: "Highlight added. Saving working copy.",
@@ -467,6 +499,13 @@ struct ContentView: View {
                             message: "Annotation changed. Saving working copy.",
                             action: "Move Annotation",
                             trigger: .pointer
+                        )
+                    },
+                    onUndoableAnnotationMutation: { actionName in
+                        documentStore.markAnnotationsChanged(
+                            message: "Undo/redo applied. Saving working copy.",
+                            action: actionName,
+                            trigger: .command(shortcut: "Command-Z")
                         )
                     },
                     onFreeTextShortcut: {
@@ -1043,6 +1082,7 @@ struct ContentView: View {
         }
 
         let item = libraryStore.upsertOpenedURL(url, groupID: activeGroupID)
+        documentStore.bindLibraryFile(item.id)
         libraryStore.updateWorkingCopyURL(documentStore.currentWorkingCopyURL, for: item)
     }
 
@@ -1179,6 +1219,7 @@ struct ContentView: View {
             initialPageIndex: item.lastPageIndex,
             trigger: .pointer
         ) {
+            documentStore.bindLibraryFile(item.id)
             libraryStore.refreshResolvedURL(url, for: item)
             libraryStore.updateWorkingCopyURL(documentStore.currentWorkingCopyURL, for: item)
             libraryStore.recordOpenedFile(item.id, in: groupID)
@@ -1300,6 +1341,7 @@ struct ContentView: View {
             guard documentStore.discardCurrentWorkingCopyAndReopenOriginal() else {
                 return
             }
+            documentStore.bindLibraryFile(item.id)
         } else if FileManager.default.fileExists(atPath: workingCopyURL.path) {
             do {
                 try FileManager.default.removeItem(at: workingCopyURL)
@@ -1411,6 +1453,7 @@ struct ContentView: View {
             trigger: .system
         ) {
             let item = libraryStore.upsertOpenedURL(url, refreshBookmark: false, groupID: nil)
+            documentStore.bindLibraryFile(item.id)
             libraryStore.updateWorkingCopyURL(documentStore.currentWorkingCopyURL, for: item)
         }
     }
@@ -1596,6 +1639,8 @@ private extension PDFReadingShortcutAction {
             return "Add Highlight"
         case .note:
             return "Add Free Text Note"
+        case .dogear:
+            return "Toggle Dog-ear"
         case .pageUp:
             return "Previous Page"
         case .pageDown:

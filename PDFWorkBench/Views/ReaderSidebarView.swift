@@ -45,7 +45,8 @@ private struct AISidebarView: View {
             .padding(12)
         }
         .overlay {
-            if aiStore.isPreparing || aiStore.isRunning {
+            if aiStore.isPreparing
+                || (aiStore.isRunning && aiStore.activeTaskKind == .summarizeDocument) {
                 VStack(spacing: 10) {
                     ProgressView()
                     Text(aiStore.progressDescription.isEmpty ? "Preparing context..." : aiStore.progressDescription)
@@ -110,28 +111,117 @@ private struct AISidebarView: View {
             }
 
             ForEach(aiStore.conversation) { turn in
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(turn.question)
-                        .font(.callout.weight(.semibold))
-                    markdownText(turn.answer)
+                conversationTurn(turn)
+            }
+
+            if aiStore.activeTaskKind == .askSelection,
+               let question = aiStore.activeQuestion {
+                VStack(alignment: .leading, spacing: 8) {
+                    userBubble(question: question, context: aiStore.capturedSelection)
+                    DisclosureGroup("Thinking… \(formattedDuration(aiStore.elapsedTime))") {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text(aiStore.progressDescription.isEmpty
+                                ? "Waiting for the provider…"
+                                : aiStore.progressDescription)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("Cancel") { aiStore.cancel() }
+                                .font(.caption)
+                        }
+                        .padding(.top, 4)
+                    }
+                    .font(.caption)
                 }
-                .padding(8)
-                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
 
-            TextField("Ask a question...", text: $aiStore.questionText, axis: .vertical)
-                .lineLimit(2...5)
-                .textFieldStyle(.roundedBorder)
+            HStack(alignment: .bottom, spacing: 7) {
+                TextField("Ask a question...", text: $aiStore.questionText, axis: .vertical)
+                    .lineLimit(2...5)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { sendQuestion() }
 
-            Button("Review Request") {
-                aiStore.prepareQuestion(from: documentStore)
+                Button(action: sendQuestion) {
+                    Label("Send", systemImage: "arrow.up")
+                        .font(.callout.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .help("Send")
+                .accessibilityLabel("Send")
+                .disabled(
+                    aiStore.questionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || (aiStore.capturedSelection == nil && documentStore.currentTextSelection == nil)
+                        || aiStore.isRunning
+                )
             }
-            .disabled(
-                aiStore.questionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || (aiStore.capturedSelection == nil && documentStore.currentTextSelection == nil)
-                    || aiStore.isRunning
-            )
         }
+    }
+
+    private func sendQuestion() {
+        aiStore.sendQuestion(from: documentStore)
+    }
+
+    private func conversationTurn(_ turn: AIConversationTurn) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            userBubble(
+                question: turn.question,
+                context: AIContextPackage(
+                    title: documentStore.selectedDocumentName,
+                    text: turn.selectionText,
+                    pageNumbers: turn.pageNumbers
+                )
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                reasoningDisclosure(
+                    summary: turn.reasoningSummary,
+                    duration: turn.duration
+                )
+                markdownText(turn.answer)
+                    .textSelection(.enabled)
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func userBubble(question: String, context: AIContextPackage?) -> some View {
+        VStack(alignment: .trailing, spacing: 5) {
+            if let context {
+                DisclosureGroup("Selected text · page(s) \(pageDescription(context.pageNumbers))") {
+                    Text(context.text)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                }
+                .font(.caption)
+            }
+            Text(question)
+                .font(.callout)
+                .textSelection(.enabled)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func reasoningDisclosure(summary: String?, duration: TimeInterval) -> some View {
+        DisclosureGroup("Thought for \(formattedDuration(duration))") {
+            Text(summary ?? "The provider did not return a shareable reasoning summary.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .padding(.top, 4)
+        }
+        .font(.caption)
+    }
+
+    private func formattedDuration(_ duration: TimeInterval) -> String {
+        String(format: "%.1fs", max(0, duration))
     }
 
     private func requestPreview(_ pending: AIPendingRequest) -> some View {
@@ -146,20 +236,6 @@ private struct AISidebarView: View {
                 Label("The complete PDF “\(file.filename)” will be uploaded to the configured provider.", systemImage: "doc.badge.arrow.up")
                     .font(.caption)
                     .foregroundStyle(.orange)
-            } else {
-                Text("\(pending.kind.rawValue) · \(pending.context.pageNumbers.count) page(s) · \(pending.previewText.count) characters · \(pending.estimatedRequestCount) request")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                DisclosureGroup("Exact text to send") {
-                    ScrollView {
-                        Text(pending.previewText)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 220)
-                }
             }
 
             HStack {

@@ -78,13 +78,32 @@ struct OpenAICompatibleResponsesProvider: AIProvider {
                     model: configuration.model,
                     instructions: request.instructions,
                     input: request.input,
-                    store: false
+                    store: false,
+                    reasoning: ReasoningOptions(summary: "auto")
                 )
             )
         }
 
-        let (data, response) = try await session.data(for: urlRequest)
-        try validate(response: response, data: data)
+        var (data, response) = try await session.data(for: urlRequest)
+        do {
+            try validate(response: response, data: data)
+        } catch AIProviderError.server(let statusCode, let message)
+            where request.file == nil
+                && statusCode == 400
+                && (message.localizedCaseInsensitiveContains("reasoning")
+                    || message.localizedCaseInsensitiveContains("summary")) {
+            urlRequest.httpBody = try JSONEncoder().encode(
+                TextResponsesRequestBody(
+                    model: configuration.model,
+                    instructions: request.instructions,
+                    input: request.input,
+                    store: false,
+                    reasoning: nil
+                )
+            )
+            (data, response) = try await session.data(for: urlRequest)
+            try validate(response: response, data: data)
+        }
         let envelope = try JSONDecoder().decode(ResponsesEnvelope.self, from: data)
         let text = envelope.outputText
             ?? envelope.output?
@@ -95,7 +114,17 @@ struct OpenAICompatibleResponsesProvider: AIProvider {
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AIProviderError.emptyResponse
         }
-        return AIResponseResult(text: text, responseID: envelope.id)
+        let reasoningSummary = envelope.output?
+            .filter { $0.type == "reasoning" }
+            .flatMap(\.summary)
+            .compactMap(\.text)
+            .joined(separator: "\n")
+            .nilIfEmpty
+        return AIResponseResult(
+            text: text,
+            responseID: envelope.id,
+            reasoningSummary: reasoningSummary
+        )
     }
 
     private func authorizedRequest(path: String, method: String) -> URLRequest {
@@ -135,6 +164,11 @@ struct OpenAICompatibleResponsesProvider: AIProvider {
         let instructions: String
         let input: String
         let store: Bool
+        let reasoning: ReasoningOptions?
+    }
+
+    private struct ReasoningOptions: Encodable {
+        let summary: String
     }
 
     private struct FileResponsesRequestBody: Encodable {
@@ -176,14 +210,18 @@ struct OpenAICompatibleResponsesProvider: AIProvider {
     }
 
     private struct OutputItem: Decodable {
+        let type: String?
         let content: [OutputContent]
+        let summary: [OutputContent]
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            type = try container.decodeIfPresent(String.self, forKey: .type)
             content = try container.decodeIfPresent([OutputContent].self, forKey: .content) ?? []
+            summary = try container.decodeIfPresent([OutputContent].self, forKey: .summary) ?? []
         }
 
-        private enum CodingKeys: String, CodingKey { case content }
+        private enum CodingKeys: String, CodingKey { case type, content, summary }
     }
 
     private struct OutputContent: Decodable {
@@ -196,5 +234,11 @@ struct OpenAICompatibleResponsesProvider: AIProvider {
 
     private struct ProviderError: Decodable {
         let message: String
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self
     }
 }

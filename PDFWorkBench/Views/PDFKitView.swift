@@ -12,19 +12,26 @@ struct PDFKitView: NSViewRepresentable {
     let zoomCommand: PDFZoomCommand?
     let outlineNavigationRequest: PDFOutlineNavigationRequest?
     let outlineEntries: [DocumentOutlineEntry]
+    let dogears: [DogearMarker]
     let isLoadingOutline: Bool
     let isNightMode: Bool
     let freeTextRequestID: Int
     let shortcutSet: PDFReadingShortcutSet = .defaultReading
     let onSelectOutlineEntry: (DocumentOutlineEntry) -> Void
+    let onSelectDogear: (DogearMarker) -> Void
+    let onToggleDogear: () -> Void
+    let onToggleDogearAtPage: (Int) -> Void
     let onHighlightCreated: () -> Void
     let onHighlightRemoved: (FeedbackTrigger) -> Void
     let onAnnotationChanged: () -> Void
+    let onUndoableAnnotationMutation: (String) -> Void
     let onFreeTextShortcut: () -> Void
     let onShortcutActivated: (PDFReadingShortcutAction, String) -> Void
     let onPageChanged: (Int) -> Void
     let onScaleChanged: (CGFloat) -> Void
     let onSelectionChanged: (PDFTextSelectionSnapshot?) -> Void
+
+    @Environment(\.locale) private var locale
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -36,6 +43,7 @@ struct PDFKitView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> PDFReaderContainerView {
+        _ = locale
         let container = PDFReaderContainerView()
         let pdfView = container.pdfView
         // PDFKit's data detectors add temporary Link annotations for addresses,
@@ -52,7 +60,9 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.onHighlightCreated = onHighlightCreated
         pdfView.onHighlightRemoved = onHighlightRemoved
         pdfView.onAnnotationChanged = onAnnotationChanged
+        pdfView.onUndoableAnnotationMutation = onUndoableAnnotationMutation
         pdfView.onFreeTextShortcut = onFreeTextShortcut
+        pdfView.onDogearShortcut = onToggleDogear
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
         container.updateOutlineOverlay(
@@ -62,6 +72,14 @@ struct PDFKitView: NSViewRepresentable {
             isNightMode: isNightMode,
             onSelect: onSelectOutlineEntry
         )
+        container.updateDogears(
+            dogears,
+            currentPageIndex: targetPageIndex,
+            pageCount: document.pageCount,
+            isNightMode: isNightMode,
+            onSelect: onSelectDogear,
+            onToggleAtPage: onToggleDogearAtPage
+        )
 
         context.coordinator.observePageChanges(for: pdfView, in: container)
         context.coordinator.observeScaleChanges(for: pdfView, in: container)
@@ -70,21 +88,35 @@ struct PDFKitView: NSViewRepresentable {
     }
 
     func updateNSView(_ container: PDFReaderContainerView, context: Context) {
+        _ = locale
         let pdfView = container.pdfView
         if pdfView.document !== document {
             pdfView.stopQuietLinkPresentation()
             pdfView.beginQuietLinkPresentation(for: document)
+            container.updateDogears(
+                dogears,
+                currentPageIndex: targetPageIndex,
+                pageCount: document.pageCount,
+                isNightMode: isNightMode,
+                onSelect: onSelectDogear,
+                onToggleAtPage: onToggleDogearAtPage
+            )
             pdfView.document = document
             pdfView.hideNativeFreeTextAnnotations()
             context.coordinator.resetNavigationState(targetPageIndex: targetPageIndex)
             pdfView.goToPage(index: targetPageIndex)
             context.coordinator.reportScale(from: pdfView)
+            DispatchQueue.main.async {
+                container.layoutDocumentViewForTwoUpIfNeeded()
+            }
         }
         pdfView.shortcutSet = shortcutSet
         pdfView.onHighlightCreated = onHighlightCreated
         pdfView.onHighlightRemoved = onHighlightRemoved
         pdfView.onAnnotationChanged = onAnnotationChanged
+        pdfView.onUndoableAnnotationMutation = onUndoableAnnotationMutation
         pdfView.onFreeTextShortcut = onFreeTextShortcut
+        pdfView.onDogearShortcut = onToggleDogear
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
         context.coordinator.onPageChanged = onPageChanged
@@ -97,11 +129,22 @@ struct PDFKitView: NSViewRepresentable {
             isNightMode: isNightMode,
             onSelect: onSelectOutlineEntry
         )
+        container.updateDogears(
+            dogears,
+            currentPageIndex: targetPageIndex,
+            pageCount: document.pageCount,
+            isNightMode: isNightMode,
+            onSelect: onSelectDogear,
+            onToggleAtPage: onToggleDogearAtPage
+        )
 
         if context.coordinator.lastDisplayStyle != displayStyle {
             context.coordinator.lastDisplayStyle = displayStyle
             pdfView.applyDisplayStyle(displayStyle, preservingPageIndex: targetPageIndex)
             context.coordinator.reportScale(from: pdfView)
+            DispatchQueue.main.async {
+                container.layoutDocumentViewForTwoUpIfNeeded()
+            }
         }
 
         if let zoomCommand,
@@ -227,6 +270,9 @@ struct PDFKitView: NSViewRepresentable {
                 container?.layoutOutlineOverlay()
                 self.lastTargetPageIndex = pageIndex
                 self.onPageChanged(pageIndex)
+                DispatchQueue.main.async {
+                    container?.layoutDocumentViewForTwoUpIfNeeded()
+                }
             }
         }
 
@@ -242,6 +288,9 @@ struct PDFKitView: NSViewRepresentable {
 
                 container?.layoutOutlineOverlay()
                 self.reportScale(from: pdfView)
+                DispatchQueue.main.async {
+                    container?.layoutDocumentViewForTwoUpIfNeeded()
+                }
             }
         }
 
@@ -338,7 +387,10 @@ enum PDFReadingDisplayStyle: String, CaseIterable, Identifiable {
     }
 
     var displaysAsBook: Bool {
-        self == .twoUp
+        // PDFKit's book layout shows the first page as a cover and can leave
+        // the final page stranded outside the scrollable document in
+        // continuous two-up mode. Keep normal page pairing (1-2, 3-4, ...).
+        false
     }
 }
 
@@ -358,12 +410,14 @@ enum PDFZoomAction: Equatable {
 struct PDFReadingShortcutSet: Equatable {
     var highlightKeys: Set<String>
     var noteKeys: Set<String>
+    var dogearKeys: Set<String>
     var pageUpKeys: Set<String>
     var pageDownKeys: Set<String>
 
     static let defaultReading = PDFReadingShortcutSet(
         highlightKeys: ["h"],
         noteKeys: ["t"],
+        dogearKeys: ["d"],
         pageUpKeys: ["w", "k"],
         pageDownKeys: ["s", "j"]
     )
@@ -375,6 +429,10 @@ struct PDFReadingShortcutSet: Equatable {
 
         if noteKeys.contains(key) {
             return .note
+        }
+
+        if dogearKeys.contains(key) {
+            return .dogear
         }
 
         if pageUpKeys.contains(key) {
@@ -392,6 +450,7 @@ struct PDFReadingShortcutSet: Equatable {
 enum PDFReadingShortcutAction {
     case highlight
     case note
+    case dogear
     case pageUp
     case pageDown
 }
@@ -409,11 +468,16 @@ final class PDFReaderContainerView: NSView {
     private var onSelectOutlineEntry: ((DocumentOutlineEntry) -> Void)?
     private var selectedOutlineEntryID: DocumentOutlineEntry.ID?
     private var selectedOutlinePageIndex: Int?
+    private var dogears: [DogearMarker] = []
+    private var dogearPageCount = 0
+    private var onSelectDogear: ((DogearMarker) -> Void)?
+    private let dogearOverlayProvider = DogearPageOverlayViewProvider()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         addSubview(pdfView)
+        pdfView.pageOverlayViewProvider = dogearOverlayProvider
     }
 
     required init?(coder: NSCoder) {
@@ -439,7 +503,37 @@ final class PDFReaderContainerView: NSView {
     override func layout() {
         super.layout()
         pdfView.frame = bounds
+        layoutDocumentViewForTwoUpIfNeeded()
         layoutOutlineOverlay()
+    }
+
+    func layoutDocumentViewForTwoUpIfNeeded() {
+        guard pdfView.displayMode == .twoUp || pdfView.displayMode == .twoUpContinuous,
+              let documentView = pdfView.documentView
+        else {
+            return
+        }
+
+        let pageViews = documentView.subviews
+        guard !pageViews.isEmpty else {
+            return
+        }
+
+        let maxX = pageViews.map { $0.frame.maxX }.max() ?? documentView.frame.maxX
+        let maxY = pageViews.map { $0.frame.maxY }.max() ?? documentView.frame.maxY
+        guard maxX > 0, maxY > 0 else {
+            return
+        }
+
+        let expectedSize = NSSize(width: maxX + 4, height: maxY + 4)
+        guard abs(documentView.frame.width - expectedSize.width) > 1
+                || abs(documentView.frame.height - expectedSize.height) > 1
+        else {
+            return
+        }
+
+        documentView.frame = NSRect(origin: .zero, size: expectedSize)
+        documentView.enclosingScrollView?.tile()
     }
 
     func updateOutlineOverlay(
@@ -483,12 +577,17 @@ final class PDFReaderContainerView: NSView {
 
         let rootView = DocumentOutlineRailView(
             entries: outlineEntries,
+            dogears: dogears,
+            pageCount: dogearPageCount,
             currentPageIndex: outlineCurrentPageIndex,
             isLoading: isLoadingOutline,
             isNightMode: isOutlineNightMode,
             selectedEntryID: selectedOutlineEntryID,
             onSelect: { [weak self] entry in
                 self?.activateOutlineEntry(entry)
+            },
+            onSelectDogear: { [weak self] marker in
+                self?.onSelectDogear?(marker)
             }
         )
 
@@ -507,6 +606,26 @@ final class PDFReaderContainerView: NSView {
         layoutOutlineOverlay()
     }
 
+    func updateDogears(
+        _ markers: [DogearMarker],
+        currentPageIndex: Int,
+        pageCount: Int,
+        isNightMode: Bool,
+        onSelect: @escaping (DogearMarker) -> Void,
+        onToggleAtPage: @escaping (Int) -> Void
+    ) {
+        dogears = markers
+        dogearPageCount = pageCount
+        outlineCurrentPageIndex = currentPageIndex
+        isOutlineNightMode = isNightMode
+        onSelectDogear = onSelect
+        dogearOverlayProvider.dogears = markers
+        dogearOverlayProvider.isNightMode = isNightMode
+        dogearOverlayProvider.onToggleDogearAtPage = onToggleAtPage
+        dogearOverlayProvider.update(dogears: markers, isNightMode: isNightMode)
+        renderOutlineOverlay()
+    }
+
     private func activateOutlineEntry(_ entry: DocumentOutlineEntry) {
         selectedOutlineEntryID = entry.id
         selectedOutlinePageIndex = entry.target.pageIndex
@@ -515,25 +634,17 @@ final class PDFReaderContainerView: NSView {
     }
 
     func layoutOutlineOverlay() {
-        guard let outlineHostingView,
-              let page = pdfView.currentPage
-        else {
+        guard let outlineHostingView else {
             outlineHostingView?.isHidden = true
             return
         }
 
-        let pageRect = pdfView.convert(
-            pdfView.convert(page.bounds(for: .cropBox), from: page),
-            to: self
-        )
-        let visibleBounds = pdfView.convert(pdfView.visibleRect, to: self)
         let height = outlineHostingView.rootView.preferredHeight
-        let preferredX = pageRect.minX + 8
         let x = min(
-            max(visibleBounds.minX + 8, preferredX),
-            visibleBounds.maxX - outlineInteractionWidth - 8
+            bounds.minX + 8,
+            bounds.maxX - outlineInteractionWidth - 8
         )
-        let y = visibleBounds.midY - height / 2
+        let y = bounds.midY - height / 2
 
         outlineHostingView.isHidden = false
         outlineHostingView.frame = NSRect(
@@ -543,6 +654,7 @@ final class PDFReaderContainerView: NSView {
             height: height
         )
     }
+
 }
 
 final class HighlightingPDFView: PDFView {
@@ -550,7 +662,9 @@ final class HighlightingPDFView: PDFView {
     var onHighlightCreated: (() -> Void)?
     var onHighlightRemoved: ((FeedbackTrigger) -> Void)?
     var onAnnotationChanged: (() -> Void)?
+    var onUndoableAnnotationMutation: ((String) -> Void)?
     var onFreeTextShortcut: (() -> Void)?
+    var onDogearShortcut: (() -> Void)?
     var onShortcutActivated: ((PDFReadingShortcutAction, String) -> Void)?
 
     private var freeTextDrag: FreeTextDrag?
@@ -565,6 +679,7 @@ final class HighlightingPDFView: PDFView {
     private var quietLinkRectsCache: [ObjectIdentifier: [NSRect]] = [:]
     private var quietLinkActivationID = 0
     private var standardBackgroundColor: NSColor?
+    private var standardPageShadowsEnabled: Bool?
     private var appliedNightMode: Bool?
 
     override var acceptsFirstResponder: Bool {
@@ -579,14 +694,19 @@ final class HighlightingPDFView: PDFView {
         if standardBackgroundColor == nil {
             standardBackgroundColor = backgroundColor
         }
+        if standardPageShadowsEnabled == nil {
+            standardPageShadowsEnabled = pageShadowsEnabled
+        }
         appliedNightMode = isEnabled
         wantsLayer = true
 
         if isEnabled {
             backgroundColor = .white
+            pageShadowsEnabled = false
             layer?.filters = [CIFilter(name: "CIColorInvert")].compactMap { $0 }
         } else {
             backgroundColor = standardBackgroundColor ?? .windowBackgroundColor
+            pageShadowsEnabled = standardPageShadowsEnabled ?? true
             layer?.filters = nil
         }
     }
@@ -694,8 +814,17 @@ final class HighlightingPDFView: PDFView {
             return
         }
 
-        if freeTextDrag != nil {
-            freeTextDrag = nil
+        if let freeTextDrag {
+            let finalBounds = freeTextDrag.annotation.bounds
+            if finalBounds != freeTextDrag.initialBounds {
+                registerBoundsUndo(
+                    for: freeTextDrag.annotation,
+                    page: freeTextDrag.page,
+                    restoring: freeTextDrag.initialBounds,
+                    actionName: "Move Free Text Note"
+                )
+            }
+            self.freeTextDrag = nil
             onAnnotationChanged?()
             return
         }
@@ -722,12 +851,22 @@ final class HighlightingPDFView: PDFView {
         }
 
         switch action {
-        case .highlight where addHighlightToCurrentSelection():
-            onHighlightCreated?()
         case .highlight:
-            NSSound.beep()
+            let records = addHighlightToCurrentSelection()
+            if records.isEmpty {
+                NSSound.beep()
+            } else {
+                registerAnnotationPresenceUndo(
+                    records,
+                    restoringPresence: false,
+                    actionName: "Add Highlight"
+                )
+                onHighlightCreated?()
+            }
         case .note:
             onFreeTextShortcut?()
+        case .dogear:
+            onDogearShortcut?()
         case .pageUp:
             goToPreviousPage(nil)
         case .pageDown:
@@ -770,6 +909,11 @@ final class HighlightingPDFView: PDFView {
                 }
 
                 self.selectedHighlight = nil
+                self.registerAnnotationPresenceUndo(
+                    [AnnotationUndoRecord(page: page, annotation: annotation)],
+                    restoringPresence: true,
+                    actionName: "Remove Highlight"
+                )
                 self.refreshDisplay(for: page)
                 self.onHighlightRemoved?(.pointer)
             }
@@ -917,11 +1061,11 @@ final class HighlightingPDFView: PDFView {
         textField.selectText(nil)
     }
 
-    private func addHighlightToCurrentSelection() -> Bool {
+    private func addHighlightToCurrentSelection() -> [AnnotationUndoRecord] {
         guard let selection = currentSelection,
               selection.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
-            return false
+            return []
         }
 
         var pageGeometries: [PageHighlightGeometry] = []
@@ -945,6 +1089,7 @@ final class HighlightingPDFView: PDFView {
             }
         }
 
+        var records: [AnnotationUndoRecord] = []
         for geometry in pageGeometries {
             guard let annotationBounds = geometry.lineBounds.reduce(nil, { partialBounds, lineBounds in
                 partialBounds?.union(lineBounds) ?? lineBounds
@@ -963,11 +1108,12 @@ final class HighlightingPDFView: PDFView {
             }
             // Keep contents empty so PDFKit does not show highlight note popovers.
             geometry.page.addAnnotation(highlight)
+            records.append(AnnotationUndoRecord(page: geometry.page, annotation: highlight))
         }
 
         clearSelection()
         setNeedsDisplay(bounds)
-        return !pageGeometries.isEmpty
+        return records
     }
 
     private func quadrilateralPoints(for bounds: NSRect, relativeTo origin: NSPoint) -> [NSValue] {
@@ -1230,6 +1376,11 @@ final class HighlightingPDFView: PDFView {
         }
 
         page.removeAnnotation(annotation)
+        registerAnnotationPresenceUndo(
+            [AnnotationUndoRecord(page: page, annotation: annotation)],
+            restoringPresence: true,
+            actionName: "Remove Highlight"
+        )
         selectedHighlight = nil
         refreshDisplay(for: page)
         onHighlightRemoved?(trigger)
@@ -1281,6 +1432,11 @@ final class HighlightingPDFView: PDFView {
         note.removeValue(forAnnotationKey: .color)
         note.removeValue(forAnnotationKey: .interiorColor)
         editor.page.addAnnotation(note)
+        registerAnnotationPresenceUndo(
+            [AnnotationUndoRecord(page: editor.page, annotation: note)],
+            restoringPresence: false,
+            actionName: "Add Free Text Note"
+        )
         refreshDisplay(for: editor.page)
         onAnnotationChanged?()
 
@@ -1321,6 +1477,7 @@ final class HighlightingPDFView: PDFView {
         return FreeTextDrag(
             annotation: annotation,
             page: page,
+            initialBounds: bounds,
             pointerOffset: NSPoint(
                 x: pagePoint.x - bounds.origin.x,
                 y: pagePoint.y - bounds.origin.y
@@ -1480,10 +1637,89 @@ final class HighlightingPDFView: PDFView {
         )
     }
 
+    private func registerAnnotationPresenceUndo(
+        _ records: [AnnotationUndoRecord],
+        restoringPresence: Bool,
+        actionName: String
+    ) {
+        window?.undoManager?.registerUndo(withTarget: self) { target in
+            target.applyAnnotationPresence(
+                records,
+                isPresent: restoringPresence,
+                actionName: actionName
+            )
+        }
+        window?.undoManager?.setActionName(actionName)
+    }
+
+    private func applyAnnotationPresence(
+        _ records: [AnnotationUndoRecord],
+        isPresent: Bool,
+        actionName: String
+    ) {
+        for record in records {
+            if isPresent, record.annotation.page == nil {
+                record.page.addAnnotation(record.annotation)
+            } else if !isPresent, record.annotation.page === record.page {
+                record.page.removeAnnotation(record.annotation)
+            }
+            refreshDisplay(for: record.page)
+        }
+
+        registerAnnotationPresenceUndo(
+            records,
+            restoringPresence: !isPresent,
+            actionName: actionName
+        )
+        onUndoableAnnotationMutation?(actionName)
+    }
+
+    private func registerBoundsUndo(
+        for annotation: PDFAnnotation,
+        page: PDFPage,
+        restoring bounds: NSRect,
+        actionName: String
+    ) {
+        window?.undoManager?.registerUndo(withTarget: self) { target in
+            target.restoreAnnotationBounds(
+                annotation,
+                page: page,
+                bounds: bounds,
+                actionName: actionName
+            )
+        }
+        window?.undoManager?.setActionName(actionName)
+    }
+
+    private func restoreAnnotationBounds(
+        _ annotation: PDFAnnotation,
+        page: PDFPage,
+        bounds: NSRect,
+        actionName: String
+    ) {
+        guard annotation.page === page else { return }
+        let previousBounds = annotation.bounds
+        annotation.bounds = bounds
+        registerBoundsUndo(
+            for: annotation,
+            page: page,
+            restoring: previousBounds,
+            actionName: actionName
+        )
+        refreshDisplay(for: page)
+        onUndoableAnnotationMutation?(actionName)
+    }
+
     private struct FreeTextDrag {
         let annotation: PDFAnnotation
         let page: PDFPage
+        let initialBounds: NSRect
         let pointerOffset: NSPoint
+    }
+
+    private struct AnnotationUndoRecord {
+        let page: PDFPage
+        let annotation: PDFAnnotation
     }
 
     private struct FreeTextEditor {

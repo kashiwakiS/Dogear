@@ -26,28 +26,34 @@ final class PDFDocumentStore: ObservableObject {
     @Published private(set) var isLoadingOutline = false
     @Published private(set) var outlineNavigationRequest: PDFOutlineNavigationRequest?
     @Published private(set) var currentTextSelection: PDFTextSelectionSnapshot?
+    @Published private(set) var dogears: [DogearMarker] = []
 
     private let outlineProvider: KeywordOutlineProviding
     private let documentOutlineProvider: DocumentOutlineProviding
     private let workingCopyStore: PDFWorkingCopyStore?
     private let saveQueue: PDFSaveQueue
     private let feedbackCenter: OperationFeedbackCenter
+    private let metadataStore: DocumentMetadataStore
     private var accessedSecurityScopedURL: URL?
     private var openedDocumentID = UUID()
     private var saveGeneration = 0
     private var outlineNavigationRequestID = 0
     private var outlineLoadingTask: Task<Void, Never>?
+    private weak var undoManager: UndoManager?
+    private var currentLibraryFileID: UUID?
 
     init(
         feedbackCenter: OperationFeedbackCenter,
         outlineProvider: KeywordOutlineProviding? = nil,
         documentOutlineProvider: DocumentOutlineProviding? = nil,
+        metadataStore: DocumentMetadataStore? = nil,
         workingCopyStore: PDFWorkingCopyStore? = nil,
         saveQueue: PDFSaveQueue? = nil
     ) {
         self.feedbackCenter = feedbackCenter
         self.outlineProvider = outlineProvider ?? FallbackKeywordOutlineProvider()
         self.documentOutlineProvider = documentOutlineProvider ?? DocumentOutlineService()
+        self.metadataStore = metadataStore ?? .shared
         self.workingCopyStore = workingCopyStore ?? (try? PDFWorkingCopyStore())
         self.saveQueue = saveQueue ?? .shared
     }
@@ -120,6 +126,23 @@ final class PDFDocumentStore: ObservableObject {
         return min(max(0, currentPageIndex), pageCount - 1) + 1
     }
 
+    func setUndoManager(_ undoManager: UndoManager?) {
+        guard self.undoManager !== undoManager else { return }
+        self.undoManager = undoManager
+        undoManager?.removeAllActions()
+    }
+
+    var canUndoDocumentChange: Bool { undoManager?.canUndo == true }
+    var canRedoDocumentChange: Bool { undoManager?.canRedo == true }
+
+    func undoDocumentChange() {
+        undoManager?.undo()
+    }
+
+    func redoDocumentChange() {
+        undoManager?.redo()
+    }
+
     @discardableResult
     func openPDF(
         from url: URL?,
@@ -161,6 +184,7 @@ final class PDFDocumentStore: ObservableObject {
         selectedPDFURL = url
         currentWorkingCopyURL = workingCopyURL
         self.document = document
+        undoManager?.removeAllActions()
         openedDocumentID = UUID()
         saveGeneration = 0
         hasUnsavedChanges = false
@@ -169,6 +193,8 @@ final class PDFDocumentStore: ObservableObject {
         selectedDocumentSearchResultID = nil
         outlineNavigationRequest = nil
         currentTextSelection = nil
+        currentLibraryFileID = nil
+        dogears = []
         refreshAnnotations()
         refreshDocumentSearchResults(selectFirstResult: true)
         refreshDocumentOutline(for: document)
@@ -180,6 +206,78 @@ final class PDFDocumentStore: ObservableObject {
             trigger: trigger
         )
         return true
+    }
+
+    func bindLibraryFile(_ fileID: UUID) {
+        currentLibraryFileID = fileID
+        refreshDogears()
+    }
+
+    var currentPageDogear: DogearMarker? {
+        dogears.first { $0.pageIndex == currentPageIndex }
+    }
+
+    func toggleDogearOnCurrentPage(trigger: FeedbackTrigger? = nil) {
+        toggleDogear(onPage: currentPageIndex, trigger: trigger)
+    }
+
+    func toggleDogear(onPage pageIndex: Int, trigger: FeedbackTrigger? = nil) {
+        guard document != nil, let documentID = currentLibraryFileID else { return }
+
+        if let marker = dogears.first(where: { $0.pageIndex == pageIndex }) {
+            metadataStore.removeDogear(id: marker.id)
+            registerUndoForRemovedDogear(marker, actionName: "Remove Dog-ear")
+            refreshDogears()
+            postFeedback(
+                "Dog-ear removed from page \(marker.pageNumber).",
+                action: "Remove Dog-ear",
+                trigger: trigger
+            )
+        } else {
+            let marker = metadataStore.addDogear(
+                documentID: documentID,
+                pageIndex: pageIndex
+            )
+            registerUndoForAddedDogear(marker, actionName: "Add Dog-ear")
+            refreshDogears()
+            postFeedback(
+                "Dog-ear added to page \(marker.pageNumber).",
+                kind: .success,
+                action: "Add Dog-ear",
+                trigger: trigger
+            )
+        }
+    }
+
+    func renameDogear(_ marker: DogearMarker, title: String) {
+        let previousDogears = dogears
+        metadataStore.renameDogear(id: marker.id, title: title)
+        refreshDogears()
+        guard dogears != previousDogears else { return }
+        registerUndoForDogearSnapshot(previousDogears, actionName: "Rename Dog-ear")
+    }
+
+    func removeDogear(_ marker: DogearMarker, trigger: FeedbackTrigger? = nil) {
+        guard metadataStore.removeDogear(id: marker.id) != nil else { return }
+        registerUndoForRemovedDogear(marker, actionName: "Remove Dog-ear")
+        refreshDogears()
+        postFeedback(
+            "Dog-ear removed from page \(marker.pageNumber).",
+            action: "Remove Dog-ear",
+            trigger: trigger
+        )
+    }
+
+    func moveDogear(_ marker: DogearMarker, by offset: Int) {
+        let previousDogears = dogears
+        metadataStore.moveDogear(id: marker.id, by: offset)
+        refreshDogears()
+        guard dogears != previousDogears else { return }
+        registerUndoForDogearSnapshot(previousDogears, actionName: "Reorder Dog-ears")
+    }
+
+    func navigate(to dogear: DogearMarker) {
+        goToPageNumber(dogear.pageNumber, trigger: .pointer)
     }
 
     func recordCurrentPage(_ pageIndex: Int) {
@@ -235,6 +333,11 @@ final class PDFDocumentStore: ObservableObject {
         }
 
         page.removeAnnotation(annotation)
+        registerUndoForRemovedAnnotation(
+            annotation,
+            page: page,
+            actionName: "Remove \(item.kind.rawValue)"
+        )
         selectedAnnotationID = nil
         markAnnotationsChanged(
             message: "\(item.kind.rawValue) removed. Saving working copy.",
@@ -359,15 +462,168 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
-        document.removePage(at: currentPageIndex)
+        let deletedPageIndex = currentPageIndex
+        guard let deletedPage = document.page(at: deletedPageIndex) else { return }
+        let dogearsBeforeDeletion = dogears
+        document.removePage(at: deletedPageIndex)
+        if let documentID = currentLibraryFileID {
+            metadataStore.updateForRemovedPages(
+                documentID: documentID,
+                removedPageIndexes: IndexSet(integer: deletedPageIndex)
+            )
+            refreshDogears()
+        }
+        registerUndoForRemovedPage(
+            deletedPage,
+            at: deletedPageIndex,
+            dogearsBeforeDeletion: dogearsBeforeDeletion,
+            actionName: "Delete Page"
+        )
         currentPageIndex = min(currentPageIndex, max(0, document.pageCount - 1))
         selectedAnnotationID = nil
         selectedDocumentSearchResultID = nil
         refreshAnnotations()
         refreshDocumentSearchResults(selectFirstResult: false)
+        refreshDocumentOutlineAfterPageMutation()
         enqueueCurrentDocumentSave(
             successMessage: "Page deleted from working copy.",
             action: "Delete Page",
+            trigger: trigger
+        )
+    }
+
+    func movePages(fromOffsets source: IndexSet, toOffset destination: Int) {
+        guard let document,
+              !source.isEmpty,
+              source.allSatisfy({ $0 >= 0 && $0 < document.pageCount })
+        else { return }
+
+        performPageArrangement(actionName: "Reorder Pages") {
+            let pages = source.compactMap { document.page(at: $0) }
+            for index in source.sorted(by: >) {
+                document.removePage(at: index)
+            }
+
+            var insertionIndex = destination - source.filter { $0 < destination }.count
+            insertionIndex = min(max(0, insertionIndex), document.pageCount)
+            for page in pages {
+                document.insert(page, at: insertionIndex)
+                insertionIndex += 1
+            }
+        }
+    }
+
+    func moveSelectedPages(_ indexes: IndexSet, by offset: Int) -> IndexSet {
+        guard !indexes.isEmpty, offset != 0 else { return indexes }
+        if offset < 0 {
+            guard let first = indexes.first, first > 0 else { return indexes }
+            movePages(fromOffsets: indexes, toOffset: first - 1)
+            return IndexSet(indexes.map { $0 - 1 })
+        }
+
+        guard let last = indexes.last, last + 1 < pageCount else { return indexes }
+        movePages(fromOffsets: indexes, toOffset: last + 2)
+        return IndexSet(indexes.map { $0 + 1 })
+    }
+
+    func duplicatePages(at indexes: IndexSet) -> IndexSet {
+        guard let document,
+              !indexes.isEmpty,
+              indexes.allSatisfy({ $0 >= 0 && $0 < document.pageCount })
+        else { return [] }
+
+        let sourcePages = indexes.compactMap { document.page(at: $0) }
+        let copies = sourcePages.compactMap { $0.copy() as? PDFPage }
+        guard copies.count == sourcePages.count, let last = indexes.last else {
+            postFeedback(
+                "Could not duplicate the selected pages.",
+                kind: .error,
+                action: "Duplicate Pages"
+            )
+            return []
+        }
+
+        let insertionIndex = last + 1
+        performPageArrangement(actionName: "Duplicate Pages") {
+            for (offset, page) in copies.enumerated() {
+                document.insert(page, at: insertionIndex + offset)
+            }
+        }
+        return IndexSet(insertionIndex..<(insertionIndex + copies.count))
+    }
+
+    func rotatePages(at indexes: IndexSet, clockwise: Bool) {
+        guard let document,
+              !indexes.isEmpty,
+              indexes.allSatisfy({ $0 >= 0 && $0 < document.pageCount })
+        else { return }
+
+        performPageArrangement(actionName: clockwise ? "Rotate Pages Right" : "Rotate Pages Left") {
+            for index in indexes {
+                guard let page = document.page(at: index) else { continue }
+                let rotation = page.rotation + (clockwise ? 90 : -90)
+                page.rotation = ((rotation % 360) + 360) % 360
+            }
+        }
+    }
+
+    @discardableResult
+    func deletePagesFromWorkingCopy(
+        at indexes: IndexSet,
+        trigger: FeedbackTrigger? = nil
+    ) -> Bool {
+        guard let document, !indexes.isEmpty else { return false }
+        guard document.pageCount - indexes.count >= 1 else {
+            postFeedback(
+                "A PDF must keep at least one page.",
+                kind: .warning,
+                action: "Delete Pages",
+                trigger: trigger
+            )
+            return false
+        }
+
+        let alert = NSAlert()
+        alert.messageText = indexes.count == 1
+            ? "Delete the selected page?"
+            : "Delete \(indexes.count) selected pages?"
+        alert.informativeText = "Dogear will update the app-managed working copy. The original PDF will not be changed."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete from Working Copy")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+
+        performPageArrangement(actionName: "Delete Pages", trigger: trigger) {
+            for index in indexes.sorted(by: >) {
+                document.removePage(at: index)
+            }
+        }
+        return true
+    }
+
+    func exportPages(at indexes: IndexSet, trigger: FeedbackTrigger? = nil) {
+        guard let document, !indexes.isEmpty else { return }
+        let exportedDocument = PDFDocument()
+        exportedDocument.documentAttributes = document.documentAttributes
+
+        for index in indexes.sorted() {
+            guard let page = document.page(at: index)?.copy() as? PDFPage else {
+                postFeedback(
+                    "Could not prepare all selected pages for export.",
+                    kind: .error,
+                    action: "Export Selected Pages",
+                    trigger: trigger
+                )
+                return
+            }
+            exportedDocument.insert(page, at: exportedDocument.pageCount)
+        }
+
+        writePDF(
+            exportedDocument,
+            suggestedName: suggestedFileName(suffix: "selected-pages"),
+            successMessage: "Selected pages exported",
+            action: "Export Selected Pages",
             trigger: trigger
         )
     }
@@ -672,6 +928,297 @@ final class PDFDocumentStore: ObservableObject {
 
         let baseName = selectedPDFURL.deletingPathExtension().lastPathComponent
         return "\(baseName)-\(suffix).pdf"
+    }
+
+    private func registerUndoForRemovedAnnotation(
+        _ annotation: PDFAnnotation,
+        page: PDFPage,
+        actionName: String
+    ) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.restoreAnnotation(annotation, to: page, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func restoreAnnotation(
+        _ annotation: PDFAnnotation,
+        to page: PDFPage,
+        actionName: String
+    ) {
+        guard annotation.page == nil else { return }
+        page.addAnnotation(annotation)
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.removeAnnotationForUndo(annotation, from: page, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+        finishUndoableDocumentMutation(actionName: actionName)
+    }
+
+    private func removeAnnotationForUndo(
+        _ annotation: PDFAnnotation,
+        from page: PDFPage,
+        actionName: String
+    ) {
+        guard annotation.page === page else { return }
+        page.removeAnnotation(annotation)
+        registerUndoForRemovedAnnotation(annotation, page: page, actionName: actionName)
+        finishUndoableDocumentMutation(actionName: actionName)
+    }
+
+    private func registerUndoForRemovedPage(
+        _ page: PDFPage,
+        at index: Int,
+        dogearsBeforeDeletion: [DogearMarker],
+        actionName: String
+    ) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.restorePage(
+                page,
+                at: index,
+                dogearsBeforeDeletion: dogearsBeforeDeletion,
+                actionName: actionName
+            )
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func restorePage(
+        _ page: PDFPage,
+        at index: Int,
+        dogearsBeforeDeletion: [DogearMarker],
+        actionName: String
+    ) {
+        guard let document, document.index(for: page) == NSNotFound else { return }
+        let dogearsBeforeRestoration = dogears
+        let insertionIndex = min(max(0, index), document.pageCount)
+        document.insert(page, at: insertionIndex)
+        if let documentID = currentLibraryFileID {
+            metadataStore.replaceDogears(for: documentID, with: dogearsBeforeDeletion)
+            refreshDogears()
+        }
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.removePageForUndo(
+                page,
+                dogearsAfterRemoval: dogearsBeforeRestoration,
+                actionName: actionName
+            )
+        }
+        undoManager?.setActionName(actionName)
+        currentPageIndex = insertionIndex
+        finishUndoableDocumentMutation(actionName: actionName)
+    }
+
+    private func removePageForUndo(
+        _ page: PDFPage,
+        dogearsAfterRemoval: [DogearMarker],
+        actionName: String
+    ) {
+        guard let document else { return }
+        let index = document.index(for: page)
+        guard index != NSNotFound, document.pageCount > 1 else { return }
+        let dogearsBeforeDeletion = dogears
+        document.removePage(at: index)
+        if let documentID = currentLibraryFileID {
+            metadataStore.replaceDogears(for: documentID, with: dogearsAfterRemoval)
+            refreshDogears()
+        }
+        registerUndoForRemovedPage(
+            page,
+            at: index,
+            dogearsBeforeDeletion: dogearsBeforeDeletion,
+            actionName: actionName
+        )
+        currentPageIndex = min(index, max(0, document.pageCount - 1))
+        finishUndoableDocumentMutation(actionName: actionName)
+    }
+
+    private func finishUndoableDocumentMutation(actionName: String) {
+        selectedAnnotationID = nil
+        selectedDocumentSearchResultID = nil
+        refreshAnnotations()
+        refreshDocumentSearchResults(selectFirstResult: false)
+        refreshDocumentOutlineAfterPageMutation()
+        enqueueCurrentDocumentSave(
+            successMessage: "Undo/redo saved to working copy.",
+            action: actionName,
+            trigger: .command(shortcut: "Command-Z")
+        )
+    }
+
+    private struct PageArrangementSnapshot {
+        struct PageState {
+            let page: PDFPage
+            let rotation: Int
+        }
+
+        let pages: [PageState]
+        let dogears: [DogearMarker]
+        let currentPage: PDFPage?
+        let currentPageIndex: Int
+    }
+
+    private func pageArrangementSnapshot() -> PageArrangementSnapshot? {
+        guard let document else { return nil }
+        let pages = (0..<document.pageCount).compactMap { index -> PageArrangementSnapshot.PageState? in
+            guard let page = document.page(at: index) else { return nil }
+            return .init(page: page, rotation: page.rotation)
+        }
+        return PageArrangementSnapshot(
+            pages: pages,
+            dogears: dogears,
+            currentPage: document.page(at: currentPageIndex),
+            currentPageIndex: currentPageIndex
+        )
+    }
+
+    private func performPageArrangement(
+        actionName: String,
+        trigger: FeedbackTrigger? = nil,
+        mutation: () -> Void
+    ) {
+        guard let document, let before = pageArrangementSnapshot() else { return }
+        let previousPages = before.pages.map(\.page)
+        mutation()
+        let currentPages = (0..<document.pageCount).compactMap { document.page(at: $0) }
+        remapDogears(from: previousPages, to: currentPages)
+
+        if let currentPage = before.currentPage {
+            let newIndex = document.index(for: currentPage)
+            currentPageIndex = newIndex == NSNotFound
+                ? min(before.currentPageIndex, max(0, document.pageCount - 1))
+                : newIndex
+        }
+
+        registerUndoForPageArrangement(before, actionName: actionName)
+        finishPageArrangement(actionName: actionName, trigger: trigger)
+    }
+
+    private func registerUndoForPageArrangement(
+        _ snapshot: PageArrangementSnapshot,
+        actionName: String
+    ) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.restorePageArrangement(snapshot, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func restorePageArrangement(
+        _ snapshot: PageArrangementSnapshot,
+        actionName: String
+    ) {
+        guard let document, let redoSnapshot = pageArrangementSnapshot() else { return }
+        for index in stride(from: document.pageCount - 1, through: 0, by: -1) {
+            document.removePage(at: index)
+        }
+        for (index, state) in snapshot.pages.enumerated() {
+            state.page.rotation = state.rotation
+            document.insert(state.page, at: index)
+        }
+        if let documentID = currentLibraryFileID {
+            metadataStore.replaceDogears(for: documentID, with: snapshot.dogears)
+            refreshDogears()
+        }
+        if let currentPage = snapshot.currentPage {
+            let restoredIndex = document.index(for: currentPage)
+            currentPageIndex = restoredIndex == NSNotFound
+                ? min(snapshot.currentPageIndex, max(0, document.pageCount - 1))
+                : restoredIndex
+        }
+        registerUndoForPageArrangement(redoSnapshot, actionName: actionName)
+        finishPageArrangement(actionName: actionName, trigger: .command(shortcut: "Command-Z"))
+    }
+
+    private func remapDogears(from oldPages: [PDFPage], to newPages: [PDFPage]) {
+        guard let documentID = currentLibraryFileID else { return }
+        let newIndexes = Dictionary(
+            uniqueKeysWithValues: newPages.enumerated().map { (ObjectIdentifier($0.element), $0.offset) }
+        )
+        let remapped = dogears.compactMap { marker -> DogearMarker? in
+            guard marker.pageIndex >= 0, marker.pageIndex < oldPages.count,
+                  let newIndex = newIndexes[ObjectIdentifier(oldPages[marker.pageIndex])]
+            else { return nil }
+            var marker = marker
+            marker.pageIndex = newIndex
+            marker.updatedAt = Date()
+            return marker
+        }
+        metadataStore.replaceDogears(for: documentID, with: remapped)
+        refreshDogears()
+    }
+
+    private func finishPageArrangement(
+        actionName: String,
+        trigger: FeedbackTrigger?
+    ) {
+        selectedAnnotationID = nil
+        selectedDocumentSearchResultID = nil
+        refreshAnnotations()
+        refreshDocumentSearchResults(selectFirstResult: false)
+        refreshDocumentOutlineAfterPageMutation()
+        enqueueCurrentDocumentSave(
+            successMessage: "Page changes saved to working copy.",
+            action: actionName,
+            trigger: trigger
+        )
+    }
+
+    private func refreshDogears() {
+        guard let currentLibraryFileID else {
+            dogears = []
+            return
+        }
+        dogears = metadataStore.dogears(for: currentLibraryFileID)
+    }
+
+    private func registerUndoForAddedDogear(_ marker: DogearMarker, actionName: String) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.removeDogearForUndo(marker, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func registerUndoForRemovedDogear(_ marker: DogearMarker, actionName: String) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.restoreDogearForUndo(marker, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func removeDogearForUndo(_ marker: DogearMarker, actionName: String) {
+        metadataStore.removeDogear(id: marker.id)
+        registerUndoForRemovedDogear(marker, actionName: actionName)
+        refreshDogears()
+    }
+
+    private func restoreDogearForUndo(_ marker: DogearMarker, actionName: String) {
+        metadataStore.restoreDogear(marker)
+        registerUndoForAddedDogear(marker, actionName: actionName)
+        refreshDogears()
+    }
+
+    private func registerUndoForDogearSnapshot(
+        _ snapshot: [DogearMarker],
+        actionName: String
+    ) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.restoreDogearSnapshot(snapshot, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func restoreDogearSnapshot(_ snapshot: [DogearMarker], actionName: String) {
+        guard let documentID = currentLibraryFileID else { return }
+        let redoSnapshot = dogears
+        metadataStore.replaceDogears(for: documentID, with: snapshot)
+        refreshDogears()
+        registerUndoForDogearSnapshot(redoSnapshot, actionName: actionName)
+    }
+
+    private func refreshDocumentOutlineAfterPageMutation() {
+        guard let document else { return }
+        refreshDocumentOutline(for: document)
     }
 
     private func suggestedMarkdownFileName(suffix: String) -> String {

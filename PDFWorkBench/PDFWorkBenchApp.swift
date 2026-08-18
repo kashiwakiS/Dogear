@@ -53,6 +53,10 @@ struct PDFWorkBenchApp: App {
 
 @MainActor
 final class PDFWorkBenchAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AppLanguageStore.shared.refreshMenuBarLocalization()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         PDFSaveQueue.shared.waitUntilDrained()
         return .terminateNow
@@ -118,6 +122,8 @@ struct PDFWorkbenchCommandHandlers {
     let addCurrentDocumentToSelectedGroup: () -> Void
     let removeCurrentDocumentFromSelectedGroup: () -> Void
     let addFreeTextNote: () -> Void
+    let showPageOrganizer: () -> Void
+    let toggleDogear: () -> Void
     let deleteCurrentPage: () -> Void
     let goToPreviousPage: () -> Void
     let goToNextPage: () -> Void
@@ -158,6 +164,8 @@ private struct PDFWorkBenchCommands: Commands {
     @ObservedObject var languageStore: AppLanguageStore
 
     var body: some Commands {
+        let _ = languageStore.selection
+
         CommandGroup(replacing: .newItem) {
             Button(L10n.string("Open...")) {
                 commandHandlers?.openPDF()
@@ -301,6 +309,18 @@ private struct PDFWorkBenchCommands: Commands {
         }
 
         CommandMenu(L10n.string("Annotation")) {
+            Button(L10n.string("Organize Pages…")) {
+                commandHandlers?.showPageOrganizer()
+            }
+            .disabled(!canUseDocumentCommands)
+
+            Divider()
+
+            Button(L10n.string("Toggle Dog-ear")) {
+                commandHandlers?.toggleDogear()
+            }
+            .disabled(!canUseDocumentCommands)
+
             Button(L10n.string("Add Free Text Note")) {
                 commandHandlers?.addFreeTextNote()
             }

@@ -1,4 +1,4 @@
-name: Draft signed release
+name: Publish GitHub release
 
 on:
   push:
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   release:
-    name: Sign, notarize, and draft
+    name: Build and publish universal package
     runs-on: macos-26
     timeout-minutes: 45
     env:
@@ -39,70 +39,19 @@ jobs:
           scripts/check-sensitive-info.sh --history
           git diff --check
 
-      - name: Build universal Release
-        run: scripts/build.sh --release --clean --universal --derived-data "$RUNNER_TEMP/DogearRelease"
-
-      - name: Import Developer ID certificate
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_CERT_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.BUILD_KEYCHAIN_PASSWORD }}
-        run: |
-          certificate="$RUNNER_TEMP/developer-id.p12"
-          keychain="$RUNNER_TEMP/dogear-signing.keychain-db"
-          printf '%s' "$CERTIFICATE_BASE64" | /usr/bin/base64 -D > "$certificate"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security import "$certificate" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
-          security list-keychains -d user -s "$keychain"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
-
-      - name: Sign application
-        env:
-          SIGNING_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION_IDENTITY }}
-        run: |
-          app="$RUNNER_TEMP/DogearRelease/Build/Products/Release/Dogear.app"
-          codesign --force --options runtime --timestamp \
-            --entitlements PDFWorkBench/PDFWorkBench.entitlements \
-            --sign "$SIGNING_IDENTITY" "$app"
-          codesign --verify --deep --strict --verbose=2 "$app"
-
-      - name: Notarize and staple
-        env:
-          ASC_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY_BASE64 }}
-          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-        run: |
-          app="$RUNNER_TEMP/DogearRelease/Build/Products/Release/Dogear.app"
-          submission="$RUNNER_TEMP/Dogear-notarization.zip"
-          key="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
-          printf '%s' "$ASC_KEY_BASE64" | /usr/bin/base64 -D > "$key"
-          ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
-          xcrun notarytool submit "$submission" \
-            --key "$key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait
-          xcrun stapler staple "$app"
-          xcrun stapler validate "$app"
-          spctl --assess --type execute --verbose=2 "$app"
-
-      - name: Create release assets
+      - name: Build and package universal app
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          version="${TAG#v}"
-          output="$RUNNER_TEMP/release-assets"
-          mkdir -p "$output"
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$RUNNER_TEMP/DogearRelease/Build/Products/Release/Dogear.app" \
-            "$output/Dogear-$version-macOS-universal.zip"
-          (cd "$output" && shasum -a 256 Dogear-*.zip > SHA256SUMS)
+          scripts/package-release.sh "${TAG#v}" "$RUNNER_TEMP/release-assets"
 
-      - name: Create draft GitHub release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
           gh release create "$TAG" "$RUNNER_TEMP/release-assets/"* \
-            --draft --verify-tag --title "Dogear $version" \
-            --generate-notes
+            --verify-tag \
+            --title "Dogear $version" \
+            --notes "Dogear $version. This release includes a universal macOS package, source archive, and SHA-256 checksums. The app package is unsigned; build from source when you need a locally signed build."
