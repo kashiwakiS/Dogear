@@ -19,6 +19,8 @@ jobs:
     name: Debug and universal Release
     runs-on: macos-26
     timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
 
     steps:
       - name: Check out source
@@ -29,6 +31,7 @@ jobs:
 
       - name: Audit repository
         run: |
+          xcodebuild -version
           git diff --check
           bash -n scripts/*.sh
           scripts/check-sensitive-info.sh

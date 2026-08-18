@@ -16,6 +16,8 @@ jobs:
     name: Sign, notarize, and draft
     runs-on: macos-26
     timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
 
     steps:
       - name: Check out tagged source
@@ -28,6 +30,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
+          xcodebuild -version
           version="${TAG#v}"
           project_version="$(awk '/MARKETING_VERSION =/{gsub(/;/, "", $3); print $3; exit}' PDFWorkBench.xcodeproj/project.pbxproj)"
           test "$version" = "$project_version"
