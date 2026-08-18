@@ -34,8 +34,21 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ -z "${DEVELOPER_DIR:-}" ]] && [[ "$(xcode-select -p 2>/dev/null || true)" != *.app/Contents/Developer ]]; then
+  for candidate in /Applications/Xcode.app /Applications/Xcode-beta.app /Applications/Xcode_*.app; do
+    if [[ -x "$candidate/Contents/Developer/usr/bin/xcodebuild" ]]; then
+      export DEVELOPER_DIR="$candidate/Contents/Developer"
+      break
+    fi
+  done
+fi
+
 command -v xcodebuild >/dev/null || {
   echo "error: xcodebuild is required" >&2
+  exit 1
+}
+xcodebuild -version >/dev/null 2>&1 || {
+  echo "error: select a full Xcode with xcode-select or set DEVELOPER_DIR" >&2
   exit 1
 }
 

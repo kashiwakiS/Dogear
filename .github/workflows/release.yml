@@ -30,6 +30,7 @@ jobs:
           version="${TAG#v}"
           project_version="$(awk '/MARKETING_VERSION =/{gsub(/;/, "", $3); print $3; exit}' PDFWorkBench.xcodeproj/project.pbxproj)"
           test "$version" = "$project_version"
+          grep -qx "status=release-candidate-v$version" .release-source
           scripts/check-sensitive-info.sh
           scripts/check-sensitive-info.sh --history
           git diff --check
@@ -91,6 +92,9 @@ jobs:
             "$RUNNER_TEMP/DogearRelease/Build/Products/Release/Dogear.app" \
             "$output/Dogear-$version-macOS-universal.zip"
           (cd "$output" && shasum -a 256 Dogear-*.zip > SHA256SUMS)
+          sha256="$(awk '{print $1}' "$output/SHA256SUMS")"
+          sed -e "s/@VERSION@/$version/g" -e "s/@SHA256@/$sha256/g" \
+            packaging/homebrew/dogear.rb.template > "$output/dogear.rb"
 
       - name: Create draft GitHub release
         env:

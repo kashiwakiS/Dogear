@@ -474,11 +474,6 @@ struct ContentView: View {
                             trigger: .keyboard(shortcut: "T")
                         )
                     },
-                    onDeletePageShortcut: {
-                        documentStore.deleteCurrentPageFromWorkingCopy(
-                            trigger: .keyboard(shortcut: "D")
-                        )
-                    },
                     onShortcutActivated: { action, shortcut in
                         postFeedback(
                             action.feedbackMessage,
@@ -1605,8 +1600,6 @@ private extension PDFReadingShortcutAction {
             return "Previous Page"
         case .pageDown:
             return "Next Page"
-        case .deletePage:
-            return "Delete Page"
         }
     }
 

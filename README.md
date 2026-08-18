@@ -11,8 +11,7 @@ perform page-level work without silently changing the original file.
 > Dogear 0.1 is in release preparation. Download links will appear here after
 > the first signed and notarized GitHub release is published.
 
-<!-- Replace with the verified release screenshot before v0.1.0. -->
-![Dogear reader with Library, outline rail, and annotations](assets/screenshots/dogear-reader.png)
+![Dogear reader in Simplified Chinese with Library, outline rail, PDF canvas, and annotation tools](assets/screenshots/dogear-reader.jpeg)
 
 ## Why Dogear
 
@@ -93,6 +92,12 @@ lowered by weakening or removing current behavior.
   1.0 compatibility surface.
 - **1.0 — Stable:** documented data compatibility, dependable upgrade and
   rollback guidance, and sustained release/signing operations.
+
+Dogear follows Semantic Versioning. Before 1.0, patch releases (`0.1.1`) are
+backward-compatible fixes, minor releases (`0.2.0`) may add features or revise
+unfinished interfaces, `0.9.x` is the stabilization line, and `1.0.0` begins
+the stable compatibility promise. Commit count is never used as an app version;
+an annotated `vX.Y.Z` tag identifies the single audited release commit.
 
 Feature priorities are discussed openly in [GitHub Discussions](https://github.com/kashiwakiS/PDFWorkbench/discussions).
 Use Ideas for proposals and Polls for roadmap votes; implementation-ready bugs

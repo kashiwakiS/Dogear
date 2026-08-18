@@ -21,7 +21,6 @@ struct PDFKitView: NSViewRepresentable {
     let onHighlightRemoved: (FeedbackTrigger) -> Void
     let onAnnotationChanged: () -> Void
     let onFreeTextShortcut: () -> Void
-    let onDeletePageShortcut: () -> Void
     let onShortcutActivated: (PDFReadingShortcutAction, String) -> Void
     let onPageChanged: (Int) -> Void
     let onScaleChanged: (CGFloat) -> Void
@@ -54,7 +53,6 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.onHighlightRemoved = onHighlightRemoved
         pdfView.onAnnotationChanged = onAnnotationChanged
         pdfView.onFreeTextShortcut = onFreeTextShortcut
-        pdfView.onDeletePageShortcut = onDeletePageShortcut
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
         container.updateOutlineOverlay(
@@ -87,7 +85,6 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.onHighlightRemoved = onHighlightRemoved
         pdfView.onAnnotationChanged = onAnnotationChanged
         pdfView.onFreeTextShortcut = onFreeTextShortcut
-        pdfView.onDeletePageShortcut = onDeletePageShortcut
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
         context.coordinator.onPageChanged = onPageChanged
@@ -363,14 +360,12 @@ struct PDFReadingShortcutSet: Equatable {
     var noteKeys: Set<String>
     var pageUpKeys: Set<String>
     var pageDownKeys: Set<String>
-    var deletePageKeys: Set<String>
 
     static let defaultReading = PDFReadingShortcutSet(
         highlightKeys: ["h"],
         noteKeys: ["t"],
         pageUpKeys: ["w", "k"],
-        pageDownKeys: ["s", "j"],
-        deletePageKeys: ["d"]
+        pageDownKeys: ["s", "j"]
     )
 
     func action(for key: String) -> PDFReadingShortcutAction? {
@@ -390,10 +385,6 @@ struct PDFReadingShortcutSet: Equatable {
             return .pageDown
         }
 
-        if deletePageKeys.contains(key) {
-            return .deletePage
-        }
-
         return nil
     }
 }
@@ -403,7 +394,6 @@ enum PDFReadingShortcutAction {
     case note
     case pageUp
     case pageDown
-    case deletePage
 }
 
 final class PDFReaderContainerView: NSView {
@@ -561,7 +551,6 @@ final class HighlightingPDFView: PDFView {
     var onHighlightRemoved: ((FeedbackTrigger) -> Void)?
     var onAnnotationChanged: (() -> Void)?
     var onFreeTextShortcut: (() -> Void)?
-    var onDeletePageShortcut: (() -> Void)?
     var onShortcutActivated: ((PDFReadingShortcutAction, String) -> Void)?
 
     private var freeTextDrag: FreeTextDrag?
@@ -743,8 +732,6 @@ final class HighlightingPDFView: PDFView {
             goToPreviousPage(nil)
         case .pageDown:
             goToNextPage(nil)
-        case .deletePage:
-            onDeletePageShortcut?()
         case nil:
             super.keyDown(with: event)
         }
