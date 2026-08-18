@@ -51,7 +51,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
-          gh release create "$TAG" "$RUNNER_TEMP/release-assets/"* \
+          gh release create "$TAG" "$RUNNER_TEMP/release-assets/v$version/"* \
             --verify-tag \
             --title "Dogear $version" \
             --notes "Dogear $version. This release includes a universal macOS package, source archive, and SHA-256 checksums. The app package is unsigned; build from source when you need a locally signed build."
