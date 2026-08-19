@@ -10,10 +10,14 @@ git diff --check
 bash -n scripts/*.sh
 scripts/check-sensitive-info.sh
 scripts/check-sensitive-info.sh --history
-scripts/build.sh --debug --clean --derived-data "$TEMP_ROOT/Debug"
-scripts/build.sh --release --clean --universal --derived-data "$TEMP_ROOT/Release"
+scripts/build.sh --debug --clean \
+  --derived-data "$TEMP_ROOT/DebugDerivedData" \
+  --output-dir "$TEMP_ROOT/Debug"
+scripts/build.sh --release --clean --universal \
+  --derived-data "$TEMP_ROOT/ReleaseDerivedData" \
+  --output-dir "$TEMP_ROOT/Release"
 
-app="$TEMP_ROOT/Release/Build/Products/Release/Dogear.app"
+app="$TEMP_ROOT/Release/Dogear.app"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" == "14.0" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$app/Contents/Info.plist")" == "Dogear" ]]
 

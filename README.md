@@ -30,7 +30,9 @@ scripts/check-sensitive-info.sh
 scripts/build.sh --debug
 ```
 
-应用会输出到 `${TMPDIR:-/tmp}/DogearDerivedData/Build/Products/Debug/Dogear.app`。
+Debug 应用会输出到 `build/Debug/Dogear.app`，Release 应用会输出到
+`build/Release/Dogear.app`。Xcode 的中间构建文件位于 `build/DerivedData/`；
+如需指定其他最终输出目录，可使用 `--output-dir PATH`。
 如需一次干净的通用 Release 构建：
 
 ```bash
@@ -41,21 +43,22 @@ GitHub Actions 会在每次推送和 Pull Request 中运行相同的源码扫描
 
 ## 快捷键
 
-| 操作 | 快捷键 |
-| --- | --- |
-| 高亮选中内容 | `H` |
-| 添加 FreeText 备注 | `T` |
-| 切换当前页的 Dog-ear | `D` |
-| 上一页 / 下一页 | `W` / `S`（也支持 `K` / `J`） |
-| 打开 PDF | `⌘O` |
-| 保存到原文件… | `⌘S` |
-| 上一页 / 下一页 | `⌘↑` / `⌘↓` |
-| 第一页 / 最后一页 | `⌘⌥↑` / `⌘⌥↓` |
-| 放大 / 缩小 | `⌘+` / `⌘−` |
-| 实际大小 / 适应页面 / 适应宽度 | `⌘0` / `⌘1` / `⌘2` |
-| 资料库导航器 | `⌘⌥L` |
-| 批注与 AI 侧边栏 | `⌘⌥R` |
-| 新建群组… | `⌘⇧N` |
+
+| 操作                           | 快捷键                        |
+| ------------------------------ | ----------------------------- |
+| 高亮选中内容                   | `H`                           |
+| 添加 FreeText 备注             | `T`                           |
+| 添加/删除当前页的 Dog-ear      | `D`                           |
+| 上一页 / 下一页                | `W` / `S`（也支持 `K` / `J`） |
+| 打开 PDF                       | `⌘O`                         |
+| 保存到原文件…                 | `⌘S`                         |
+| 上一页 / 下一页                | `⌘↑` / `⌘↓`               |
+| 第一页 / 最后一页              | `⌘⌥↑` / `⌘⌥↓`           |
+| 放大 / 缩小                    | `⌘+` / `⌘−`                |
+| 实际大小 / 适应页面 / 适应宽度 | `⌘0` / `⌘1` / `⌘2`         |
+| 资料库导航器（左侧边栏）       | `⌘⌥L`                       |
+| 批注与 AI 侧边栏（右侧边栏）   | `⌘⌥R`                       |
+| 新建群组…                     | `⌘⇧N`                       |
 
 当原生标签页组预览打开时，按未修饰的数字键 `1` 到 `9` 可打开对应文件。
 
@@ -67,6 +70,6 @@ Dogear 没有遥测，也不需要账户。资料库数据只保存在你的 Mac
 
 ## 贡献
 
-Bug 报告和功能请求请提交到 [Issues](https://github.com/kashiwakiS/Dogear/issues)。欢迎通过 [pull requests](https://github.com/kashiwakiS/Dogear/pulls) 提交小型、聚焦的改动；请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请遵循 [SECURITY.md](SECURITY.md)。
+Bug 报告和功能请求请提交到 [Issues](https://github.com/kashiwakiS/Dogear/issues)。欢迎通过 [pull requests](https://github.com/kashiwakiS/Dogear/pulls) 提交小型、聚焦于具体功能的改动；请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请遵循 [SECURITY.md](SECURITY.md)。
 
 Dogear 使用 [GNU General Public License v3.0](LICENSE) 许可。

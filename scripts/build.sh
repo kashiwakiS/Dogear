@@ -3,17 +3,20 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGURATION="Debug"
-DERIVED_DATA_PATH="${DOGEAR_DERIVED_DATA:-${TMPDIR:-/tmp}/DogearDerivedData}"
+DERIVED_DATA_PATH="${DOGEAR_DERIVED_DATA:-$PROJECT_ROOT/build/DerivedData}"
+OUTPUT_DIR="${DOGEAR_OUTPUT_DIR:-$PROJECT_ROOT/build/$CONFIGURATION}"
 CLEAN=0
 UNIVERSAL=0
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/build.sh [--debug|--release] [--clean] [--universal]
-                        [--derived-data PATH]
+                        [--derived-data PATH] [--output-dir PATH]
 
 Build Dogear without requiring a signing identity. --universal builds arm64
-and x86_64 slices and is intended for release candidates.
+and x86_64 slices and is intended for release candidates. The final app is
+written to build/<Configuration>/Dogear.app by default. --output-dir changes
+that final app directory; --derived-data changes only Xcode's intermediates.
 USAGE
 }
 
@@ -26,6 +29,11 @@ while [[ $# -gt 0 ]]; do
     --derived-data)
       [[ $# -ge 2 ]] || { echo "error: --derived-data requires a path" >&2; exit 2; }
       DERIVED_DATA_PATH="$2"
+      shift
+      ;;
+    --output-dir)
+      [[ $# -ge 2 ]] || { echo "error: --output-dir requires a path" >&2; exit 2; }
+      OUTPUT_DIR="$2"
       shift
       ;;
     -h|--help) usage; exit 0 ;;
@@ -70,9 +78,15 @@ if [[ "$CLEAN" -eq 1 ]]; then
 fi
 xcodebuild "${arguments[@]}" build
 
-app="$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION/Dogear.app"
+built_app="$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION/Dogear.app"
+built_executable="$built_app/Contents/MacOS/Dogear"
+[[ -x "$built_executable" ]] || { echo "error: missing app executable: $built_executable" >&2; exit 1; }
+
+mkdir -p "$OUTPUT_DIR"
+app="$OUTPUT_DIR/Dogear.app"
+rm -rf "$app"
+ditto "$built_app" "$app"
 executable="$app/Contents/MacOS/Dogear"
-[[ -x "$executable" ]] || { echo "error: missing app executable: $executable" >&2; exit 1; }
 
 minimum="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")"
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"

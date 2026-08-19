@@ -42,8 +42,10 @@ scripts/check-sensitive-info.sh
 scripts/build.sh --debug
 ```
 
-The app is written to `${TMPDIR:-/tmp}/DogearDerivedData/Build/Products/Debug/Dogear.app`.
-For a clean universal Release build:
+The Debug app is written to `build/Debug/Dogear.app`; a Release build is
+written to `build/Release/Dogear.app`. Xcode intermediates live in
+`build/DerivedData/`. Use `--output-dir PATH` to choose a different final app
+directory. For a clean universal Release build:
 
 ```bash
 scripts/build.sh --release --clean --universal
