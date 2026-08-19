@@ -267,6 +267,7 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var titleBarToolbar: some ToolbarContent {
+#if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             leadingTitleBarToolbarItems
                 .sharedBackgroundVisibility(.hidden)
@@ -276,6 +277,10 @@ struct ContentView: View {
             leadingTitleBarToolbarItems
             trailingTitleBarToolbarItem
         }
+#else
+        leadingTitleBarToolbarItems
+        trailingTitleBarToolbarItem
+#endif
     }
 
     @ToolbarContentBuilder
