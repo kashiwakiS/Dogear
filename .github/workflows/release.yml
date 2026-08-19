@@ -51,7 +51,12 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
-          gh release create "$TAG" "$RUNNER_TEMP/release-assets/v$version/"* \
+          release_dir="$RUNNER_TEMP/release-assets/v$version"
+          gh release create "$TAG" \
+            "$release_dir/Dogear-$version-macOS-universal-UNSIGNED.zip" \
+            "$release_dir/Dogear-$version-source.zip" \
+            "$release_dir/RELEASE-MANIFEST.txt" \
+            "$release_dir/SHA256SUMS" \
             --verify-tag \
             --title "Dogear $version" \
-            --notes "Dogear $version. This release includes a universal macOS package, source archive, and SHA-256 checksums. The app package is unsigned; build from source when you need a locally signed build."
+            --notes-file "$release_dir/RELEASE-NOTES.md"

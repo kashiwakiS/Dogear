@@ -28,6 +28,16 @@ source_status="$(awk -F= '/status=/{print $2}' .release-source)"
   exit 1
 }
 
+release_notes="$ROOT/RELEASE-NOTES.md"
+[[ -s "$release_notes" ]] || {
+  echo "error: add RELEASE-NOTES.md before packaging" >&2
+  exit 1
+}
+grep -q "^# Dogear $VERSION$" "$release_notes" || {
+  echo "error: RELEASE-NOTES.md must start with '# Dogear $VERSION'" >&2
+  exit 1
+}
+
 scripts/check-sensitive-info.sh
 scripts/check-sensitive-info.sh --history
 
@@ -51,6 +61,7 @@ ditto -c -k --sequesterRsrc --keepParent \
   "$temporary/App/Dogear.app" \
   "$destination/$app_archive"
 git archive --format=zip --prefix="Dogear-$VERSION/" -o "$destination/$source_archive" HEAD
+install -m 0644 "$release_notes" "$destination/RELEASE-NOTES.md"
 
 (
   cd "$destination"
@@ -62,6 +73,7 @@ Dogear $VERSION
 Public commit: $(git rev-parse HEAD)
 Integration source: $(awk -F= '/source_commit=/{print $2}' .release-source)
 Architectures: $(lipo -archs "$temporary/App/Dogear.app/Contents/MacOS/Dogear")
+Release notes: RELEASE-NOTES.md
 Signing: not performed
 Notarization: not performed
 EOF
