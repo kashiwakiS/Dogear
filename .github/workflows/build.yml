@@ -38,14 +38,14 @@ jobs:
           scripts/check-sensitive-info.sh --history
 
       - name: Build Debug
-        run: scripts/build.sh --debug --derived-data "$RUNNER_TEMP/DogearDebug"
+        run: scripts/build.sh --debug --derived-data "$RUNNER_TEMP/DogearDebugDerivedData" --output-dir "$RUNNER_TEMP/DogearDebug"
 
       - name: Build universal Release
-        run: scripts/build.sh --release --universal --derived-data "$RUNNER_TEMP/DogearRelease"
+        run: scripts/build.sh --release --universal --derived-data "$RUNNER_TEMP/DogearReleaseDerivedData" --output-dir "$RUNNER_TEMP/DogearRelease"
 
       - name: Verify release metadata
         run: |
-          app="$RUNNER_TEMP/DogearRelease/Build/Products/Release/Dogear.app"
+          app="$RUNNER_TEMP/DogearRelease/Dogear.app"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$app/Contents/Info.plist")" = "Dogear"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = "14.0"
           test "$(lipo -archs "$app/Contents/MacOS/Dogear")" = "x86_64 arm64" -o \

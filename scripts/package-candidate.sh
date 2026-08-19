@@ -21,13 +21,15 @@ temporary="$(mktemp -d "${TMPDIR:-/tmp}/DogearPackage.XXXXXX")"
 trap 'rm -rf "$temporary"' EXIT
 
 scripts/verify-release.sh
-scripts/build.sh --release --clean --universal --derived-data "$temporary/DerivedData"
+scripts/build.sh --release --clean --universal \
+  --derived-data "$temporary/DerivedData" \
+  --output-dir "$temporary/App"
 mkdir -p "$destination"
 
 app_archive="Dogear-$VERSION-macOS-universal-UNSIGNED.zip"
 source_archive="Dogear-$VERSION-source.zip"
 ditto -c -k --sequesterRsrc --keepParent \
-  "$temporary/DerivedData/Build/Products/Release/Dogear.app" \
+  "$temporary/App/Dogear.app" \
   "$destination/$app_archive"
 git archive --format=zip --prefix="Dogear-$VERSION/" -o "$destination/$source_archive" HEAD
 
@@ -40,7 +42,7 @@ cat > "$destination/RELEASE-MANIFEST.txt" <<EOF
 Dogear $VERSION release candidate
 Public commit: $(git rev-parse HEAD)
 Integration source: $(awk -F= '/source_commit=/{print $2}' .release-source)
-Architectures: $(lipo -archs "$temporary/DerivedData/Build/Products/Release/Dogear.app/Contents/MacOS/Dogear")
+Architectures: $(lipo -archs "$temporary/App/Dogear.app/Contents/MacOS/Dogear")
 Signing: unsigned candidate
 Notarization: not performed
 
