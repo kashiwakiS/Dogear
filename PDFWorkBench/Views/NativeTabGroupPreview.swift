@@ -39,7 +39,7 @@ final class NativeTabGroupPreviewController {
     private var hostingController: NSHostingController<NativeTabGroupPreviewView>?
     private var context = NativeTabPreviewContext(
         documentTitle: "No PDF Open",
-        groupName: "Ungrouped",
+        groupName: L10n.string(LibraryGroup.ungroupedLocalizationKey),
         pageDescription: nil,
         hasWorkingCopy: false,
         items: []

@@ -1,44 +1,42 @@
-# Dogear 0.1.2
+# Dogear 0.1.3
 
-发布日期：2026-08-19  
-版本：0.1.2（Build 3）
+发布日期：2026-08-20
+版本：0.1.3（Build 4）
 
 ## 中文
 
 ### 主要内容
 
-- 完成 macOS 原生 PDF 阅读工作流：PDFKit 阅读、页面导航、缩放和多种阅读布局。
-- 支持标准 PDF 高亮、FreeText 备注、批注搜索、批注导航和 Markdown 导出。
-- 提供本地资料库、群组、原生标签页预览、工作副本和安全的页面整理/导出流程。
-- 增加 Dog-ear 页面标记、文档大纲导航、夜间显示和安静链接展示。
-- 提供英文和简体中文界面，以及可选的 OpenAI-compatible 阅读助手；未配置 AI 时仍可使用确定性本地功能。
-- 修复发布构建输出位置：默认应用位于 `build/Debug/Dogear.app` 或 `build/Release/Dogear.app`，中间文件位于 `build/DerivedData/`。
-- 发布流程现在生成通用 `x86_64`/`arm64` 应用包、源码包和 SHA-256 校验文件。
+- 补全 Library 管理：可重命名、归档/恢复和删除 Group，也可只移除 Library 记录而保留原始 PDF 与应用工作副本。
+- 同一 Group 的多个窗口现在使用独立会话，临时打开文件和当前选择不会再互相覆盖。
+- 修复文件与文件夹拖放的接收结果，提升导入流程的稳定性。
+- 修复强制英文界面仍出现“未分组”“第 N 页”或中文菜单的问题；菜单重建时不再短暂闪回系统语言。
+- 右侧栏的 Full Text、Dog-ears、Annotations、Document Summary 和 Ask About Selection 现在支持带动画的折叠/展开，并在空间不足时自动收起较早展开的区域。
+- 隐藏尚未定稿的 Library Info 面板，并将 Ask About Selection 的 Send 按钮移到输入框下方。
 
 ### 要求与限制
 
 - 运行要求：macOS 14.0 或更高版本。
-- 应用包为未签名、未公证构建；首次打开时可能需要在 macOS 中确认。
+- 最终发行包将使用作者个人 Apple Developer 账号签名；签名状态以最终包验证结果为准。
 - AI 功能默认关闭，需要用户自行配置 OpenAI-compatible 提供商；PDF 上传范围以应用中的确认流程为准。
-- 本版本不包含 OCR、表单填写、签名、云同步、账户/订阅或完整 PDF 内容编辑。
-- 发布验证包含源码扫描、Debug 构建、通用 Release 构建、应用元数据和校验和检查；原生 UI、多窗口和 macOS 14 运行时仍需人工烟测。
+- 本版本不包含 OCR、表单填写、PDF 数字签名、云同步、账户/订阅或完整 PDF 内容编辑。
+- 发布验证包含源码扫描、Debug 构建、通用 Release 构建、应用元数据、签名和校验和检查；原生 UI、多窗口和 macOS 14 运行时仍需人工烟测。
 
 ## English
 
 ### Highlights
 
-- Native macOS PDF reading with PDFKit, page navigation, zoom, and multiple reading layouts.
-- Standard PDF highlights, FreeText notes, annotation search/navigation, and Markdown export.
-- Local Library and Groups, native tab previews, app-managed working copies, and safe page organization/export flows.
-- Dog-ear page markers, document-outline navigation, night display, and quiet link presentation.
-- English and Simplified Chinese interfaces, plus an optional OpenAI-compatible reading assistant with deterministic local behavior when no provider is configured.
-- Predictable build output: `build/Debug/Dogear.app` and `build/Release/Dogear.app`; intermediate files live under `build/DerivedData/`.
-- Universal `x86_64`/`arm64` application archive, source archive, and SHA-256 checksums.
+- Complete Library management with Group rename, archive/restore, and delete actions, plus removal of Library records without deleting original PDFs or app-managed working copies.
+- Independent window sessions for the same Group, so temporary files and current selection no longer overwrite one another across windows.
+- More reliable file and folder imports through corrected drop acceptance handling.
+- Correct forced-English rendering for Ungrouped, default Dog-ear page names, and rebuilt application menus without brief system-language flashes.
+- Animated expand/collapse behavior for Full Text, Dog-ears, Annotations, Document Summary, and Ask About Selection, with automatic space-aware collapse of older sections.
+- The unfinished Library Info panel is hidden, and the Ask About Selection Send button now sits below the input field.
 
 ### Requirements and limitations
 
 - Requires macOS 14.0 or later.
-- The distributed app is unsigned and not notarized; macOS may require confirmation on first launch.
+- The final distribution package will be signed with the author's personal Apple Developer account; the final status will follow package verification.
 - AI is opt-in and requires a user-configured OpenAI-compatible provider.
-- OCR, form filling, signatures, cloud sync, accounts/subscriptions, and full PDF content editing are outside this MVP.
-- Release verification covers source scans, Debug and universal Release builds, app metadata, and checksums. Native UI, multi-window behavior, and macOS 14 runtime smoke testing remain manual gates.
+- OCR, form filling, PDF digital signatures, cloud sync, accounts/subscriptions, and full PDF content editing are outside this MVP.
+- Release verification covers source scans, Debug and universal Release builds, app metadata, signing, and checksums. Native UI, multi-window behavior, and macOS 14 runtime smoke testing remain manual gates.

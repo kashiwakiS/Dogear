@@ -29,8 +29,10 @@ struct DogearMarker: Identifiable, Codable, Equatable {
 
     var pageNumber: Int { pageIndex + 1 }
 
-    var displayTitle: String {
-        isDefaultTitle ? L10n.string("Page \(pageNumber)") : title
+    func displayTitle(language: AppLanguage) -> String {
+        isDefaultTitle
+            ? L10n.string("Page \(pageNumber)", language: language)
+            : title
     }
 
     private var isDefaultTitle: Bool {

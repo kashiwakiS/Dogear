@@ -5,44 +5,148 @@ struct ReaderSidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
     @ObservedObject var aiStore: AIReadingStore
 
+    @State private var expandedSections: Set<ReaderSidebarSection> = [
+        .annotations,
+        .askSelection
+    ]
+    @State private var expansionOrder: [ReaderSidebarSection] = [
+        .annotations,
+        .askSelection
+    ]
+
     var body: some View {
-        VStack(spacing: 0) {
-            AnnotationSidebarView(documentStore: documentStore)
-                .frame(maxHeight: .infinity)
+        GeometryReader { geometry in
+            let availableHeight = max(1, geometry.size.height)
+            let layout = ReaderSidebarLayout(
+                expandedSections: expandedSections
+            )
 
-            Divider()
+            VStack(spacing: 0) {
+                AnnotationSidebarView(
+                    documentStore: documentStore,
+                    layout: layout,
+                    expandedSections: expandedSections,
+                    onToggleSection: {
+                        toggle($0, availableHeight: availableHeight)
+                    }
+                )
 
-            AISidebarView(documentStore: documentStore, aiStore: aiStore)
-                .frame(maxHeight: .infinity)
+                AISidebarView(
+                    documentStore: documentStore,
+                    aiStore: aiStore,
+                    layout: layout,
+                    expandedSections: expandedSections,
+                    onToggleSection: {
+                        toggle($0, availableHeight: availableHeight)
+                    }
+                )
+            }
+            .onAppear {
+                enforceExpansionCapacity(availableHeight: availableHeight)
+            }
+            .onChange(of: geometry.size.height) { _, newHeight in
+                enforceExpansionCapacity(availableHeight: max(1, newHeight))
+            }
         }
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func toggle(
+        _ section: ReaderSidebarSection,
+        availableHeight: CGFloat
+    ) {
+        withAnimation(.easeInOut(duration: 0.22)) {
+            if expandedSections.remove(section) != nil {
+                expansionOrder.removeAll { $0 == section }
+                return
+            }
+
+            expandedSections.insert(section)
+            expansionOrder.removeAll { $0 == section }
+            expansionOrder.append(section)
+            trimExpandedSections(
+                to: ReaderSidebarLayout.maximumExpandedSectionCount(
+                    for: availableHeight
+                ),
+                preserving: section
+            )
+        }
+    }
+
+    private func enforceExpansionCapacity(availableHeight: CGFloat) {
+        withAnimation(.easeInOut(duration: 0.22)) {
+            trimExpandedSections(
+                to: ReaderSidebarLayout.maximumExpandedSectionCount(
+                    for: availableHeight
+                ),
+                preserving: expansionOrder.last
+            )
+        }
+    }
+
+    private func trimExpandedSections(
+        to maximumCount: Int,
+        preserving preservedSection: ReaderSidebarSection?
+    ) {
+        while expandedSections.count > maximumCount {
+            guard let sectionToCollapse = expansionOrder.first(where: {
+                $0 != preservedSection && expandedSections.contains($0)
+            }) else {
+                break
+            }
+            expandedSections.remove(sectionToCollapse)
+            expansionOrder.removeAll { $0 == sectionToCollapse }
+        }
     }
 }
 
 private struct AISidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
     @ObservedObject var aiStore: AIReadingStore
+    let layout: ReaderSidebarLayout
+    let expandedSections: Set<ReaderSidebarSection>
+    let onToggleSection: (ReaderSidebarSection) -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+        VStack(spacing: 0) {
+            expandableSection(.documentSummary) {
                 summarySection
-                Divider()
-                questionSection
-
-                if let pending = aiStore.pendingRequest {
-                    Divider()
-                    requestPreview(pending)
-                }
-
-                if let error = aiStore.errorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .textSelection(.enabled)
-                }
             }
-            .padding(12)
+
+            ExpandableSidebarSection(
+                section: .askSelection,
+                isExpanded: expandedSections.contains(.askSelection),
+                height: layout.height(for: .askSelection),
+                onToggle: { onToggleSection(.askSelection) },
+                accessory: {
+                    if aiStore.capturedSelection != nil {
+                        Button("Use New Selection") {
+                            aiStore.useNewSelection(from: documentStore)
+                        }
+                        .font(.caption)
+                    }
+                },
+                content: {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            questionSection
+
+                            if let pending = aiStore.pendingRequest {
+                                Divider()
+                                requestPreview(pending)
+                            }
+
+                            if let error = aiStore.errorMessage {
+                                Label(error, systemImage: "exclamationmark.triangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            )
         }
         .overlay {
             if aiStore.isPreparing
@@ -59,43 +163,44 @@ private struct AISidebarView: View {
         }
     }
 
+    private func expandableSection<Content: View>(
+        _ section: ReaderSidebarSection,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        ExpandableSidebarSection(
+            section: section,
+            isExpanded: expandedSections.contains(section),
+            height: layout.height(for: section),
+            onToggle: { onToggleSection(section) },
+            content: content
+        )
+    }
+
     private var summarySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Document Summary")
-                .font(.headline)
-
-            Button("Review Complete-PDF Summary") {
-                aiStore.prepareDocumentSummary(from: documentStore)
-            }
-            .disabled(documentStore.document == nil || aiStore.isPreparing || aiStore.isRunning)
-
-            if !aiStore.summaryMarkdown.isEmpty {
-                markdownText(aiStore.summaryMarkdown)
-                    .textSelection(.enabled)
-
-                Button("Copy Summary") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(aiStore.summaryMarkdown, forType: .string)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Review Complete-PDF Summary") {
+                    aiStore.prepareDocumentSummary(from: documentStore)
                 }
-                .font(.caption)
+                .disabled(documentStore.document == nil || aiStore.isPreparing || aiStore.isRunning)
+
+                if !aiStore.summaryMarkdown.isEmpty {
+                    markdownText(aiStore.summaryMarkdown)
+                        .textSelection(.enabled)
+
+                    Button("Copy Summary") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(aiStore.summaryMarkdown, forType: .string)
+                    }
+                    .font(.caption)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var questionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Ask About Selection")
-                    .font(.headline)
-                Spacer()
-                if aiStore.capturedSelection != nil {
-                    Button("Use New Selection") {
-                        aiStore.useNewSelection(from: documentStore)
-                    }
-                    .font(.caption)
-                }
-            }
-
             if let context = aiStore.capturedSelection {
                 Text("Using \(context.characterCount) characters from page(s) \(pageDescription(context.pageNumbers)).")
                     .font(.caption)
@@ -136,7 +241,7 @@ private struct AISidebarView: View {
                 }
             }
 
-            HStack(alignment: .bottom, spacing: 7) {
+            VStack(alignment: .trailing, spacing: 7) {
                 TextField("Ask a question...", text: $aiStore.questionText, axis: .vertical)
                     .lineLimit(2...5)
                     .textFieldStyle(.roundedBorder)

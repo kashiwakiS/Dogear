@@ -1,0 +1,12 @@
+/*
+ English source-language fallback for Dogear's in-app language override.
+
+ The string catalog emits translated zh-Hans resources, while English normally
+ falls back to source keys. Keeping an explicit English localization table lets
+ the app force English even when macOS itself prefers Chinese.
+ */
+
+"Ungrouped" = "Ungrouped";
+"Page %lld" = "Page %lld";
+"%@ — Page %lld" = "%1$@ — Page %2$lld";
+"Page %lld, level %lld" = "Page %1$lld, level %2$lld";

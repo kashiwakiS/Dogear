@@ -2,20 +2,47 @@ import SwiftUI
 
 struct AnnotationSidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
+    let layout: ReaderSidebarLayout
+    let expandedSections: Set<ReaderSidebarSection>
+    let onToggleSection: (ReaderSidebarSection) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            documentSearchSection
+        VStack(spacing: 0) {
+            expandableSection(.fullText) {
+                documentSearchSection
+            }
 
-            Divider()
+            ExpandableSidebarSection(
+                section: .dogears,
+                isExpanded: expandedSections.contains(.dogears),
+                height: layout.height(for: .dogears),
+                onToggle: { onToggleSection(.dogears) },
+                accessory: {
+                    Button {
+                        documentStore.toggleDogearOnCurrentPage(trigger: .pointer)
+                    } label: {
+                        Image(systemName: documentStore.currentPageDogear == nil
+                            ? "bookmark.circle"
+                            : "bookmark.slash")
+                    }
+                    .disabled(documentStore.document == nil)
+                    .help(documentStore.currentPageDogear == nil
+                        ? "Add Dog-ear to Current Page"
+                        : "Remove Dog-ear from Current Page")
+                },
+                content: {
+                    dogearSection
+                }
+            )
 
-            dogearSection
+            expandableSection(.annotations) {
+                annotationSection
+            }
+        }
+    }
 
-            Divider()
-
-            Text("Annotations")
-                .font(.headline)
-
+    private var annotationSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
             TextField("Search highlights and notes", text: $documentStore.searchText)
                 .textFieldStyle(.roundedBorder)
 
@@ -81,30 +108,11 @@ struct AnnotationSidebarView: View {
                 .listStyle(.inset)
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     private var dogearSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Dog-ears")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    documentStore.toggleDogearOnCurrentPage(trigger: .pointer)
-                } label: {
-                    Image(systemName: documentStore.currentPageDogear == nil
-                        ? "bookmark.circle"
-                        : "bookmark.slash")
-                }
-                .disabled(documentStore.document == nil)
-                .help(documentStore.currentPageDogear == nil
-                    ? "Add Dog-ear to Current Page"
-                    : "Remove Dog-ear from Current Page")
-            }
-
             if documentStore.dogears.isEmpty {
                 Text("Press D to add an index marker to the current page.")
                     .font(.caption)
@@ -126,16 +134,13 @@ struct AnnotationSidebarView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 150)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var documentSearchSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Full Text")
-                .font(.headline)
-
             TextField("Search document text", text: $documentStore.documentSearchText)
                 .textFieldStyle(.roundedBorder)
 
@@ -176,9 +181,22 @@ struct AnnotationSidebarView: View {
                     .buttonStyle(.plain)
                 }
                 .listStyle(.inset)
-                .frame(minHeight: 120, maxHeight: 220)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func expandableSection<Content: View>(
+        _ section: ReaderSidebarSection,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        ExpandableSidebarSection(
+            section: section,
+            isExpanded: expandedSections.contains(section),
+            height: layout.height(for: section),
+            onToggle: { onToggleSection(section) },
+            content: content
+        )
     }
 }
 
@@ -191,7 +209,7 @@ private struct DogearIndexRow: View {
     let onMove: (Int) -> Void
     let onRemove: () -> Void
 
-    @Environment(\.locale) private var locale
+    @ObservedObject private var languageStore = AppLanguageStore.shared
     @State private var title: String
     @FocusState private var isTitleFocused: Bool
 
@@ -211,7 +229,7 @@ private struct DogearIndexRow: View {
         self.onRename = onRename
         self.onMove = onMove
         self.onRemove = onRemove
-        _title = State(initialValue: marker.displayTitle)
+        _title = State(initialValue: marker.title)
     }
 
     var body: some View {
@@ -228,8 +246,13 @@ private struct DogearIndexRow: View {
                 .textFieldStyle(.plain)
                 .focused($isTitleFocused)
                 .onSubmit { onRename(title) }
-                .onChange(of: marker.title) { _, _ in title = marker.displayTitle }
-                .onChange(of: locale) { _, _ in title = marker.displayTitle }
+                .onAppear { title = marker.displayTitle(language: languageStore.selection) }
+                .onChange(of: marker.title) { _, _ in
+                    title = marker.displayTitle(language: languageStore.selection)
+                }
+                .onChange(of: languageStore.selection) { _, newLanguage in
+                    title = marker.displayTitle(language: newLanguage)
+                }
                 .onChange(of: isTitleFocused) { wasFocused, isFocused in
                     if wasFocused && !isFocused {
                         onRename(title)

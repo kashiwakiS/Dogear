@@ -13,12 +13,20 @@ struct ContentView: View {
     @ObservedObject private var externalPDFOpenCoordinator = ExternalPDFOpenCoordinator.shared
     @ObservedObject var libraryStore: LibraryStore
     let initialGroupID: UUID?
+    let initialSessionID: UUID?
 
     @Environment(\.openWindow) private var openWindow
     @State private var activeGroupID: UUID
+    @State private var windowSessionID: UUID
     @State private var didOpenLaunchArgument = false
     @State private var didApplyInitialGroup = false
     @State private var isShowingNewGroupSheet = false
+    @State private var isShowingRenameGroupSheet = false
+    @State private var isShowingDeleteGroupConfirmation = false
+    @State private var isShowingRemoveLibraryItemConfirmation = false
+    @State private var groupPendingRename: LibraryGroup?
+    @State private var groupPendingDeletion: LibraryGroup?
+    @State private var libraryItemPendingRemoval: LibraryItem?
     @State private var isShowingPageOrganizer = false
     @State private var isLibraryNavigatorVisible = false
     @State private var annotationSidebarState = WindowAnnotationSidebarState()
@@ -54,7 +62,11 @@ struct ContentView: View {
         nonmutating set { annotationSidebarState.width = newValue }
     }
 
-    init(libraryStore: LibraryStore, initialGroupID: UUID? = nil) {
+    init(
+        libraryStore: LibraryStore,
+        initialGroupID: UUID? = nil,
+        initialSessionID: UUID? = nil
+    ) {
         let feedbackCenter = OperationFeedbackCenter()
         _feedbackCenter = StateObject(wrappedValue: feedbackCenter)
         _documentStore = StateObject(
@@ -63,7 +75,9 @@ struct ContentView: View {
         _aiReadingStore = StateObject(wrappedValue: AIReadingStore())
         self.libraryStore = libraryStore
         self.initialGroupID = initialGroupID
+        self.initialSessionID = initialSessionID
         _activeGroupID = State(initialValue: initialGroupID ?? libraryStore.initialWindowGroupID)
+        _windowSessionID = State(initialValue: initialSessionID ?? UUID())
     }
 
     var body: some View {
@@ -131,9 +145,38 @@ struct ContentView: View {
             titleBarToolbar
         }
         .sheet(isPresented: $isShowingNewGroupSheet) {
-            NewGroupSheet(groupName: $newGroupName) {
+            GroupNameSheet(title: "New Group", actionTitle: "Create", groupName: $newGroupName) {
                 createGroupFromSheet()
             }
+        }
+        .sheet(isPresented: $isShowingRenameGroupSheet) {
+            GroupNameSheet(title: "Rename Group", actionTitle: "Rename", groupName: $newGroupName) {
+                renameGroupFromSheet()
+            }
+        }
+        .confirmationDialog(
+            "Delete Group",
+            isPresented: $isShowingDeleteGroupConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                deletePendingGroup()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(deleteGroupConfirmationMessage)
+        }
+        .confirmationDialog(
+            "Remove from Library",
+            isPresented: $isShowingRemoveLibraryItemConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                removePendingLibraryItem()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(removeLibraryItemConfirmationMessage)
         }
         .sheet(isPresented: $isShowingPageOrganizer) {
             PageOrganizerView(documentStore: documentStore)
@@ -168,7 +211,7 @@ struct ContentView: View {
             )
         }
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-            FileDropSupport.loadFileURLs(from: providers) { urls in
+            return FileDropSupport.loadFileURLs(from: providers) { urls in
                 importURLs(urls, destination: .currentWindow)
             }
         }
@@ -178,12 +221,17 @@ struct ContentView: View {
         LibrarySidebarView(
             libraryStore: libraryStore,
             selectedGroupID: activeGroupID,
+            sessionID: windowSessionID,
             selectedURL: documentStore.selectedPDFURL,
             currentWorkingCopyURL: documentStore.currentWorkingCopyURL,
             onSelectGroup: selectGroup,
             onCreateGroup: showNewGroupSheet,
+            onRenameGroup: showRenameGroupSheet,
+            onDeleteGroup: requestDeleteGroup,
+            onSetGroupArchived: setGroupArchived,
             onOpenGroupInNewWindow: openGroupInNewWindow,
             onOpen: openLibraryItem,
+            onRemoveFromLibrary: requestRemoveFromLibrary,
             onDiscardAllChanges: discardAllChanges,
             onImportURLsToGroup: { urls, group in
                 importURLs(urls, destination: .group(group.id))
@@ -1086,7 +1134,11 @@ struct ContentView: View {
             return
         }
 
-        let item = libraryStore.upsertOpenedURL(url, groupID: activeGroupID)
+        let item = libraryStore.upsertOpenedURL(
+            url,
+            groupID: activeGroupID,
+            sessionID: windowSessionID
+        )
         documentStore.bindLibraryFile(item.id)
         libraryStore.updateWorkingCopyURL(documentStore.currentWorkingCopyURL, for: item)
     }
@@ -1133,20 +1185,27 @@ struct ContentView: View {
             }
 
             for url in pdfURLs {
-                let item = libraryStore.upsertOpenedURL(url, groupID: nil)
+                let item = libraryStore.upsertOpenedURL(
+                    url,
+                    groupID: nil,
+                    sessionID: windowSessionID
+                )
                 libraryStore.addFile(item.id, to: group.id)
-                libraryStore.recordOpenedFile(item.id, in: group.id)
+                libraryStore.recordOpenedFile(item.id, in: group.id, sessionID: windowSessionID)
             }
 
             activeGroupID = group.id
-            if let firstItem = libraryStore.filesForWindow(in: group.id).first {
+            if let firstItem = libraryStore.filesForWindow(
+                in: group.id,
+                sessionID: windowSessionID
+            ).first {
                 openLibraryItem(firstItem)
             }
 
             postFeedback(
                 pdfURLs.isEmpty
-                    ? "Created group \(group.name). No PDFs were found in the folder."
-                    : "Imported \(pdfURLs.count) PDF\(pdfURLs.count == 1 ? "" : "s") into group \(group.name).",
+                    ? "Created group \(group.localizedName). No PDFs were found in the folder."
+                    : "Imported \(pdfURLs.count) PDF\(pdfURLs.count == 1 ? "" : "s") into group \(group.localizedName).",
                 kind: pdfURLs.isEmpty ? .warning : .success,
                 action: "Import Folder",
                 trigger: .pointer
@@ -1161,8 +1220,12 @@ struct ContentView: View {
 
         var importedItems: [LibraryItem] = []
         for url in urls {
-            let item = libraryStore.upsertOpenedURL(url, groupID: nil)
-            libraryStore.recordOpenedFile(item.id, in: groupID)
+            let item = libraryStore.upsertOpenedURL(
+                url,
+                groupID: nil,
+                sessionID: windowSessionID
+            )
+            libraryStore.recordOpenedFile(item.id, in: groupID, sessionID: windowSessionID)
             importedItems.append(item)
         }
 
@@ -1172,7 +1235,7 @@ struct ContentView: View {
         }
 
         postFeedback(
-            "Opened \(importedItems.count) PDF\(importedItems.count == 1 ? "" : "s") in \(libraryStore.group(withID: groupID)?.name ?? "this Group").",
+            "Opened \(importedItems.count) PDF\(importedItems.count == 1 ? "" : "s") in \(libraryStore.group(withID: groupID)?.localizedName ?? "this Group").",
             kind: .success,
             action: "Open PDFs"
         )
@@ -1184,16 +1247,20 @@ struct ContentView: View {
         }
 
         for url in urls {
-            let item = libraryStore.upsertOpenedURL(url, groupID: nil)
+            let item = libraryStore.upsertOpenedURL(
+                url,
+                groupID: nil,
+                sessionID: windowSessionID
+            )
             if group.id == LibraryGroup.ungroupedID {
-                libraryStore.recordOpenedFile(item.id, in: group.id)
+                libraryStore.recordOpenedFile(item.id, in: group.id, sessionID: windowSessionID)
             } else {
                 libraryStore.addFile(item.id, to: group.id)
             }
         }
 
         postFeedback(
-            "Imported \(urls.count) PDF\(urls.count == 1 ? "" : "s") into \(group.name).",
+            "Imported \(urls.count) PDF\(urls.count == 1 ? "" : "s") into \(group.localizedName).",
             kind: .success,
             action: "Import PDFs",
             trigger: .pointer
@@ -1227,7 +1294,7 @@ struct ContentView: View {
             documentStore.bindLibraryFile(item.id)
             libraryStore.refreshResolvedURL(url, for: item)
             libraryStore.updateWorkingCopyURL(documentStore.currentWorkingCopyURL, for: item)
-            libraryStore.recordOpenedFile(item.id, in: groupID)
+            libraryStore.recordOpenedFile(item.id, in: groupID, sessionID: windowSessionID)
             return
         }
 
@@ -1241,7 +1308,10 @@ struct ContentView: View {
     }
 
     private var nativeTabPreviewContext: NativeTabPreviewContext {
-        let items = libraryStore.filesForWindow(in: activeGroupID)
+        let items = libraryStore.filesForWindow(
+            in: activeGroupID,
+            sessionID: windowSessionID
+        )
         let duplicateNames = Set(
             Dictionary(grouping: items, by: { $0.displayName.lowercased() })
                 .filter { $0.value.count > 1 }
@@ -1252,13 +1322,18 @@ struct ContentView: View {
             documentTitle: documentStore.document == nil
                 ? "No PDF Open"
                 : documentStore.selectedDocumentName,
-            groupName: libraryStore.group(withID: activeGroupID)?.name ?? "Ungrouped",
+            groupName: libraryStore.group(withID: activeGroupID)?.localizedName
+                ?? L10n.string(LibraryGroup.ungroupedLocalizationKey),
             pageDescription: documentStore.pageCount > 0
                 ? "Page \(documentStore.currentPageNumber) of \(documentStore.pageCount)"
                 : nil,
             hasWorkingCopy: documentStore.currentWorkingCopyURL != nil,
             items: items.map { item in
-                let isTemporary = libraryStore.isTemporaryFile(item, in: activeGroupID)
+                let isTemporary = libraryStore.isTemporaryFile(
+                    item,
+                    in: activeGroupID,
+                    sessionID: windowSessionID
+                )
                 let isUnavailable = item.isUnavailable
                     || (item.bookmarkData == nil
                         && !FileManager.default.fileExists(atPath: item.path))
@@ -1432,6 +1507,10 @@ struct ContentView: View {
         }
     }
 
+    private func revealInFinder(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
     private func suggestedDiscardSaveAsName(for item: LibraryItem) -> String {
         let baseName = item.url.deletingPathExtension().lastPathComponent
         return "\(baseName)-working-copy.pdf"
@@ -1457,7 +1536,12 @@ struct ContentView: View {
             workingCopyURL: existingItem?.workingCopyURL,
             trigger: .system
         ) {
-            let item = libraryStore.upsertOpenedURL(url, refreshBookmark: false, groupID: nil)
+            let item = libraryStore.upsertOpenedURL(
+                url,
+                refreshBookmark: false,
+                groupID: nil,
+                sessionID: windowSessionID
+            )
             documentStore.bindLibraryFile(item.id)
             libraryStore.updateWorkingCopyURL(documentStore.currentWorkingCopyURL, for: item)
         }
@@ -1496,7 +1580,10 @@ struct ContentView: View {
 
         activeGroupID = targetGroupID
 
-        if let session = libraryStore.openSession(for: targetGroupID),
+        if let session = libraryStore.openSession(
+            for: targetGroupID,
+            sessionID: windowSessionID
+        ),
            let selectedFileID = session.selectedFileID,
            let file = libraryStore.state.files.first(where: { $0.id == selectedFileID }) {
             openLibraryItem(file)
@@ -1555,6 +1642,109 @@ struct ContentView: View {
             activeGroupID = group.id
         }
         isShowingNewGroupSheet = false
+    }
+
+    private func showRenameGroupSheet(_ group: LibraryGroup) {
+        guard !group.isSystemGroup else {
+            return
+        }
+
+        groupPendingRename = group
+        newGroupName = group.name
+        isShowingRenameGroupSheet = true
+    }
+
+    private func renameGroupFromSheet() {
+        guard let group = groupPendingRename else {
+            isShowingRenameGroupSheet = false
+            return
+        }
+
+        if !libraryStore.renameGroup(group, to: newGroupName) {
+            postFeedback(
+                "Group name is empty or already in use.",
+                kind: .warning,
+                action: "Rename Group",
+                trigger: .pointer
+            )
+        }
+
+        groupPendingRename = nil
+        isShowingRenameGroupSheet = false
+    }
+
+    private func requestDeleteGroup(_ group: LibraryGroup) {
+        guard !group.isSystemGroup else {
+            return
+        }
+
+        groupPendingDeletion = group
+        isShowingDeleteGroupConfirmation = true
+    }
+
+    private func deletePendingGroup() {
+        guard let group = groupPendingDeletion else {
+            isShowingDeleteGroupConfirmation = false
+            return
+        }
+
+        if libraryStore.deleteGroup(group), activeGroupID == group.id {
+            activeGroupID = LibraryGroup.ungroupedID
+        }
+
+        groupPendingDeletion = nil
+        isShowingDeleteGroupConfirmation = false
+    }
+
+    private func setGroupArchived(_ group: LibraryGroup, _ archived: Bool) {
+        guard libraryStore.setGroupArchived(group, archived: archived) else {
+            return
+        }
+
+        if archived, activeGroupID == group.id {
+            activeGroupID = LibraryGroup.ungroupedID
+        }
+    }
+
+    private func requestRemoveFromLibrary(_ item: LibraryItem) {
+        libraryItemPendingRemoval = item
+        isShowingRemoveLibraryItemConfirmation = true
+    }
+
+    private func removePendingLibraryItem() {
+        guard let item = libraryItemPendingRemoval else {
+            isShowingRemoveLibraryItemConfirmation = false
+            return
+        }
+
+        if libraryStore.remove(item) {
+            postFeedback(
+                "Removed \(item.displayName) from Library. Original and working-copy files were kept.",
+                kind: .success,
+                action: "Remove from Library",
+                trigger: .pointer
+            )
+        }
+
+        libraryItemPendingRemoval = nil
+        isShowingRemoveLibraryItemConfirmation = false
+    }
+
+    private var deleteGroupConfirmationMessage: String {
+        let ungroupedName = L10n.string(LibraryGroup.ungroupedLocalizationKey)
+        guard let group = groupPendingDeletion else {
+            return "The group's files will remain in Library and appear under \(ungroupedName) when no other group contains them."
+        }
+
+        return "Delete \(group.localizedName)? Files will remain in Library and appear under \(ungroupedName) when no other group contains them."
+    }
+
+    private var removeLibraryItemConfirmationMessage: String {
+        guard let item = libraryItemPendingRemoval else {
+            return "This removes only the Library record. Files on disk will not be deleted."
+        }
+
+        return "Remove \(item.displayName) from Library? The original PDF and any working copy will be kept on disk."
     }
 
     private func selectGroup(_ group: LibraryGroup) {
@@ -2156,14 +2346,16 @@ private final class HostingWindowAccessorView: NSView {
     }
 }
 
-private struct NewGroupSheet: View {
+private struct GroupNameSheet: View {
     @Environment(\.dismiss) private var dismiss
+    let title: String
+    let actionTitle: String
     @Binding var groupName: String
-    let onCreate: () -> Void
+    let onSubmit: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("New Group")
+            Text(title)
                 .font(.headline)
 
             TextField("Group name", text: $groupName)
@@ -2177,7 +2369,7 @@ private struct NewGroupSheet: View {
                     dismiss()
                 }
 
-                Button("Create") {
+                Button(actionTitle) {
                     createIfPossible()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -2193,7 +2385,7 @@ private struct NewGroupSheet: View {
             return
         }
 
-        onCreate()
+        onSubmit()
     }
 }
 

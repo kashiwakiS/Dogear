@@ -5,12 +5,17 @@ import CoreTransferable
 struct LibrarySidebarView: View {
     @ObservedObject var libraryStore: LibraryStore
     let selectedGroupID: UUID
+    let sessionID: UUID
     let selectedURL: URL?
     let currentWorkingCopyURL: URL?
     let onSelectGroup: (LibraryGroup) -> Void
     let onCreateGroup: () -> Void
+    let onRenameGroup: (LibraryGroup) -> Void
+    let onDeleteGroup: (LibraryGroup) -> Void
+    let onSetGroupArchived: (LibraryGroup, Bool) -> Void
     let onOpenGroupInNewWindow: (LibraryGroup) -> Void
     let onOpen: (LibraryItem, LibraryGroup) -> Void
+    let onRemoveFromLibrary: (LibraryItem) -> Void
     let onDiscardAllChanges: (LibraryItem) -> Void
     let onImportURLsToGroup: ([URL], LibraryGroup) -> Void
     let onImportURLsToCurrentWindow: ([URL]) -> Void
@@ -38,7 +43,7 @@ struct LibrarySidebarView: View {
             expandedGroupIDs.formUnion(addedIDs)
         }
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-            FileDropSupport.loadFileURLs(
+            return FileDropSupport.loadFileURLs(
                 from: providers,
                 completion: onImportURLsToCurrentWindow
             )
@@ -114,6 +119,7 @@ struct LibrarySidebarView: View {
                 toggleExpansion(of: group)
             }
         )
+        .opacity(group.isArchived ? 0.62 : 1)
         .contentShape(Rectangle())
         .onTapGesture {
             onSelectGroup(group)
@@ -124,6 +130,7 @@ struct LibrarySidebarView: View {
         .modifier(ModernGroupDragSourceModifier(group: group))
         .dropDestination(for: LibraryGroupDragItem.self) { items, _ in
             guard !group.isSystemGroup,
+                  !group.isArchived,
                   let source = items.first,
                   source.groupID != group.id
             else {
@@ -134,10 +141,12 @@ struct LibrarySidebarView: View {
             libraryStore.mergeGroupContents(from: source.groupID, into: group.id)
             return true
         } isTargeted: { isTargeted in
-            contentDropTargetGroupID = isTargeted && !group.isSystemGroup ? group.id : nil
+            contentDropTargetGroupID = isTargeted && !group.isSystemGroup && !group.isArchived
+                ? group.id
+                : nil
         }
         .dropDestination(for: LibraryFileDragItem.self) { items, _ in
-            guard !group.isSystemGroup, let source = items.first else {
+            guard !group.isSystemGroup, !group.isArchived, let source = items.first else {
                 contentDropTargetGroupID = nil
                 return false
             }
@@ -145,14 +154,18 @@ struct LibrarySidebarView: View {
             libraryStore.addFile(source.fileID, to: group.id)
             return true
         } isTargeted: { isTargeted in
-            if isTargeted && !group.isSystemGroup {
+            if isTargeted && !group.isSystemGroup && !group.isArchived {
                 contentDropTargetGroupID = group.id
             } else if contentDropTargetGroupID == group.id {
                 contentDropTargetGroupID = nil
             }
         }
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-            FileDropSupport.loadFileURLs(
+            guard !group.isArchived else {
+                return false
+            }
+
+            return FileDropSupport.loadFileURLs(
                 from: providers,
                 completion: { urls in onImportURLsToGroup(urls, group) }
             )
@@ -171,7 +184,11 @@ struct LibrarySidebarView: View {
             item: item,
             markerColor: duplicateGroupColor(for: item),
             isUnavailable: isUnavailable(item),
-            isTemporary: libraryStore.isTemporaryFile(item, in: group.id)
+            isTemporary: libraryStore.isTemporaryFile(
+                item,
+                in: group.id,
+                sessionID: sessionID
+            )
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -187,7 +204,9 @@ struct LibrarySidebarView: View {
                 fileDropTarget = nil
                 return false
             }
-            guard source.groupID == group.id || group.id != LibraryGroup.ungroupedID else {
+            guard source.groupID == group.id
+                || (group.id != LibraryGroup.ungroupedID && !group.isArchived)
+            else {
                 fileDropTarget = nil
                 return false
             }
@@ -198,6 +217,7 @@ struct LibrarySidebarView: View {
                 source.fileID,
                 relativeTo: item.id,
                 in: group.id,
+                sessionID: sessionID,
                 placeAfterTarget: location.y > 12
             )
             fileDropTarget = nil
@@ -265,7 +285,7 @@ struct LibrarySidebarView: View {
 
     private func displayedFiles(in group: LibraryGroup) -> [LibraryItem] {
         if group.id == selectedGroupID {
-            return libraryStore.filesForWindow(in: group.id)
+            return libraryStore.filesForWindow(in: group.id, sessionID: sessionID)
         }
 
         return libraryStore.files(in: group.id)
@@ -297,6 +317,14 @@ struct LibrarySidebarView: View {
             Button("Open Group in New Window") {
                 onOpenGroupInNewWindow(group)
             }
+
+            Button("Rename Group...") { onRenameGroup(group) }
+
+            Button(group.isArchived ? "Restore Group" : "Archive Group") {
+                onSetGroupArchived(group, !group.isArchived)
+            }
+
+            Button("Delete Group...", role: .destructive) { onDeleteGroup(group) }
         }
 
         Button("New Group...") {
@@ -306,10 +334,10 @@ struct LibrarySidebarView: View {
 
     @ViewBuilder
     private func fileContextMenu(for item: LibraryItem, in sourceGroup: LibraryGroup) -> some View {
-        if !libraryStore.userGroups.isEmpty {
+        if !libraryStore.activeUserGroups.isEmpty {
             Menu("Add to Group") {
-                ForEach(libraryStore.userGroups) { group in
-                    Button(group.name) {
+                    ForEach(libraryStore.activeUserGroups) { group in
+                    Button(group.localizedName) {
                         libraryStore.addFile(item, to: group)
                     }
                     .disabled(libraryStore.isFile(item, in: group))
@@ -317,8 +345,8 @@ struct LibrarySidebarView: View {
             }
 
             Menu("Move to Group") {
-                ForEach(libraryStore.userGroups) { group in
-                    Button(group.name) {
+                ForEach(libraryStore.activeUserGroups) { group in
+                    Button(group.localizedName) {
                         libraryStore.moveFile(
                             item,
                             to: group,
@@ -335,6 +363,10 @@ struct LibrarySidebarView: View {
             Button("Remove from This Group") {
                 libraryStore.removeFile(item, from: sourceGroup)
             }
+        }
+
+        Button("Remove from Library...", role: .destructive) {
+            onRemoveFromLibrary(item)
         }
 
         Divider()
@@ -391,6 +423,8 @@ private struct GroupRow: View {
     let isSelected: Bool
     let onToggleExpansion: () -> Void
 
+    @ObservedObject private var languageStore = AppLanguageStore.shared
+
     var body: some View {
         HStack(spacing: 7) {
             Button(action: onToggleExpansion) {
@@ -401,9 +435,9 @@ private struct GroupRow: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")
+            .help(isExpanded ? "Collapse \(displayName)" : "Expand \(displayName)")
 
-            Text(group.name)
+            Text(displayName)
                 .fontWeight(isSelected ? .semibold : .regular)
                 .lineLimit(1)
 
@@ -412,9 +446,17 @@ private struct GroupRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var displayName: String {
+        group.localizedName(language: languageStore.selection)
+    }
+
     private var groupIconName: String {
         if group.isSystemGroup {
             return isExpanded ? "tray.fill" : "tray"
+        }
+
+        if group.isArchived {
+            return "archivebox"
         }
 
         return isExpanded ? "folder.fill" : "folder"
@@ -817,6 +859,7 @@ private struct GroupInsertionDropDelegate: DropDelegate {
 private struct LibraryFileDropDelegate: DropDelegate {
     let targetFileID: UUID
     let targetGroupID: UUID
+    let sessionID: UUID
     let libraryStore: LibraryStore
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -847,6 +890,7 @@ private struct LibraryFileDropDelegate: DropDelegate {
                         draggedFileID,
                         relativeTo: targetFileID,
                         in: targetGroupID,
+                        sessionID: sessionID,
                         placeAfterTarget: placeAfterTarget
                     )
                 }

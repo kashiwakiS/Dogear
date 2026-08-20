@@ -16,7 +16,11 @@ struct PDFWorkBenchApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(libraryStore: libraryStore)
+            ContentView(
+                libraryStore: libraryStore,
+                initialGroupID: libraryStore.initialWindowGroupID,
+                initialSessionID: libraryStore.initialWindowSessionID
+            )
                 .environment(\.locale, languageStore.locale)
         }
         .defaultSize(width: 1080, height: 760)
@@ -31,7 +35,8 @@ struct PDFWorkBenchApp: App {
         WindowGroup(L10n.string("Group"), for: GroupWindowPayload.self) { payload in
             ContentView(
                 libraryStore: libraryStore,
-                initialGroupID: payload.wrappedValue?.groupID
+                initialGroupID: payload.wrappedValue?.groupID,
+                initialSessionID: payload.wrappedValue?.sessionID
             )
             .environment(\.locale, languageStore.locale)
         }

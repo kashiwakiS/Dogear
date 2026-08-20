@@ -68,6 +68,24 @@ final class AppLanguageStore: NSObject, ObservableObject {
             name: NSApplication.didUpdateNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(reapplyMenuBarLocalization),
+            name: NSMenu.didBeginTrackingNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(localizeMutatedMenu),
+            name: NSMenu.didAddItemNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(localizeMutatedMenu),
+            name: NSMenu.didChangeItemNotification,
+            object: nil
+        )
     }
 
     var locale: Locale {
@@ -81,13 +99,61 @@ final class AppLanguageStore: NSObject, ObservableObject {
     @objc private func reapplyMenuBarLocalization() {
         refreshMenuBarLocalization()
     }
+
+    @objc private func localizeMutatedMenu() {
+        MenuBarLocalizer.applyImmediately(language: selection)
+    }
 }
 
 enum L10n {
     static func string(_ key: String.LocalizationValue) -> String {
         let storedValue = UserDefaults.standard.string(forKey: AppLanguage.defaultsKey)
         let language = storedValue.flatMap(AppLanguage.init(rawValue:)) ?? .system
-        return String(localized: key, locale: language.locale)
+        return string(key, language: language)
+    }
+
+    static func string(
+        _ key: String.LocalizationValue,
+        language: AppLanguage
+    ) -> String {
+        let resource = AppLocalizationResource.resource(for: language)
+        return String(
+            localized: key,
+            table: resource.table,
+            bundle: resource.bundle,
+            locale: language.locale
+        )
+    }
+}
+
+private struct AppLocalizationResource {
+    let bundle: Bundle
+    let table: String?
+
+    static func resource(for language: AppLanguage) -> AppLocalizationResource {
+        switch language {
+        case .system:
+            return AppLocalizationResource(bundle: .main, table: nil)
+        case .english:
+            return AppLocalizationResource(bundle: englishBundle, table: "DogearEnglish")
+        case .simplifiedChinese:
+            return AppLocalizationResource(bundle: simplifiedChineseBundle, table: nil)
+        }
+    }
+
+    private static let englishBundle = localizedBundle(named: "en")
+    private static let simplifiedChineseBundle = localizedBundle(named: "zh-Hans")
+
+    private static func localizedBundle(named languageCode: String) -> Bundle {
+        guard let path = Bundle.main.path(
+            forResource: languageCode,
+            ofType: "lproj"
+        ), let bundle = Bundle(path: path) else {
+            assertionFailure("Missing \(languageCode) localization bundle")
+            return .main
+        }
+
+        return bundle
     }
 }
 
@@ -140,7 +206,28 @@ private enum MenuBarLocalizer {
         Pair(english: "Dogear Help", chinese: "Dogear 帮助")
     ]
 
+    private static var isApplying = false
+
     static func apply(language: AppLanguage) {
+        let usesChinese = usesChinese(for: language)
+
+        applyImmediately(usingChinese: usesChinese)
+
+        DispatchQueue.main.async {
+            applyImmediately(usingChinese: usesChinese)
+        }
+        // SwiftUI may replace the AppKit main menu after a scene/window change.
+        // Reapply once after that rebuild settles so the app-only override wins.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            applyImmediately(usingChinese: usesChinese)
+        }
+    }
+
+    static func applyImmediately(language: AppLanguage) {
+        applyImmediately(usingChinese: usesChinese(for: language))
+    }
+
+    private static func usesChinese(for language: AppLanguage) -> Bool {
         let usesChinese: Bool
         switch language {
         case .simplifiedChinese:
@@ -151,14 +238,17 @@ private enum MenuBarLocalizer {
             usesChinese = Locale.preferredLanguages.first?.hasPrefix("zh") == true
         }
 
-        DispatchQueue.main.async {
-            localizeMainMenu(usingChinese: usesChinese)
-        }
-        // SwiftUI may replace the AppKit main menu after a scene/window change.
-        // Reapply once after that rebuild settles so the app-only override wins.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            localizeMainMenu(usingChinese: usesChinese)
-        }
+        return usesChinese
+    }
+
+    private static func applyImmediately(usingChinese: Bool) {
+        guard !isApplying else { return }
+        isApplying = true
+        defer { isApplying = false }
+
+        // Menu mutation notifications are synchronous. Correct rebuilt items
+        // before AppKit gets a chance to draw the system-language title.
+        localizeMainMenu(usingChinese: usingChinese)
     }
 
     private static func localizeMainMenu(usingChinese: Bool) {

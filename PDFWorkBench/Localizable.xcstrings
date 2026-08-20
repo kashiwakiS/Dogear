@@ -579,6 +579,16 @@
         }
       }
     },
+    "Ungrouped" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未分组"
+          }
+        }
+      }
+    },
     "Group" : {
       "localizations" : {
         "zh-Hans" : {

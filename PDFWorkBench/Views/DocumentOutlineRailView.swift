@@ -13,6 +13,7 @@ struct DocumentOutlineRailView: View {
 
     @State private var hoveredRowID: RailRow.ID?
     @State private var hoverPosition: CGFloat?
+    @ObservedObject private var languageStore = AppLanguageStore.shared
 
     private let rowHeight: CGFloat = 13
     private let interactionWidth: CGFloat = 72
@@ -88,11 +89,11 @@ struct DocumentOutlineRailView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(row.help)
+        .help(row.help(language: languageStore.selection))
         .overlay(alignment: .leading) {
             if isHovered {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title)
+                    Text(row.title(language: languageStore.selection))
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
                     Text("Page \(row.pageNumber)")
@@ -119,8 +120,8 @@ struct DocumentOutlineRailView: View {
                 }
             }
         }
-        .accessibilityLabel(row.title)
-        .accessibilityValue(row.accessibilityValue)
+        .accessibilityLabel(row.title(language: languageStore.selection))
+        .accessibilityValue(row.accessibilityValue(language: languageStore.selection))
     }
 
     private func isRowActive(_ row: RailRow) -> Bool {
@@ -184,12 +185,12 @@ private enum RailRow: Identifiable {
         pageIndex + 1
     }
 
-    var title: String {
+    func title(language: AppLanguage) -> String {
         switch self {
         case .outline(let entry):
             return entry.title
         case .dogear(let marker):
-            return marker.displayTitle
+            return marker.displayTitle(language: language)
         }
     }
 
@@ -202,16 +203,22 @@ private enum RailRow: Identifiable {
         }
     }
 
-    var help: String {
-        "\(title) — Page \(pageNumber)"
+    func help(language: AppLanguage) -> String {
+        L10n.string(
+            "\(title(language: language)) — Page \(pageNumber)",
+            language: language
+        )
     }
 
-    var accessibilityValue: String {
+    func accessibilityValue(language: AppLanguage) -> String {
         switch self {
         case .outline(let entry):
-            return "Page \(pageNumber), level \(entry.level + 1)"
+            return L10n.string(
+                "Page \(pageNumber), level \(entry.level + 1)",
+                language: language
+            )
         case .dogear:
-            return "Page \(pageNumber)"
+            return L10n.string("Page \(pageNumber)", language: language)
         }
     }
 }

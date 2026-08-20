@@ -166,7 +166,18 @@ struct PDFPageOffset: Codable, Equatable {
 }
 
 struct LibraryGroup: Identifiable, Codable, Equatable, Hashable {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case createdAt
+        case updatedAt
+        case sortIndex
+        case isSystemGroup
+        case isArchived
+    }
+
     static let ungroupedID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    static let ungroupedLocalizationKey: String.LocalizationValue = "Ungrouped"
     static let ungrouped = LibraryGroup(
         id: ungroupedID,
         name: "Ungrouped",
@@ -182,6 +193,7 @@ struct LibraryGroup: Identifiable, Codable, Equatable, Hashable {
     var updatedAt: Date
     var sortIndex: Int
     var isSystemGroup: Bool
+    var isArchived: Bool
 
     init(
         id: UUID = UUID(),
@@ -189,7 +201,8 @@ struct LibraryGroup: Identifiable, Codable, Equatable, Hashable {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         sortIndex: Int,
-        isSystemGroup: Bool = false
+        isSystemGroup: Bool = false,
+        isArchived: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -197,6 +210,39 @@ struct LibraryGroup: Identifiable, Codable, Equatable, Hashable {
         self.updatedAt = updatedAt
         self.sortIndex = sortIndex
         self.isSystemGroup = isSystemGroup
+        self.isArchived = isArchived
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        sortIndex = try container.decode(Int.self, forKey: .sortIndex)
+        isSystemGroup = try container.decodeIfPresent(Bool.self, forKey: .isSystemGroup) ?? false
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(sortIndex, forKey: .sortIndex)
+        try container.encode(isSystemGroup, forKey: .isSystemGroup)
+        try container.encode(isArchived, forKey: .isArchived)
+    }
+
+    var localizedName: String {
+        isSystemGroup ? L10n.string(Self.ungroupedLocalizationKey) : name
+    }
+
+    func localizedName(language: AppLanguage) -> String {
+        isSystemGroup
+            ? L10n.string(Self.ungroupedLocalizationKey, language: language)
+            : name
     }
 }
 
@@ -267,7 +313,30 @@ struct GroupWindowSession: Identifiable, Codable, Equatable {
 }
 
 struct GroupWindowPayload: Codable, Hashable {
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case groupID
+    }
+
+    var sessionID: UUID
     var groupID: UUID
+
+    init(sessionID: UUID = UUID(), groupID: UUID) {
+        self.sessionID = sessionID
+        self.groupID = groupID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID) ?? UUID()
+        groupID = try container.decode(UUID.self, forKey: .groupID)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(groupID, forKey: .groupID)
+    }
 }
 
 struct LibraryPreferences: Codable, Equatable {
