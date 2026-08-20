@@ -41,6 +41,27 @@ grep -q "^# Dogear $VERSION$" "$release_notes" || {
 scripts/check-sensitive-info.sh
 scripts/check-sensitive-info.sh --history
 
+identity="${DOGEAR_SIGNING_IDENTITY:-}"
+identity_listing="$(security find-identity -v -p codesigning)"
+if [[ -z "$identity" ]]; then
+  identity_count="$(printf '%s\n' "$identity_listing" | awk -F'"' '/"Developer ID Application:/{count++} END {print count + 0}')"
+  [[ "$identity_count" -eq 1 ]] || {
+    echo "error: expected exactly one Developer ID Application identity, found $identity_count" >&2
+    echo "Set DOGEAR_SIGNING_IDENTITY to choose an installed identity explicitly." >&2
+    exit 1
+  }
+  identity="$(printf '%s\n' "$identity_listing" | awk -F'"' '/"Developer ID Application:/{print $2; exit}')"
+fi
+
+[[ "$identity" == "Developer ID Application: "* ]] || {
+  echo "error: official packages require a Developer ID Application identity" >&2
+  exit 1
+}
+printf '%s\n' "$identity_listing" | grep -Fq "\"$identity\"" || {
+  echo "error: signing identity is not available in the current keychain: $identity" >&2
+  exit 1
+}
+
 destination="$OUTPUT_ROOT/v$VERSION"
 [[ ! -e "$destination" ]] || {
   echo "error: destination already exists: $destination" >&2
@@ -53,15 +74,39 @@ trap 'rm -rf "$temporary"' EXIT
 scripts/build.sh --release --clean --universal \
   --derived-data "$temporary/DerivedData" \
   --output-dir "$temporary/App"
+app="$temporary/App/Dogear.app"
+codesign --force \
+  --options runtime \
+  --timestamp \
+  --entitlements "$ROOT/PDFWorkBench/PDFWorkBench.entitlements" \
+  --sign "$identity" \
+  "$app"
+codesign --verify --deep --strict --verbose=2 "$app"
+
 mkdir -p "$destination"
 
-app_archive="Dogear-$VERSION-macOS-universal-UNSIGNED.zip"
+app_archive="Dogear-$VERSION-macOS-universal.zip"
 source_archive="Dogear-$VERSION-source.zip"
 ditto -c -k --sequesterRsrc --keepParent \
-  "$temporary/App/Dogear.app" \
+  "$app" \
   "$destination/$app_archive"
 git archive --format=zip --prefix="Dogear-$VERSION/" -o "$destination/$source_archive" HEAD
 install -m 0644 "$release_notes" "$destination/RELEASE-NOTES.md"
+
+archive_check="$temporary/ArchiveCheck"
+mkdir -p "$archive_check"
+ditto -x -k "$destination/$app_archive" "$archive_check"
+archived_app="$archive_check/Dogear.app"
+codesign --verify --deep --strict --verbose=2 "$archived_app"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$archived_app/Contents/Info.plist")" == "$VERSION" ]] || {
+  echo "error: archived app version does not match $VERSION" >&2
+  exit 1
+}
+archived_architectures="$(lipo -archs "$archived_app/Contents/MacOS/Dogear")"
+[[ "$archived_architectures" == "x86_64 arm64" || "$archived_architectures" == "arm64 x86_64" ]] || {
+  echo "error: archived app is not universal: $archived_architectures" >&2
+  exit 1
+}
 
 (
   cd "$destination"
@@ -72,9 +117,9 @@ cat > "$destination/RELEASE-MANIFEST.txt" <<EOF
 Dogear $VERSION
 Public commit: $(git rev-parse HEAD)
 Integration source: $(awk -F= '/source_commit=/{print $2}' .release-source)
-Architectures: $(lipo -archs "$temporary/App/Dogear.app/Contents/MacOS/Dogear")
+Architectures: $archived_architectures
 Release notes: RELEASE-NOTES.md
-Signing: not performed
+Signing: Developer ID Application (verified after archiving)
 Notarization: not performed
 EOF
 

@@ -14,6 +14,10 @@
 - 右侧栏的 Full Text、Dog-ears、Annotations、Document Summary 和 Ask About Selection 现在支持带动画的折叠/展开，并在空间不足时自动收起较早展开的区域。
 - 隐藏尚未定稿的 Library Info 面板，并将 Ask About Selection 的 Send 按钮移到输入框下方。
 
+### 发布工程
+
+- 正式打包现在强制使用 Developer ID 签名，并在压缩前后验证签名；标签工作流只验证已标记源码，避免自动生成未签名发行包。
+
 ### 要求与限制
 
 - 运行要求：macOS 14.0 或更高版本。
@@ -32,6 +36,10 @@
 - Correct forced-English rendering for Ungrouped, default Dog-ear page names, and rebuilt application menus without brief system-language flashes.
 - Animated expand/collapse behavior for Full Text, Dog-ears, Annotations, Document Summary, and Ask About Selection, with automatic space-aware collapse of older sections.
 - The unfinished Library Info panel is hidden, and the Ask About Selection Send button now sits below the input field.
+
+### Release engineering
+
+- Official packaging now requires a Developer ID signature and verifies it before and after archiving; the tag workflow verifies tagged source without producing an unsigned distribution archive.
 
 ### Requirements and limitations
 

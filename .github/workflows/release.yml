@@ -1,19 +1,19 @@
-name: Publish GitHub release
+name: Verify tagged release source
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish universal package
+  verify:
+    name: Verify tagged source
     runs-on: macos-26
     timeout-minutes: 45
     env:
@@ -39,24 +39,5 @@ jobs:
           scripts/check-sensitive-info.sh --history
           git diff --check
 
-      - name: Build and package universal app
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          scripts/package-release.sh "${TAG#v}" "$RUNNER_TEMP/release-assets"
-
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          version="${TAG#v}"
-          release_dir="$RUNNER_TEMP/release-assets/v$version"
-          gh release create "$TAG" \
-            "$release_dir/Dogear-$version-macOS-universal-UNSIGNED.zip" \
-            "$release_dir/Dogear-$version-source.zip" \
-            "$release_dir/RELEASE-MANIFEST.txt" \
-            "$release_dir/SHA256SUMS" \
-            --verify-tag \
-            --title "Dogear $version" \
-            --notes-file "$release_dir/RELEASE-NOTES.md"
+      - name: Verify builds and release metadata
+        run: scripts/verify-release.sh
