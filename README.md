@@ -17,7 +17,7 @@
 
 ## 安装
 
-你可以由右侧[GitHub Releases](https://github.com/kashiwakiS/Dogear/releases)下载最新构建。由于构建没有签名，所以在打开时macOS会要求你进行确认。
+你可以由右侧[GitHub Releases](https://github.com/kashiwakiS/Dogear/releases)下载最新构建。0.1.2 及更早版本仍是未签名构建；之后的正式发行包使用作者个人 Apple Developer 账号签名。请以每个版本的 Release Notes 为准。
 
 ## 自行编译
 
