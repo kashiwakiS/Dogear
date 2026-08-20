@@ -3,6 +3,11 @@ import SwiftUI
 struct DocumentMetadataView: View {
     @ObservedObject var libraryStore: LibraryStore
     let selectedURL: URL?
+    let currentWorkingCopyURL: URL?
+    let onExportWorkingCopy: (LibraryItem) -> Void
+    let onDiscardAllChanges: (LibraryItem) -> Void
+    let onRevealOriginal: (URL) -> Void
+    let onRevealWorkingCopy: (URL) -> Void
 
     var body: some View {
         if let item = libraryStore.file(for: selectedURL) {
@@ -21,6 +26,42 @@ struct DocumentMetadataView: View {
                     "Tags, comma separated",
                     text: bindingForTags(item)
                 )
+
+                HStack(spacing: 8) {
+                    Button("Reveal Original") {
+                        onRevealOriginal(libraryStore.resolvedURL(for: item))
+                    }
+                    .font(.caption)
+
+                    Spacer()
+                }
+
+                if let workingCopyURL = currentWorkingCopyURL ?? item.workingCopyURL {
+                    Label("Working copy active", systemImage: "pencil.circle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+
+                    HStack(spacing: 8) {
+                        Button("Save Copy As...") {
+                            onExportWorkingCopy(item)
+                        }
+                        .font(.caption)
+
+                        Button("Reveal") {
+                            onRevealWorkingCopy(workingCopyURL)
+                        }
+                        .font(.caption)
+
+                        Button("Discard...") {
+                            onDiscardAllChanges(item)
+                        }
+                        .font(.caption)
+                    }
+                } else {
+                    Text("No working copy; the original is unchanged.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 Text("App-only labels. PDF metadata is not edited.")
                     .font(.caption)
@@ -45,6 +86,6 @@ struct DocumentMetadataView: View {
     }
 
     private func groupNames(for item: LibraryItem) -> [String] {
-        libraryStore.groups(containing: item).map(\.name)
+        libraryStore.groups(containing: item).map(\.localizedName)
     }
 }

@@ -4,11 +4,6 @@ import Combine
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var state: LibraryState
-    @Published var selectedGroupID: UUID {
-        didSet {
-            ensureSelectedGroupExists()
-        }
-    }
 
     private let storage: LibraryJSONStore?
     private let userDefaults: UserDefaults
@@ -40,12 +35,7 @@ final class LibraryStore: ObservableObject {
         }
         preparedState.schemaVersion = LibraryState.currentSchemaVersion
         state = preparedState
-        selectedGroupID = Self.initialSelectedGroupID(for: preparedState)
         persist()
-    }
-
-    var items: [LibraryItem] {
-        filesForWindow(in: selectedGroupID)
     }
 
     var allFiles: [LibraryFile] {
@@ -56,26 +46,26 @@ final class LibraryStore: ObservableObject {
         Self.initialSelectedGroupID(for: state)
     }
 
+    var initialWindowSessionID: UUID {
+        let groupID = initialWindowGroupID
+        return state.windowSessions
+            .filter { $0.groupID == groupID }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .first?.id ?? UUID()
+    }
+
     var userGroups: [LibraryGroup] {
         state.groups
             .filter { !$0.isSystemGroup }
             .sorted(by: sortGroups)
     }
 
+    var activeUserGroups: [LibraryGroup] {
+        userGroups.filter { !$0.isArchived }
+    }
+
     var sidebarGroups: [LibraryGroup] {
         [LibraryGroup.ungrouped] + userGroups
-    }
-
-    var selectedGroup: LibraryGroup {
-        group(withID: selectedGroupID) ?? .ungrouped
-    }
-
-    var canRemoveSelectionFromCurrentGroup: Bool {
-        selectedGroupID != LibraryGroup.ungroupedID
-    }
-
-    func selectGroup(_ group: LibraryGroup) {
-        selectedGroupID = group.id
     }
 
     @discardableResult
@@ -88,14 +78,12 @@ final class LibraryStore: ObservableObject {
         if let existing = state.groups.first(where: {
             !$0.isSystemGroup && $0.name.localizedCaseInsensitiveCompare(trimmedName) == .orderedSame
         }) {
-            selectedGroupID = existing.id
             return existing
         }
 
         let nextSortIndex = (userGroups.map(\.sortIndex).max() ?? 0) + 1
         let group = LibraryGroup(name: trimmedName, sortIndex: nextSortIndex)
         state.groups.append(group)
-        selectedGroupID = group.id
         persist()
         return group
     }
@@ -119,33 +107,77 @@ final class LibraryStore: ObservableObject {
         let nextSortIndex = (userGroups.map(\.sortIndex).max() ?? 0) + 1
         let group = LibraryGroup(name: uniqueName, sortIndex: nextSortIndex)
         state.groups.append(group)
-        selectedGroupID = group.id
         persist()
         return group
     }
 
-    func renameGroup(_ group: LibraryGroup, to proposedName: String) {
+    @discardableResult
+    func renameGroup(_ group: LibraryGroup, to proposedName: String) -> Bool {
         guard !group.isSystemGroup,
               let index = state.groups.firstIndex(where: { $0.id == group.id })
         else {
-            return
+            return false
         }
 
         let trimmedName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            return
+            return false
+        }
+
+        let conflictsWithExistingGroup = state.groups.contains {
+            !$0.isSystemGroup
+                && $0.id != group.id
+                && $0.name.localizedCaseInsensitiveCompare(trimmedName) == .orderedSame
+        }
+        guard !conflictsWithExistingGroup else {
+            return false
         }
 
         state.groups[index].name = trimmedName
         state.groups[index].updatedAt = Date()
         persist()
+        return true
+    }
+
+    @discardableResult
+    func deleteGroup(_ group: LibraryGroup) -> Bool {
+        guard !group.isSystemGroup,
+              state.groups.contains(where: { $0.id == group.id })
+        else {
+            return false
+        }
+
+        state.groups.removeAll { $0.id == group.id }
+        state.memberships.removeAll { $0.groupID == group.id }
+        state.windowSessions.removeAll { $0.groupID == group.id }
+        persist()
+        return true
+    }
+
+    @discardableResult
+    func setGroupArchived(_ group: LibraryGroup, archived: Bool) -> Bool {
+        guard !group.isSystemGroup,
+              let index = state.groups.firstIndex(where: { $0.id == group.id })
+        else {
+            return false
+        }
+
+        guard state.groups[index].isArchived != archived else {
+            return false
+        }
+
+        state.groups[index].isArchived = archived
+        state.groups[index].updatedAt = Date()
+        persist()
+        return true
     }
 
     @discardableResult
     func upsertOpenedURL(
         _ url: URL,
         refreshBookmark: Bool = true,
-        groupID: UUID? = nil
+        groupID: UUID? = nil,
+        sessionID: UUID? = nil
     ) -> LibraryFile {
         let canonicalURL = url.resolvingSymlinksInPath().standardizedFileURL
         let bookmarkData = refreshBookmark
@@ -165,7 +197,7 @@ final class LibraryStore: ObservableObject {
             state.files[index].bookmarkData = bookmarkData ?? state.files[index].bookmarkData
             state.files[index].lastOpenedAt = now
             state.files[index].isUnavailable = false
-            recordOpenedFile(state.files[index].id, in: groupID)
+            recordOpenedFile(state.files[index].id, in: groupID, sessionID: sessionID)
             persist()
             return state.files[index]
         }
@@ -186,7 +218,7 @@ final class LibraryStore: ObservableObject {
             addFile(file.id, to: groupID, persistChange: false)
         }
 
-        recordOpenedFile(file.id, in: groupID)
+        recordOpenedFile(file.id, in: groupID, sessionID: sessionID)
         persist()
         return file
     }
@@ -310,7 +342,7 @@ final class LibraryStore: ObservableObject {
     func addFile(_ fileID: UUID, to groupID: UUID, persistChange: Bool = true) {
         guard groupID != LibraryGroup.ungroupedID,
               state.files.contains(where: { $0.id == fileID }),
-              group(withID: groupID) != nil,
+              group(withID: groupID)?.isArchived == false,
               !state.memberships.contains(where: { $0.fileID == fileID && $0.groupID == groupID })
         else {
             return
@@ -342,6 +374,10 @@ final class LibraryStore: ObservableObject {
     }
 
     func moveFile(_ file: LibraryFile, to targetGroup: LibraryGroup, from sourceGroup: LibraryGroup?) {
+        guard !targetGroup.isSystemGroup, !targetGroup.isArchived else {
+            return
+        }
+
         if let sourceGroup,
            sourceGroup.id != LibraryGroup.ungroupedID {
             state.memberships.removeAll { membership in
@@ -361,8 +397,8 @@ final class LibraryStore: ObservableObject {
         guard sourceGroupID != targetGroupID,
               sourceGroupID != LibraryGroup.ungroupedID,
               targetGroupID != LibraryGroup.ungroupedID,
-              group(withID: sourceGroupID) != nil,
-              group(withID: targetGroupID) != nil
+              group(withID: sourceGroupID)?.isArchived == false,
+              group(withID: targetGroupID)?.isArchived == false
         else {
             return 0
         }
@@ -462,6 +498,7 @@ final class LibraryStore: ObservableObject {
         _ draggedFileID: UUID,
         relativeTo targetFileID: UUID,
         in groupID: UUID,
+        sessionID: UUID,
         placeAfterTarget: Bool
     ) {
         guard draggedFileID != targetFileID,
@@ -475,8 +512,8 @@ final class LibraryStore: ObservableObject {
             return
         }
 
-        let draggedIsTemporary = isTemporaryFile(draggedFile, in: groupID)
-        let targetIsTemporary = isTemporaryFile(targetFile, in: groupID)
+        let draggedIsTemporary = isTemporaryFile(draggedFile, in: groupID, sessionID: sessionID)
+        let targetIsTemporary = isTemporaryFile(targetFile, in: groupID, sessionID: sessionID)
         guard draggedIsTemporary == targetIsTemporary else {
             return
         }
@@ -486,6 +523,7 @@ final class LibraryStore: ObservableObject {
                 draggedFileID,
                 relativeTo: targetFileID,
                 in: groupID,
+                sessionID: sessionID,
                 placeAfterTarget: placeAfterTarget
             )
         } else if groupID == LibraryGroup.ungroupedID {
@@ -506,13 +544,13 @@ final class LibraryStore: ObservableObject {
         persist()
     }
 
-    func filesForWindow(in groupID: UUID) -> [LibraryFile] {
+    func filesForWindow(in groupID: UUID, sessionID: UUID) -> [LibraryFile] {
         let persistentFiles = files(in: groupID)
         let filesByID = Dictionary(uniqueKeysWithValues: state.files.map { ($0.id, $0) })
         var combinedFiles = persistentFiles
         var includedIDs = Set(persistentFiles.map(\.id))
 
-        for fileID in openSession(for: groupID)?.openFileIDs ?? [] {
+        for fileID in openSession(for: groupID, sessionID: sessionID)?.openFileIDs ?? [] {
             guard !includedIDs.contains(fileID),
                   let file = filesByID[fileID]
             else {
@@ -530,8 +568,12 @@ final class LibraryStore: ObservableObject {
         files(in: groupID).count
     }
 
-    func isTemporaryFile(_ file: LibraryFile, in groupID: UUID) -> Bool {
-        guard openSession(for: groupID)?.openFileIDs.contains(file.id) == true else {
+    func isTemporaryFile(
+        _ file: LibraryFile,
+        in groupID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        guard openSession(for: groupID, sessionID: sessionID)?.openFileIDs.contains(file.id) == true else {
             return false
         }
 
@@ -550,18 +592,21 @@ final class LibraryStore: ObservableObject {
         return state.groups.first { $0.id == groupID }
     }
 
-    func openSession(for groupID: UUID) -> GroupWindowSession? {
-        state.windowSessions.first { $0.groupID == groupID }
+    func openSession(for groupID: UUID, sessionID: UUID) -> GroupWindowSession? {
+        state.windowSessions.first { $0.id == sessionID && $0.groupID == groupID }
     }
 
-    func recordOpenedFile(_ fileID: UUID, in groupID: UUID?) {
+    func recordOpenedFile(_ fileID: UUID, in groupID: UUID?, sessionID: UUID?) {
         guard let groupID,
+              let sessionID,
               group(withID: groupID) != nil
         else {
             return
         }
 
-        if let index = state.windowSessions.firstIndex(where: { $0.groupID == groupID }) {
+        if let index = state.windowSessions.firstIndex(where: {
+            $0.id == sessionID && $0.groupID == groupID
+        }) {
             if !state.windowSessions[index].openFileIDs.contains(fileID) {
                 state.windowSessions[index].openFileIDs.append(fileID)
             }
@@ -570,6 +615,7 @@ final class LibraryStore: ObservableObject {
         } else {
             state.windowSessions.append(
                 GroupWindowSession(
+                    id: sessionID,
                     groupID: groupID,
                     openFileIDs: [fileID],
                     selectedFileID: fileID
@@ -578,12 +624,6 @@ final class LibraryStore: ObservableObject {
         }
 
         persist()
-    }
-
-    private func ensureSelectedGroupExists() {
-        if group(withID: selectedGroupID) == nil {
-            selectedGroupID = LibraryGroup.ungroupedID
-        }
     }
 
     private func persist() {
@@ -702,10 +742,11 @@ final class LibraryStore: ObservableObject {
         _ draggedFileID: UUID,
         relativeTo targetFileID: UUID,
         in groupID: UUID,
+        sessionID: UUID,
         placeAfterTarget: Bool
     ) {
         guard let sessionIndex = state.windowSessions.firstIndex(where: {
-            $0.groupID == groupID
+            $0.id == sessionID && $0.groupID == groupID
         }) else {
             return
         }
