@@ -1,6 +1,6 @@
 # Dogear 0.1.3
 
-发布日期：2026-08-20
+发布日期：2026-08-21
 版本：0.1.3（Build 4）
 
 ## 中文
@@ -21,7 +21,7 @@
 ### 要求与限制
 
 - 运行要求：macOS 14.0 或更高版本。
-- 最终发行包将使用作者个人 Apple Developer 账号签名；签名状态以最终包验证结果为准。
+- 正式发行包使用作者个人 Apple Developer 账号的 Developer ID Application 证书签名，并在压缩前后验签；本版本未进行公证。
 - AI 功能默认关闭，需要用户自行配置 OpenAI-compatible 提供商；PDF 上传范围以应用中的确认流程为准。
 - 本版本不包含 OCR、表单填写、PDF 数字签名、云同步、账户/订阅或完整 PDF 内容编辑。
 - 发布验证包含源码扫描、Debug 构建、通用 Release 构建、应用元数据、签名和校验和检查；原生 UI、多窗口和 macOS 14 运行时仍需人工烟测。
@@ -44,7 +44,7 @@
 ### Requirements and limitations
 
 - Requires macOS 14.0 or later.
-- The final distribution package will be signed with the author's personal Apple Developer account; the final status will follow package verification.
+- The distribution package is signed with the Developer ID Application certificate from the author's personal Apple Developer account and verified before and after archiving; this release is not notarized.
 - AI is opt-in and requires a user-configured OpenAI-compatible provider.
 - OCR, form filling, PDF digital signatures, cloud sync, accounts/subscriptions, and full PDF content editing are outside this MVP.
 - Release verification covers source scans, Debug and universal Release builds, app metadata, signing, and checksums. Native UI, multi-window behavior, and macOS 14 runtime smoke testing remain manual gates.
