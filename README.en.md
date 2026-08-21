@@ -28,10 +28,8 @@ surface quiet, makes annotations portable, and keeps page operations reversible.
 ## Install
 
 Download the latest universal macOS package from
-[GitHub Releases](https://github.com/kashiwakiS/Dogear/releases). Version 0.1.2
-and earlier remain unsigned; starting with 0.1.3, official distribution
-packages are signed with the author's personal Apple Developer account. Check
-each version's release notes for its actual status.
+[GitHub Releases](https://github.com/kashiwakiS/Dogear/releases). The current
+distribution package is signed with the developer account.
 
 ## Build from source
 

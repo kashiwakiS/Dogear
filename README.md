@@ -17,7 +17,7 @@
 
 ## 安装
 
-你可以由右侧[GitHub Releases](https://github.com/kashiwakiS/Dogear/releases)下载最新构建。0.1.2 及更早版本仍是未签名构建；从 0.1.3 起，正式发行包使用作者个人 Apple Developer 账号签名。请以每个版本的 Release Notes 为准。
+你可以由右侧[GitHub Releases](https://github.com/kashiwakiS/Dogear/releases)下载最新构建。当前正式发行包已使用开发者账户签名。
 
 ## 自行编译
 
