@@ -42,6 +42,7 @@ scripts/check-sensitive-info.sh
 scripts/check-sensitive-info.sh --history
 
 identity="${DOGEAR_SIGNING_IDENTITY:-}"
+notary_profile="${DOGEAR_NOTARY_PROFILE:-Dogear}"
 identity_listing="$(security find-identity -v -p codesigning)"
 if [[ -z "$identity" ]]; then
   identity_count="$(printf '%s\n' "$identity_listing" | awk -F'"' '/"Developer ID Application:/{count++} END {print count + 0}')"
@@ -83,6 +84,30 @@ codesign --force \
   "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 
+notarization_upload="$temporary/Dogear-$VERSION-notarization.zip"
+notarization_result="$temporary/NotarizationResult.plist"
+ditto -c -k --sequesterRsrc --keepParent \
+  "$app" \
+  "$notarization_upload"
+if ! xcrun notarytool submit \
+  "$notarization_upload" \
+  --keychain-profile "$notary_profile" \
+  --wait \
+  --timeout 1h \
+  --output-format plist > "$notarization_result"; then
+  cat "$notarization_result" >&2
+  exit 1
+fi
+notarization_status="$(plutil -extract status raw -o - "$notarization_result")"
+[[ "$notarization_status" == "Accepted" ]] || {
+  cat "$notarization_result" >&2
+  echo "error: Apple notarization status is $notarization_status" >&2
+  exit 1
+}
+xcrun stapler staple "$app"
+xcrun stapler validate "$app"
+spctl --assess --type execute --verbose=4 "$app"
+
 mkdir -p "$destination"
 
 app_archive="Dogear-$VERSION-macOS-universal.zip"
@@ -98,6 +123,8 @@ mkdir -p "$archive_check"
 ditto -x -k "$destination/$app_archive" "$archive_check"
 archived_app="$archive_check/Dogear.app"
 codesign --verify --deep --strict --verbose=2 "$archived_app"
+xcrun stapler validate "$archived_app"
+spctl --assess --type execute --verbose=4 "$archived_app"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$archived_app/Contents/Info.plist")" == "$VERSION" ]] || {
   echo "error: archived app version does not match $VERSION" >&2
   exit 1
@@ -120,7 +147,7 @@ Integration source: $(awk -F= '/source_commit=/{print $2}' .release-source)
 Architectures: $archived_architectures
 Release notes: RELEASE-NOTES.md
 Signing: Developer ID Application (verified after archiving)
-Notarization: not performed
+Notarization: accepted; ticket stapled and Gatekeeper verified
 EOF
 
 echo "Created release assets: $destination"
