@@ -21,4 +21,4 @@ app="$TEMP_ROOT/Release/Dogear.app"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" == "14.0" ]]
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$app/Contents/Info.plist")" == "Dogear" ]]
 
-echo "Release verification passed. Live UI, macOS 14 runtime, signing, and notarization remain separate gates."
+echo "Release verification passed. Live UI, macOS 14 runtime, signing, and notarization remain packaging gates."
