@@ -40,7 +40,11 @@ struct DocumentOutlineService: DocumentOutlineProviding {
                             level: min(level, 5),
                             target: PDFNavigationTarget(
                                 pageIndex: pageIndex,
-                                point: destination.point
+                                point: destination.point,
+                                relativePagePosition: relativePagePosition(
+                                    for: destination.point,
+                                    on: page
+                                )
                             ),
                             source: .pdfBookmark
                         )
@@ -142,11 +146,26 @@ struct DocumentOutlineService: DocumentOutlineProviding {
                 level: level,
                 target: PDFNavigationTarget(
                     pageIndex: line.pageIndex,
-                    point: CGPoint(x: line.bounds.minX, y: line.bounds.maxY)
+                    point: CGPoint(x: line.bounds.minX, y: line.bounds.maxY),
+                    relativePagePosition: document.page(at: line.pageIndex).flatMap {
+                        relativePagePosition(
+                            for: CGPoint(x: line.bounds.minX, y: line.bounds.maxY),
+                            on: $0
+                        )
+                    }
                 ),
                 source: .detectedHeading
             )
         }
+    }
+
+    private func relativePagePosition(for point: CGPoint, on page: PDFPage) -> CGFloat? {
+        let pageBounds = page.bounds(for: .cropBox)
+        guard pageBounds.height > 0 else {
+            return nil
+        }
+
+        return min(1, max(0, (pageBounds.maxY - point.y) / pageBounds.height))
     }
 
     @MainActor

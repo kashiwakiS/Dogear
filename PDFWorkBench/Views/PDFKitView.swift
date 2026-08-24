@@ -108,6 +108,8 @@ struct PDFKitView: NSViewRepresentable {
             context.coordinator.reportScale(from: pdfView)
             DispatchQueue.main.async {
                 container.layoutDocumentViewForTwoUpIfNeeded()
+                container.updateActiveFitScaleIfNeeded()
+                context.coordinator.observeLiveScrolling(for: pdfView, in: container)
             }
         }
         pdfView.shortcutSet = shortcutSet
@@ -137,6 +139,7 @@ struct PDFKitView: NSViewRepresentable {
             onSelect: onSelectDogear,
             onToggleAtPage: onToggleDogearAtPage
         )
+        context.coordinator.observeLiveScrolling(for: pdfView, in: container)
 
         if context.coordinator.lastDisplayStyle != displayStyle {
             context.coordinator.lastDisplayStyle = displayStyle
@@ -144,6 +147,8 @@ struct PDFKitView: NSViewRepresentable {
             context.coordinator.reportScale(from: pdfView)
             DispatchQueue.main.async {
                 container.layoutDocumentViewForTwoUpIfNeeded()
+                container.updateActiveFitScaleIfNeeded()
+                context.coordinator.observeLiveScrolling(for: pdfView, in: container)
             }
         }
 
@@ -204,8 +209,10 @@ struct PDFKitView: NSViewRepresentable {
         var lastOutlineNavigationRequestID = 0
         var lastDisplayStyle: PDFReadingDisplayStyle
         private var pageObserver: NSObjectProtocol?
+        private var scrollBoundsObserver: NSObjectProtocol?
         private var scaleObserver: NSObjectProtocol?
         private var selectionObserver: NSObjectProtocol?
+        private weak var observedClipView: NSClipView?
         private var pendingScaleFactor: CGFloat?
         private var isScaleReportScheduled = false
         private var lastReportedScalePercent: Int?
@@ -265,15 +272,68 @@ struct PDFKitView: NSViewRepresentable {
                     return
                 }
 
-                let pageIndex = document.index(for: currentPage)
-                container?.updateCurrentPageIndex(pageIndex)
-                container?.layoutOutlineOverlay()
-                self.lastTargetPageIndex = pageIndex
-                self.onPageChanged(pageIndex)
+                self.reportPageChange(
+                    document.index(for: currentPage),
+                    in: container
+                )
                 DispatchQueue.main.async {
                     container?.layoutDocumentViewForTwoUpIfNeeded()
+                    container?.updateActiveFitScaleIfNeeded()
                 }
             }
+        }
+
+        func observeLiveScrolling(
+            for pdfView: HighlightingPDFView,
+            in container: PDFReaderContainerView
+        ) {
+            guard let scrollView = pdfView.documentView?.enclosingScrollView else {
+                return
+            }
+
+            container.configurePDFScrollView(scrollView)
+            let clipView = scrollView.contentView
+            guard observedClipView !== clipView else {
+                return
+            }
+
+            if let scrollBoundsObserver {
+                NotificationCenter.default.removeObserver(scrollBoundsObserver)
+            }
+            observedClipView = clipView
+            clipView.postsBoundsChangedNotifications = true
+            scrollBoundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: clipView,
+                queue: .main
+            ) { [weak self, weak pdfView, weak container] _ in
+                guard let self,
+                      let pdfView,
+                      let container,
+                      let document = pdfView.document,
+                      let visiblePage = pdfView.page(
+                        for: NSPoint(x: pdfView.bounds.midX, y: pdfView.bounds.midY),
+                        nearest: true
+                      )
+                else {
+                    return
+                }
+
+                self.reportPageChange(document.index(for: visiblePage), in: container)
+            }
+        }
+
+        private func reportPageChange(_ pageIndex: Int, in container: PDFReaderContainerView?) {
+            guard pageIndex != NSNotFound,
+                  lastTargetPageIndex != pageIndex
+            else {
+                return
+            }
+
+            container?.updateCurrentPageIndex(pageIndex)
+            container?.layoutOutlineOverlay()
+            lastTargetPageIndex = pageIndex
+            onPageChanged(pageIndex)
         }
 
         func observeScaleChanges(for pdfView: HighlightingPDFView, in container: PDFReaderContainerView) {
@@ -290,6 +350,7 @@ struct PDFKitView: NSViewRepresentable {
                 self.reportScale(from: pdfView)
                 DispatchQueue.main.async {
                     container?.layoutDocumentViewForTwoUpIfNeeded()
+                    container?.updateActiveFitScaleIfNeeded()
                 }
             }
         }
@@ -332,6 +393,9 @@ struct PDFKitView: NSViewRepresentable {
         deinit {
             if let pageObserver {
                 NotificationCenter.default.removeObserver(pageObserver)
+            }
+            if let scrollBoundsObserver {
+                NotificationCenter.default.removeObserver(scrollBoundsObserver)
             }
 
             if let scaleObserver {
@@ -503,6 +567,7 @@ final class PDFReaderContainerView: NSView {
     override func layout() {
         super.layout()
         pdfView.frame = bounds
+        pdfView.updateActiveFitScaleIfNeeded()
         layoutDocumentViewForTwoUpIfNeeded()
         layoutOutlineOverlay()
     }
@@ -534,6 +599,17 @@ final class PDFReaderContainerView: NSView {
 
         documentView.frame = NSRect(origin: .zero, size: expectedSize)
         documentView.enclosingScrollView?.tile()
+    }
+
+    func configurePDFScrollView(_ scrollView: NSScrollView) {
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
+        scrollView.verticalScroller?.controlSize = .mini
+        scrollView.horizontalScroller?.controlSize = .mini
+    }
+
+    func updateActiveFitScaleIfNeeded() {
+        pdfView.updateActiveFitScaleIfNeeded()
     }
 
     func updateOutlineOverlay(
@@ -681,6 +757,16 @@ final class HighlightingPDFView: PDFView {
     private var standardBackgroundColor: NSColor?
     private var standardPageShadowsEnabled: Bool?
     private var appliedNightMode: Bool?
+    private enum ActiveFitMode {
+        case page
+        case width
+    }
+
+    private var activeFitMode: ActiveFitMode?
+    private var standardDisplaysPageBreaks: Bool?
+    private var standardPageBreakMargins: NSEdgeInsets?
+    private var standardFitMinScaleFactor: CGFloat?
+    private var standardFitShadowsEnabled: Bool?
 
     override var acceptsFirstResponder: Bool {
         true
@@ -706,7 +792,9 @@ final class HighlightingPDFView: PDFView {
             layer?.filters = [CIFilter(name: "CIColorInvert")].compactMap { $0 }
         } else {
             backgroundColor = standardBackgroundColor ?? .windowBackgroundColor
-            pageShadowsEnabled = standardPageShadowsEnabled ?? true
+            pageShadowsEnabled = activeFitMode != nil
+                ? false
+                : standardPageShadowsEnabled ?? true
             layer?.filters = nil
         }
     }
@@ -931,20 +1019,50 @@ final class HighlightingPDFView: PDFView {
     func applyZoomCommand(_ action: PDFZoomAction) {
         switch action {
         case .zoomIn:
+            endFitMode()
             autoScales = false
             scaleFactor = clampedScaleFactor(scaleFactor * 1.2)
         case .zoomOut:
+            endFitMode()
             autoScales = false
             scaleFactor = clampedScaleFactor(scaleFactor / 1.2)
         case .actualSize:
+            endFitMode()
             autoScales = false
             scaleFactor = clampedScaleFactor(1)
         case .fitWidth:
-            autoScales = false
-            scaleFactor = clampedScaleFactor(scaleFactorForFitWidth())
+            beginFitMode(.width)
         case .fitPage:
-            autoScales = true
+            beginFitMode(.page)
         }
+    }
+
+    func updateActiveFitScaleIfNeeded() {
+        guard let activeFitMode else {
+            return
+        }
+
+        displaysPageBreaks = false
+        pageBreakMargins = NSEdgeInsetsZero
+        pageShadowsEnabled = false
+
+        let fittedScaleFactor: CGFloat
+        switch activeFitMode {
+        case .page:
+            fittedScaleFactor = scaleFactorForFitPage()
+        case .width:
+            fittedScaleFactor = scaleFactorForFitWidth()
+        }
+        let targetScaleFactor = min(fittedScaleFactor, maxScaleFactor)
+        if minScaleFactor > targetScaleFactor {
+            minScaleFactor = targetScaleFactor
+        }
+        guard abs(scaleFactor - targetScaleFactor) > 0.0001 else {
+            return
+        }
+
+        autoScales = false
+        scaleFactor = targetScaleFactor
     }
 
     override func drawPagePost(_ page: PDFPage, to context: CGContext) {
@@ -1553,19 +1671,119 @@ final class HighlightingPDFView: PDFView {
     }
 
     private func scaleFactorForFitWidth() -> CGFloat {
-        guard let page = currentPage ?? document?.page(at: 0) else {
+        guard let document,
+              let currentPage = currentPage ?? document.page(at: 0)
+        else {
             return scaleFactor
         }
 
-        let pageWidth = page.bounds(for: displayBox).width
-        guard pageWidth > 0 else {
+        let viewportWidth = documentView?.enclosingScrollView?.contentSize.width
+            ?? bounds.width
+        let contentWidth = pagesForCurrentLayout(in: document, currentPage: currentPage)
+            .map(displaySize(for:))
+            .reduce(0) { $0 + $1.width }
+        guard viewportWidth > 0, contentWidth > 0 else {
             return scaleFactor
         }
 
-        let horizontalInset: CGFloat = displayMode == .twoUp || displayMode == .twoUpContinuous ? 48 : 32
-        let columns: CGFloat = displayMode == .twoUp || displayMode == .twoUpContinuous ? 2 : 1
-        let availableWidth = max(80, bounds.width - horizontalInset)
-        return availableWidth / (pageWidth * columns)
+        return viewportWidth / contentWidth
+    }
+
+    private func beginFitMode(_ mode: ActiveFitMode) {
+        if standardDisplaysPageBreaks == nil {
+            standardDisplaysPageBreaks = displaysPageBreaks
+        }
+        if standardPageBreakMargins == nil {
+            standardPageBreakMargins = pageBreakMargins
+        }
+        if standardFitMinScaleFactor == nil {
+            standardFitMinScaleFactor = minScaleFactor
+        }
+        if standardFitShadowsEnabled == nil {
+            standardFitShadowsEnabled = pageShadowsEnabled
+        }
+        displaysPageBreaks = false
+        pageBreakMargins = NSEdgeInsetsZero
+        pageShadowsEnabled = false
+        autoScales = false
+        activeFitMode = mode
+        updateActiveFitScaleIfNeeded()
+    }
+
+    private func endFitMode() {
+        guard activeFitMode != nil else {
+            return
+        }
+
+        activeFitMode = nil
+        if let standardDisplaysPageBreaks {
+            displaysPageBreaks = standardDisplaysPageBreaks
+        }
+        if let standardPageBreakMargins {
+            pageBreakMargins = standardPageBreakMargins
+        }
+        if let standardFitMinScaleFactor {
+            minScaleFactor = standardFitMinScaleFactor
+        }
+        if appliedNightMode == true {
+            pageShadowsEnabled = false
+        } else if let standardFitShadowsEnabled {
+            pageShadowsEnabled = standardFitShadowsEnabled
+        }
+
+        self.standardDisplaysPageBreaks = nil
+        self.standardPageBreakMargins = nil
+        standardFitMinScaleFactor = nil
+        standardFitShadowsEnabled = nil
+    }
+
+    private func scaleFactorForFitPage() -> CGFloat {
+        guard let document,
+              let currentPage = currentPage ?? document.page(at: 0)
+        else {
+            return scaleFactor
+        }
+
+        let viewportSize = documentView?.enclosingScrollView?.contentSize
+            ?? bounds.size
+        guard viewportSize.width > 0, viewportSize.height > 0 else {
+            return scaleFactor
+        }
+
+        let pageSizes = pagesForCurrentLayout(in: document, currentPage: currentPage)
+            .map(displaySize(for:))
+        let contentWidth = pageSizes.reduce(0) { $0 + $1.width }
+        let contentHeight = pageSizes.map(\.height).max() ?? 0
+        guard contentWidth > 0, contentHeight > 0 else {
+            return scaleFactor
+        }
+
+        return min(
+            viewportSize.width / contentWidth,
+            viewportSize.height / contentHeight
+        )
+    }
+
+    private func pagesForCurrentLayout(
+        in document: PDFDocument,
+        currentPage: PDFPage
+    ) -> [PDFPage] {
+        guard displayMode == .twoUp || displayMode == .twoUpContinuous else {
+            return [currentPage]
+        }
+
+        let pageIndex = document.index(for: currentPage)
+        let firstIndex = max(0, pageIndex - pageIndex % 2)
+        return [firstIndex, firstIndex + 1].compactMap(document.page(at:))
+    }
+
+    private func displaySize(for page: PDFPage) -> NSSize {
+        let bounds = page.bounds(for: displayBox)
+        let normalizedRotation = ((page.rotation % 360) + 360) % 360
+        if normalizedRotation == 90 || normalizedRotation == 270 {
+            return NSSize(width: bounds.height, height: bounds.width)
+        }
+        return bounds.size
     }
 
     private func defaultFreeTextBounds(on page: PDFPage) -> NSRect {
