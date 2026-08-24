@@ -1,30 +1,28 @@
-# Dogear 0.1.3
+# Dogear 0.1.4
 
-发布日期：2026-08-21
-版本：0.1.3（Build 4）
+发布日期：2026-08-24
+版本：0.1.4
 
 ## 中文
 
-### 本版新增
+### 本版更新
 
-- Library Group 支持重命名、归档、恢复和删除；从资料库移除文件不会删除原始 PDF。
-- 同一 Group 可以在多个窗口中保持各自独立的阅读会话。
-- 阅读器右侧栏支持折叠、展开和自动空间调整。
+- 文档导航条新增“文档位置”排列方式，可按照章节在 PDF 中的实际位置显示；新增同页同层级条目自动合并功能；优化导航条高亮逻辑。
+- 优化了阅读区和 Library 侧边栏的滚动条显示效果。
+- 优化了“适合整页”和“适合页宽”两种设置的显示效果。
 
 ### 使用要求
 
 - 运行要求：macOS 14.0 或更高版本。
-- 当前发行包已使用开发者账户签名。
 
 ## English
 
 ### What's new
 
-- Library Groups can now be renamed, archived, restored, and deleted; removing a file from the Library does not delete the original PDF.
-- The same Group can keep independent reading sessions in multiple windows.
-- Reader sidebar sections can be expanded, collapsed, and adjusted automatically for available space.
+- The document outline now offers a Document Position layout based on each section's actual location in the PDF, merges entries at the same level on the same page, and improves active-section highlighting.
+- Improved scrollbar presentation in the reader and Library sidebar.
+- Improved the visual results of the Fit Page and Fit Width settings.
 
 ### Requirements
 
 - Requires macOS 14.0 or later.
-- The current package is signed with the developer account.
