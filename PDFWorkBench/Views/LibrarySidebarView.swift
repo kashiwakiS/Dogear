@@ -1,6 +1,7 @@
+import AppKit
+import CoreTransferable
 import SwiftUI
 import UniformTypeIdentifiers
-import CoreTransferable
 
 struct LibrarySidebarView: View {
     @ObservedObject var libraryStore: LibraryStore
@@ -76,6 +77,11 @@ struct LibrarySidebarView: View {
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, 24)
+        .overlay(alignment: .topTrailing) {
+            LibraryScrollerConfigurator()
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+        }
     }
 
     @ViewBuilder
@@ -414,6 +420,127 @@ struct LibrarySidebarView: View {
 
     private var duplicateMarkerPalette: [Color] {
         [.green, .yellow, .orange, .blue, .pink, .purple]
+    }
+}
+
+private struct LibraryScrollerConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> LibraryScrollerConfigurationView {
+        LibraryScrollerConfigurationView()
+    }
+
+    func updateNSView(_ nsView: LibraryScrollerConfigurationView, context: Context) {
+        nsView.configureEnclosingScrollView()
+    }
+}
+
+private final class LibraryScrollerConfigurationView: NSView {
+    private weak var configuredScrollView: NSScrollView?
+    private var isConfigurationScheduled = false
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        configureEnclosingScrollView()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configureEnclosingScrollView()
+    }
+
+    override func layout() {
+        super.layout()
+        configureEnclosingScrollView()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    func configureEnclosingScrollView() {
+        guard !isConfigurationScheduled else {
+            return
+        }
+
+        isConfigurationScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                return
+            }
+            self.isConfigurationScheduled = false
+
+            guard let scrollView = self.relatedScrollView else {
+                return
+            }
+
+            self.configuredScrollView = scrollView
+            scrollView.scrollerStyle = .overlay
+            scrollView.autohidesScrollers = true
+            scrollView.hasVerticalScroller = true
+            scrollView.verticalScroller?.controlSize = .mini
+            scrollView.horizontalScroller?.controlSize = .mini
+        }
+    }
+
+    private var relatedScrollView: NSScrollView? {
+        if let configuredScrollView,
+           configuredScrollView.window === window {
+            return configuredScrollView
+        }
+
+        guard let window,
+              let contentView = window.contentView else {
+            return nil
+        }
+
+        let probeRect = convert(bounds, to: nil)
+        let listScrollViews = contentView
+            .allDescendants(of: NSScrollView.self)
+            .filter { scrollView in
+                guard let documentView = scrollView.documentView else {
+                    return false
+                }
+                return documentView is NSTableView
+                    || documentView.firstDescendant(of: NSTableView.self) != nil
+            }
+
+        return listScrollViews.min { lhs, rhs in
+            lhs.distanceFromWindowRect(to: probeRect)
+                < rhs.distanceFromWindowRect(to: probeRect)
+        }
+    }
+}
+
+private extension NSView {
+    func firstDescendant<View: NSView>(of type: View.Type) -> View? {
+        for subview in subviews {
+            if let match = subview as? View {
+                return match
+            }
+            if let match = subview.firstDescendant(of: type) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    func allDescendants<View: NSView>(of type: View.Type) -> [View] {
+        subviews.flatMap { subview -> [View] in
+            let match = subview as? View
+            return [match].compactMap { $0 } + subview.allDescendants(of: type)
+        }
+    }
+
+    func distanceFromWindowRect(to rect: NSRect) -> CGFloat {
+        let candidateRect = convert(bounds, to: nil)
+        let horizontalDistance = max(
+            0,
+            max(candidateRect.minX - rect.maxX, rect.minX - candidateRect.maxX)
+        )
+        let verticalDistance = max(
+            0,
+            max(candidateRect.minY - rect.maxY, rect.minY - candidateRect.maxY)
+        )
+        return hypot(horizontalDistance, verticalDistance)
     }
 }
 

@@ -8,6 +8,8 @@ struct AISettingsView: View {
     @State private var isShowingConsent = false
     @State private var isShowingKeychainDeleteConfirmation = false
     @State private var localError: String?
+    @AppStorage(OutlineRailSpacingMode.defaultsKey) private var outlineSpacingMode =
+        OutlineRailSpacingMode.even.rawValue
 
     init(
         configurationStore: AIConfigurationStore,
@@ -28,6 +30,19 @@ struct AISettingsView: View {
                 }
 
                 Text("This setting changes only Dogear and is intended to make localization testing easy. It does not change the macOS system language.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Reading") {
+                Picker("Outline Spacing", selection: $outlineSpacingMode) {
+                    ForEach(OutlineRailSpacingMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text("Document Position merges same-page entries at the same level, then keeps colliding rows at least 6 points apart. Later rows flow downward instead of being redistributed across the rail.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -9,6 +9,7 @@ enum DocumentOutlineSource: String, Equatable {
 struct PDFNavigationTarget: Equatable {
     let pageIndex: Int
     let point: CGPoint?
+    let relativePagePosition: CGFloat?
 }
 
 struct DocumentOutlineEntry: Identifiable, Equatable {

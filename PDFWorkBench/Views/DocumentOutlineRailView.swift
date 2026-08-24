@@ -1,5 +1,23 @@
 import SwiftUI
 
+enum OutlineRailSpacingMode: String, CaseIterable, Identifiable {
+    case even
+    case documentPosition
+
+    static let defaultsKey = "PDFWorkBench.OutlineRailSpacingMode"
+
+    var id: String { rawValue }
+
+    var title: LocalizedStringResource {
+        switch self {
+        case .even:
+            return "Even Spacing"
+        case .documentPosition:
+            return "Document Position"
+        }
+    }
+}
+
 struct DocumentOutlineRailView: View {
     let entries: [DocumentOutlineEntry]
     let dogears: [DogearMarker]
@@ -13,12 +31,19 @@ struct DocumentOutlineRailView: View {
 
     @State private var hoveredRowID: RailRow.ID?
     @State private var hoverPosition: CGFloat?
+    @AppStorage(OutlineRailSpacingMode.defaultsKey) private var spacingModeRawValue =
+        OutlineRailSpacingMode.even.rawValue
     @ObservedObject private var languageStore = AppLanguageStore.shared
 
     private let rowHeight: CGFloat = 13
+    private let minimumProportionalSpacing: CGFloat = 6
     private let interactionWidth: CGFloat = 72
     private let visualWidth: CGFloat = 30
     private let presentationWidth: CGFloat = 260
+
+    private var spacingMode: OutlineRailSpacingMode {
+        OutlineRailSpacingMode(rawValue: spacingModeRawValue) ?? .even
+    }
 
     private var activeEntryID: DocumentOutlineEntry.ID? {
         selectedEntryID
@@ -27,8 +52,11 @@ struct DocumentOutlineRailView: View {
     }
 
     var preferredHeight: CGFloat {
-        if isLoading || railRows.isEmpty {
+        if isLoading || displayedRailRows.isEmpty {
             return 40
+        }
+        if spacingMode == .documentPosition {
+            return 340
         }
         return min(340, max(56, CGFloat(railRows.count) * rowHeight + 8))
     }
@@ -42,7 +70,7 @@ struct DocumentOutlineRailView: View {
                     .controlSize(.small)
                     .frame(maxWidth: .infinity)
                     .frame(maxHeight: .infinity)
-            } else if railRows.isEmpty {
+            } else if displayedRailRows.isEmpty {
                 Image(systemName: "list.bullet.indent")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -50,15 +78,31 @@ struct DocumentOutlineRailView: View {
                     .frame(maxHeight: .infinity)
                     .help("No document outline available")
             } else {
-                ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(railRows.enumerated()), id: \.element.id) { index, row in
-                            railButton(for: row, at: index)
+                if spacingMode == .documentPosition {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        ZStack(alignment: .topLeading) {
+                            ForEach(proportionalLayout) { positionedRow in
+                                railButton(for: positionedRow.row, at: positionedRow.index)
+                                    .offset(y: positionedRow.offset)
+                            }
                         }
+                        .frame(
+                            width: presentationWidth,
+                            height: proportionalContentHeight,
+                            alignment: .topLeading
+                        )
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
+                } else {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(railRows.enumerated()), id: \.element.id) { index, row in
+                                railButton(for: row, at: index)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
-                .scrollIndicators(.hidden)
             }
         }
         .frame(width: presentationWidth, height: preferredHeight, alignment: .leading)
@@ -72,8 +116,10 @@ struct DocumentOutlineRailView: View {
 
         return Button {
             switch row {
-            case .outline(let entry):
-                onSelect(entry)
+            case .outline(let entries):
+                if let entry = entries.first {
+                    onSelect(entry)
+                }
             case .dogear(let marker):
                 onSelectDogear(marker)
             }
@@ -120,14 +166,15 @@ struct DocumentOutlineRailView: View {
                 }
             }
         }
+        .zIndex(isHovered ? 2 : (isActive ? 1 : 0))
         .accessibilityLabel(row.title(language: languageStore.selection))
         .accessibilityValue(row.accessibilityValue(language: languageStore.selection))
     }
 
     private func isRowActive(_ row: RailRow) -> Bool {
         switch row {
-        case .outline(let entry):
-            return activeEntryID == entry.id
+        case .outline(let entries):
+            return entries.contains { $0.id == activeEntryID }
         case .dogear(let marker):
             return marker.pageIndex == currentPageIndex
         }
@@ -160,13 +207,16 @@ struct DocumentOutlineRailView: View {
 }
 
 private enum RailRow: Identifiable {
-    case outline(DocumentOutlineEntry)
+    case outline([DocumentOutlineEntry])
     case dogear(DogearMarker)
 
     var id: String {
         switch self {
-        case .outline(let entry):
-            return "outline.\(entry.id)"
+        case .outline(let entries):
+            let component = entries
+                .map { "\($0.id.utf8.count):\($0.id)" }
+                .joined()
+            return "outline.\(component)"
         case .dogear(let marker):
             return "dogear.\(marker.id.uuidString)"
         }
@@ -174,8 +224,8 @@ private enum RailRow: Identifiable {
 
     var pageIndex: Int {
         switch self {
-        case .outline(let entry):
-            return entry.target.pageIndex
+        case .outline(let entries):
+            return entries.first?.target.pageIndex ?? 0
         case .dogear(let marker):
             return marker.pageIndex
         }
@@ -185,10 +235,29 @@ private enum RailRow: Identifiable {
         pageIndex + 1
     }
 
+    func documentPosition(pageCount: Int) -> CGFloat {
+        let positionWithinPage: CGFloat
+        switch self {
+        case .outline(let entries):
+            positionWithinPage = entries.first?.target.relativePagePosition ?? 0
+        case .dogear:
+            positionWithinPage = 0
+        }
+
+        let position = (CGFloat(pageIndex) + positionWithinPage) / CGFloat(max(1, pageCount))
+        return min(1, max(0, position))
+    }
+
     func title(language: AppLanguage) -> String {
         switch self {
-        case .outline(let entry):
-            return entry.title
+        case .outline(let entries):
+            guard let firstEntry = entries.first else {
+                return ""
+            }
+            guard entries.count > 1 else {
+                return firstEntry.title
+            }
+            return "\(firstEntry.title) (+\(entries.count - 1))"
         case .dogear(let marker):
             return marker.displayTitle(language: language)
         }
@@ -196,8 +265,8 @@ private enum RailRow: Identifiable {
 
     var level: Int {
         switch self {
-        case .outline(let entry):
-            return entry.level
+        case .outline(let entries):
+            return entries.first?.level ?? 0
         case .dogear:
             return 0
         }
@@ -212,9 +281,9 @@ private enum RailRow: Identifiable {
 
     func accessibilityValue(language: AppLanguage) -> String {
         switch self {
-        case .outline(let entry):
+        case .outline(let entries):
             return L10n.string(
-                "Page \(pageNumber), level \(entry.level + 1)",
+                "Page \(pageNumber), level \((entries.first?.level ?? 0) + 1)",
                 language: language
             )
         case .dogear:
@@ -224,6 +293,14 @@ private enum RailRow: Identifiable {
 }
 
 private extension DocumentOutlineRailView {
+    struct PositionedRailRow: Identifiable {
+        let row: RailRow
+        let index: Int
+        let offset: CGFloat
+
+        var id: RailRow.ID { row.id }
+    }
+
     struct RailItem {
         let row: RailRow
         let pageIndex: Int
@@ -231,10 +308,92 @@ private extension DocumentOutlineRailView {
         let order: Int
     }
 
+    struct OutlineMergeKey: Hashable {
+        let pageIndex: Int
+        let level: Int
+    }
+
+    struct OutlineGroup {
+        var entries: [DocumentOutlineEntry]
+        let pageIndex: Int
+        let order: Int
+    }
+
+    var displayedRailRows: [RailRow] {
+        spacingMode == .documentPosition ? proportionalRailRows : railRows
+    }
+
+    var proportionalLayout: [PositionedRailRow] {
+        let availableHeight = max(0, preferredHeight - rowHeight - 8)
+        var nextAvailableOffset: CGFloat = 0
+
+        return proportionalRailRows.enumerated().map { index, row in
+            let naturalOffset = availableHeight * row.documentPosition(pageCount: pageCount)
+            let offset = index == 0
+                ? naturalOffset
+                : max(naturalOffset, nextAvailableOffset)
+            nextAvailableOffset = offset + minimumProportionalSpacing
+            return PositionedRailRow(row: row, index: index, offset: offset)
+        }
+    }
+
+    var proportionalContentHeight: CGFloat {
+        let baseHeight = max(0, preferredHeight - 8)
+        guard let lastOffset = proportionalLayout.last?.offset else {
+            return baseHeight
+        }
+        return max(baseHeight, lastOffset + rowHeight)
+    }
+
     var railRows: [RailRow] {
         let outlineItems = entries.enumerated().map { index, entry in
-            RailItem(row: .outline(entry), pageIndex: entry.target.pageIndex, section: 1, order: index)
+            RailItem(
+                row: .outline([entry]),
+                pageIndex: entry.target.pageIndex,
+                section: 1,
+                order: index
+            )
         }
+
+        return sortedRailRows(outlineItems: outlineItems)
+    }
+
+    var proportionalRailRows: [RailRow] {
+        var groups: [OutlineGroup] = []
+        var groupIndexByKey: [OutlineMergeKey: Int] = [:]
+
+        for (index, entry) in entries.enumerated() {
+            let key = OutlineMergeKey(
+                pageIndex: entry.target.pageIndex,
+                level: entry.level
+            )
+            if let groupIndex = groupIndexByKey[key] {
+                groups[groupIndex].entries.append(entry)
+            } else {
+                groupIndexByKey[key] = groups.count
+                groups.append(
+                    OutlineGroup(
+                        entries: [entry],
+                        pageIndex: entry.target.pageIndex,
+                        order: index
+                    )
+                )
+            }
+        }
+
+        let outlineItems = groups.map { group in
+            RailItem(
+                row: .outline(group.entries),
+                pageIndex: group.pageIndex,
+                section: 1,
+                order: group.order
+            )
+        }
+
+        return sortedRailRows(outlineItems: outlineItems)
+    }
+
+    func sortedRailRows(outlineItems: [RailItem]) -> [RailRow] {
 
         let sortedDogears = dogears.enumerated().sorted { lhs, rhs in
             if lhs.element.pageIndex != rhs.element.pageIndex {
