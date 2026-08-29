@@ -9,6 +9,7 @@ struct PDFKitView: NSViewRepresentable {
     let selectedSearchResult: PDFSearchResult?
     let targetPageIndex: Int
     let displayStyle: PDFReadingDisplayStyle
+    let initialZoomState: PDFZoomState
     let zoomCommand: PDFZoomCommand?
     let outlineNavigationRequest: PDFOutlineNavigationRequest?
     let outlineEntries: [DocumentOutlineEntry]
@@ -28,7 +29,7 @@ struct PDFKitView: NSViewRepresentable {
     let onFreeTextShortcut: () -> Void
     let onShortcutActivated: (PDFReadingShortcutAction, String) -> Void
     let onPageChanged: (Int) -> Void
-    let onScaleChanged: (CGFloat) -> Void
+    let onScaleChanged: (CGFloat, PDFZoomState) -> Void
     let onSelectionChanged: (PDFTextSelectionSnapshot?) -> Void
 
     @Environment(\.locale) private var locale
@@ -106,9 +107,15 @@ struct PDFKitView: NSViewRepresentable {
             context.coordinator.resetNavigationState(targetPageIndex: targetPageIndex)
             pdfView.goToPage(index: targetPageIndex)
             context.coordinator.reportScale(from: pdfView)
+            let installedDocument = document
             DispatchQueue.main.async {
+                guard pdfView.document === installedDocument else {
+                    return
+                }
                 container.layoutDocumentViewForTwoUpIfNeeded()
+                pdfView.applyZoomState(initialZoomState)
                 container.updateActiveFitScaleIfNeeded()
+                context.coordinator.reportScale(from: pdfView)
                 context.coordinator.observeLiveScrolling(for: pdfView, in: container)
             }
         }
@@ -199,7 +206,7 @@ struct PDFKitView: NSViewRepresentable {
 
     final class Coordinator {
         var onPageChanged: (Int) -> Void
-        var onScaleChanged: (CGFloat) -> Void
+        var onScaleChanged: (CGFloat, PDFZoomState) -> Void
         var onSelectionChanged: (PDFTextSelectionSnapshot?) -> Void
         var lastFreeTextRequestID = 0
         var lastTargetPageIndex: Int
@@ -213,14 +220,15 @@ struct PDFKitView: NSViewRepresentable {
         private var scaleObserver: NSObjectProtocol?
         private var selectionObserver: NSObjectProtocol?
         private weak var observedClipView: NSClipView?
-        private var pendingScaleFactor: CGFloat?
+        private var pendingScaleUpdate: (scaleFactor: CGFloat, zoomState: PDFZoomState)?
         private var isScaleReportScheduled = false
         private var lastReportedScalePercent: Int?
+        private var lastReportedZoomState: PDFZoomState?
 
         init(
             displayStyle: PDFReadingDisplayStyle,
             onPageChanged: @escaping (Int) -> Void,
-            onScaleChanged: @escaping (CGFloat) -> Void,
+            onScaleChanged: @escaping (CGFloat, PDFZoomState) -> Void,
             onSelectionChanged: @escaping (PDFTextSelectionSnapshot?) -> Void
         ) {
             self.lastDisplayStyle = displayStyle
@@ -361,13 +369,13 @@ struct PDFKitView: NSViewRepresentable {
             lastSelectedSearchResultID = nil
         }
 
-        func reportScale(from pdfView: PDFView) {
+        func reportScale(from pdfView: HighlightingPDFView) {
             let scaleFactor = pdfView.scaleFactor
             guard scaleFactor.isFinite, scaleFactor > 0 else {
                 return
             }
 
-            pendingScaleFactor = scaleFactor
+            pendingScaleUpdate = (scaleFactor, pdfView.currentZoomState)
             guard !isScaleReportScheduled else {
                 return
             }
@@ -375,18 +383,23 @@ struct PDFKitView: NSViewRepresentable {
             isScaleReportScheduled = true
             DispatchQueue.main.async {
                 self.isScaleReportScheduled = false
-                guard let pendingScaleFactor = self.pendingScaleFactor else {
+                guard let pendingScaleUpdate = self.pendingScaleUpdate else {
                     return
                 }
 
-                self.pendingScaleFactor = nil
-                let scalePercent = Int((pendingScaleFactor * 100).rounded())
-                guard self.lastReportedScalePercent != scalePercent else {
+                self.pendingScaleUpdate = nil
+                let scalePercent = Int((pendingScaleUpdate.scaleFactor * 100).rounded())
+                guard self.lastReportedScalePercent != scalePercent
+                        || self.lastReportedZoomState != pendingScaleUpdate.zoomState else {
                     return
                 }
 
                 self.lastReportedScalePercent = scalePercent
-                self.onScaleChanged(pendingScaleFactor)
+                self.lastReportedZoomState = pendingScaleUpdate.zoomState
+                self.onScaleChanged(
+                    pendingScaleUpdate.scaleFactor,
+                    pendingScaleUpdate.zoomState
+                )
             }
         }
 
@@ -886,11 +899,22 @@ final class HighlightingPDFView: PDFView {
 
         let viewPoint = convert(event.locationInWindow, from: nil)
         let pagePoint = convert(viewPoint, to: freeTextDrag.page)
-        var bounds = freeTextDrag.annotation.bounds
+        var bounds = freeTextDrag.currentBounds
         bounds.origin.x = pagePoint.x - freeTextDrag.pointerOffset.x
         bounds.origin.y = pagePoint.y - freeTextDrag.pointerOffset.y
-        freeTextDrag.annotation.bounds = clamped(bounds, to: freeTextDrag.page.bounds(for: .cropBox))
-        setNeedsDisplay(self.bounds)
+        bounds = clamped(bounds, to: freeTextDrag.page.bounds(for: .cropBox))
+        guard bounds != freeTextDrag.currentBounds else {
+            return
+        }
+
+        var updatedDrag = freeTextDrag
+        updatedDrag.currentBounds = bounds
+        self.freeTextDrag = updatedDrag
+        invalidateFreeTextDrag(
+            on: freeTextDrag.page,
+            from: freeTextDrag.currentBounds,
+            to: bounds
+        )
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -903,16 +927,19 @@ final class HighlightingPDFView: PDFView {
         }
 
         if let freeTextDrag {
-            let finalBounds = freeTextDrag.annotation.bounds
-            if finalBounds != freeTextDrag.initialBounds {
-                registerBoundsUndo(
-                    for: freeTextDrag.annotation,
-                    page: freeTextDrag.page,
-                    restoring: freeTextDrag.initialBounds,
-                    actionName: "Move Free Text Note"
-                )
-            }
             self.freeTextDrag = nil
+            guard freeTextDrag.currentBounds != freeTextDrag.initialBounds else {
+                return
+            }
+
+            freeTextDrag.annotation.bounds = freeTextDrag.currentBounds
+            registerBoundsUndo(
+                for: freeTextDrag.annotation,
+                page: freeTextDrag.page,
+                restoring: freeTextDrag.initialBounds,
+                actionName: "Move Free Text Note"
+            )
+            refreshDisplay(for: freeTextDrag.page)
             onAnnotationChanged?()
             return
         }
@@ -1034,6 +1061,36 @@ final class HighlightingPDFView: PDFView {
             beginFitMode(.width)
         case .fitPage:
             beginFitMode(.page)
+        }
+    }
+
+    var currentZoomState: PDFZoomState {
+        switch activeFitMode {
+        case .width:
+            return .fitWidth
+        case .page:
+            return .fitPage
+        case nil:
+            return .custom(scaleFactor: Double(scaleFactor))
+        }
+    }
+
+    func applyZoomState(_ zoomState: PDFZoomState) {
+        switch zoomState.mode {
+        case .fitWidth:
+            applyZoomCommand(.fitWidth)
+        case .fitPage:
+            applyZoomCommand(.fitPage)
+        case .custom:
+            guard let storedScaleFactor = zoomState.scaleFactor,
+                  storedScaleFactor.isFinite,
+                  storedScaleFactor > 0 else {
+                applyZoomCommand(.fitWidth)
+                return
+            }
+            endFitMode()
+            autoScales = false
+            scaleFactor = clampedScaleFactor(CGFloat(storedScaleFactor))
         }
     }
 
@@ -1596,6 +1653,7 @@ final class HighlightingPDFView: PDFView {
             annotation: annotation,
             page: page,
             initialBounds: bounds,
+            currentBounds: bounds,
             pointerOffset: NSPoint(
                 x: pagePoint.x - bounds.origin.x,
                 y: pagePoint.y - bounds.origin.y
@@ -1608,6 +1666,16 @@ final class HighlightingPDFView: PDFView {
         documentView?.setNeedsDisplay(documentView?.bounds ?? .zero)
         setNeedsDisplay(pageBounds)
         setNeedsDisplay(bounds)
+    }
+
+    private func invalidateFreeTextDrag(
+        on page: PDFPage,
+        from oldBounds: NSRect,
+        to newBounds: NSRect
+    ) {
+        let padding = max(2, 4 / max(scaleFactor, 0.01))
+        let pageDirtyBounds = oldBounds.union(newBounds).insetBy(dx: -padding, dy: -padding)
+        setNeedsDisplay(convert(pageDirtyBounds, from: page))
     }
 
     private func drawFreeTextNotes(on page: PDFPage, in context: CGContext) {
@@ -1644,8 +1712,16 @@ final class HighlightingPDFView: PDFView {
             .paragraphStyle: paragraphStyle
         ]
 
+        let drawingBounds: NSRect
+        if let freeTextDrag,
+           freeTextDrag.annotation === annotation {
+            drawingBounds = freeTextDrag.currentBounds
+        } else {
+            drawingBounds = annotation.bounds
+        }
+
         (contents as NSString).draw(
-            with: annotation.bounds.insetBy(dx: Self.freeTextTextPadding, dy: Self.freeTextTextPadding),
+            with: drawingBounds.insetBy(dx: Self.freeTextTextPadding, dy: Self.freeTextTextPadding),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attributes
         )
@@ -1932,6 +2008,7 @@ final class HighlightingPDFView: PDFView {
         let annotation: PDFAnnotation
         let page: PDFPage
         let initialBounds: NSRect
+        var currentBounds: NSRect
         let pointerOffset: NSPoint
     }
 

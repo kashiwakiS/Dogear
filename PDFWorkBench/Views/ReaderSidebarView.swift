@@ -18,6 +18,7 @@ struct ReaderSidebarView: View {
         GeometryReader { geometry in
             let availableHeight = max(1, geometry.size.height)
             let layout = ReaderSidebarLayout(
+                availableHeight: availableHeight,
                 expandedSections: expandedSections
             )
 
