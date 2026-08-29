@@ -3,7 +3,7 @@ import Foundation
 typealias LibraryItem = LibraryFile
 
 struct LibraryState: Codable, Equatable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
 
     var schemaVersion: Int
     var files: [LibraryFile]
@@ -49,6 +49,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         case librarySortIndex
         case lastPageIndex
         case lastPageOffset
+        case lastZoomState
         case isUnavailable
     }
 
@@ -62,6 +63,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
     var librarySortIndex: Int
     var lastPageIndex: Int
     var lastPageOffset: PDFPageOffset?
+    var lastZoomState: PDFZoomState?
     var isUnavailable: Bool
 
     init(
@@ -75,6 +77,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         librarySortIndex: Int = 0,
         lastPageIndex: Int = 0,
         lastPageOffset: PDFPageOffset? = nil,
+        lastZoomState: PDFZoomState? = nil,
         isUnavailable: Bool = false
     ) {
         self.id = id
@@ -87,6 +90,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         self.librarySortIndex = librarySortIndex
         self.lastPageIndex = lastPageIndex
         self.lastPageOffset = lastPageOffset
+        self.lastZoomState = lastZoomState
         self.isUnavailable = isUnavailable
     }
 
@@ -107,6 +111,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         ) ?? 0
         lastPageIndex = try container.decodeIfPresent(Int.self, forKey: .lastPageIndex) ?? 0
         lastPageOffset = try container.decodeIfPresent(PDFPageOffset.self, forKey: .lastPageOffset)
+        lastZoomState = try container.decodeIfPresent(PDFZoomState.self, forKey: .lastZoomState)
         isUnavailable = try container.decodeIfPresent(Bool.self, forKey: .isUnavailable) ?? false
     }
 
@@ -123,6 +128,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         try container.encode(librarySortIndex, forKey: .librarySortIndex)
         try container.encode(lastPageIndex, forKey: .lastPageIndex)
         try container.encodeIfPresent(lastPageOffset, forKey: .lastPageOffset)
+        try container.encodeIfPresent(lastZoomState, forKey: .lastZoomState)
         try container.encode(isUnavailable, forKey: .isUnavailable)
     }
 
@@ -163,6 +169,24 @@ struct LibraryFile: Identifiable, Codable, Equatable {
 struct PDFPageOffset: Codable, Equatable {
     var x: Double
     var y: Double
+}
+
+struct PDFZoomState: Codable, Equatable {
+    enum Mode: String, Codable {
+        case fitWidth
+        case fitPage
+        case custom
+    }
+
+    var mode: Mode
+    var scaleFactor: Double?
+
+    static let fitWidth = PDFZoomState(mode: .fitWidth, scaleFactor: nil)
+    static let fitPage = PDFZoomState(mode: .fitPage, scaleFactor: nil)
+
+    static func custom(scaleFactor: Double) -> PDFZoomState {
+        PDFZoomState(mode: .custom, scaleFactor: scaleFactor)
+    }
 }
 
 struct LibraryGroup: Identifiable, Codable, Equatable, Hashable {

@@ -30,7 +30,7 @@ final class LibraryStore: ObservableObject {
 
         var preparedState = initialState
         preparedState.ensureSystemGroups()
-        if preparedState.schemaVersion < LibraryState.currentSchemaVersion {
+        if preparedState.schemaVersion < 4 {
             Self.migrateOrdering(in: &preparedState)
         }
         preparedState.schemaVersion = LibraryState.currentSchemaVersion
@@ -235,6 +235,21 @@ final class LibraryStore: ObservableObject {
         }
 
         state.files[index].lastPageIndex = safePageIndex
+        persist()
+    }
+
+    func updateZoomState(_ zoomState: PDFZoomState, for url: URL) {
+        guard let index = state.files.firstIndex(where: {
+            $0.url.libraryComparablePath == url.libraryComparablePath
+        }) else {
+            return
+        }
+
+        guard state.files[index].lastZoomState != zoomState else {
+            return
+        }
+
+        state.files[index].lastZoomState = zoomState
         persist()
     }
 

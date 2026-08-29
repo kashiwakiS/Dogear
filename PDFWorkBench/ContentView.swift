@@ -45,6 +45,8 @@ struct ContentView: View {
     @State private var zoomCommandCounter = 0
     @State private var zoomCommand: PDFZoomCommand?
     @State private var zoomScalePercent = 100
+    @State private var pendingZoomPersistence: PendingPDFZoomPersistence?
+    @State private var zoomPersistenceTask: Task<Void, Never>?
 
     private let librarySidebarRange: ClosedRange<CGFloat> = 240...440
     private let annotationSidebarRange: ClosedRange<CGFloat> = 220...390
@@ -205,10 +207,14 @@ struct ContentView: View {
             syncPageJumpText()
         }
         .onChange(of: documentStore.selectedPDFURL) { _, _ in
+            flushPendingZoomPersistence()
             syncPageJumpText()
             aiReadingStore.documentDidChange(
                 to: documentStore.selectedPDFURL?.libraryComparablePath
             )
+        }
+        .onDisappear {
+            flushPendingZoomPersistence()
         }
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
             return FileDropSupport.loadFileURLs(from: providers) { urls in
@@ -516,6 +522,8 @@ struct ContentView: View {
                     selectedSearchResult: documentStore.selectedDocumentSearchResult,
                     targetPageIndex: documentStore.currentPageIndex,
                     displayStyle: readingDisplayStyle,
+                    initialZoomState: libraryStore.file(for: documentStore.selectedPDFURL)?.lastZoomState
+                        ?? .fitWidth,
                     zoomCommand: zoomCommand,
                     outlineNavigationRequest: documentStore.outlineNavigationRequest,
                     outlineEntries: documentStore.outlineEntries,
@@ -579,8 +587,9 @@ struct ContentView: View {
                             libraryStore.updateLastPage(for: selectedPDFURL, pageIndex: pageIndex)
                         }
                     },
-                    onScaleChanged: { scaleFactor in
+                    onScaleChanged: { scaleFactor, zoomState in
                         updateZoomScalePercent(scaleFactor)
+                        scheduleZoomPersistence(zoomState)
                     },
                     onSelectionChanged: { selection in
                         documentStore.recordTextSelection(selection)
@@ -1069,6 +1078,39 @@ struct ContentView: View {
         }
 
         zoomScalePercent = Int((scaleFactor * 100).rounded())
+    }
+
+    private func scheduleZoomPersistence(_ zoomState: PDFZoomState) {
+        guard let selectedPDFURL = documentStore.selectedPDFURL else {
+            return
+        }
+
+        pendingZoomPersistence = PendingPDFZoomPersistence(
+            url: selectedPDFURL,
+            zoomState: zoomState
+        )
+        zoomPersistenceTask?.cancel()
+        zoomPersistenceTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else {
+                return
+            }
+            flushPendingZoomPersistence()
+        }
+    }
+
+    private func flushPendingZoomPersistence() {
+        zoomPersistenceTask?.cancel()
+        zoomPersistenceTask = nil
+        guard let pendingZoomPersistence else {
+            return
+        }
+
+        self.pendingZoomPersistence = nil
+        libraryStore.updateZoomState(
+            pendingZoomPersistence.zoomState,
+            for: pendingZoomPersistence.url
+        )
     }
 
     private func postFeedback(
@@ -1758,6 +1800,11 @@ struct ContentView: View {
 
         openWindow(value: GroupWindowPayload(groupID: group.id))
     }
+}
+
+private struct PendingPDFZoomPersistence {
+    let url: URL
+    let zoomState: PDFZoomState
 }
 
 private struct FlatToolbarIconControl: View {

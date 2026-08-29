@@ -25,20 +25,18 @@ enum ReaderSidebarSection: CaseIterable, Hashable {
 
 struct ReaderSidebarLayout {
     static let collapsedSectionHeight: CGFloat = 36
-    static let expandedSectionHeight: CGFloat = 240
-    static let maximumOccupiedHeightRatio: CGFloat = 0.8
+    static let minimumExpandedSectionHeight: CGFloat = 240
 
+    let availableHeight: CGFloat
     let expandedSections: Set<ReaderSidebarSection>
 
     static func maximumExpandedSectionCount(for availableHeight: CGFloat) -> Int {
         let sectionCount = ReaderSidebarSection.allCases.count
-        let heightLimit = availableHeight * maximumOccupiedHeightRatio
-
         for expandedCount in stride(from: sectionCount, through: 1, by: -1) {
             let collapsedCount = sectionCount - expandedCount
-            let occupiedHeight = CGFloat(expandedCount) * expandedSectionHeight
+            let occupiedHeight = CGFloat(expandedCount) * minimumExpandedSectionHeight
                 + CGFloat(collapsedCount) * collapsedSectionHeight
-            if occupiedHeight <= heightLimit {
+            if occupiedHeight <= availableHeight {
                 return expandedCount
             }
         }
@@ -47,9 +45,17 @@ struct ReaderSidebarLayout {
     }
 
     func height(for section: ReaderSidebarSection) -> CGFloat {
-        expandedSections.contains(section)
-            ? Self.expandedSectionHeight
-            : Self.collapsedSectionHeight
+        guard expandedSections.contains(section) else {
+            return Self.collapsedSectionHeight
+        }
+
+        let expandedCount = max(1, expandedSections.count)
+        let collapsedCount = ReaderSidebarSection.allCases.count - expandedCount
+        let availableExpandedHeight = max(
+            Self.collapsedSectionHeight,
+            availableHeight - CGFloat(collapsedCount) * Self.collapsedSectionHeight
+        )
+        return availableExpandedHeight / CGFloat(expandedCount)
     }
 }
 

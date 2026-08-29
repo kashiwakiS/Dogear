@@ -13,7 +13,31 @@
 - 便捷的键盘交互
 - AI API接口集成
 
-![Dogear reader with Library, outline rail, PDF canvas, and annotation tools](assets/screenshots/dogear-reader.png)
+<p align="center">
+  <img
+    src="assets/screenshots/dogear-reading-workflow-hd.png"
+    alt="Dogear 的 PDF 阅读工作区，显示文档位置导航与 Dog-ear"
+    width="100%"
+  >
+</p>
+
+<p align="center">
+  <sub>文档位置导航、Dog-ear 与专注的 PDF 阅读工作区。</sub>
+</p>
+
+## 阅读体验
+
+<p align="center">
+  <img
+    src="assets/screenshots/dogear-night-reading-hd.png"
+    alt="Dogear 夜间阅读模式，显示全文搜索与文档导航"
+    width="100%"
+  >
+</p>
+
+<p align="center">
+  <sub>夜间阅读、全文搜索与文档导航。</sub>
+</p>
 
 ## 安装
 
