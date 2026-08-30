@@ -4,6 +4,7 @@ import Foundation
 @MainActor
 final class AIReadingStore: ObservableObject {
     @Published private(set) var summaryMarkdown = ""
+    @Published private(set) var summaryRevision = 0
     @Published private(set) var conversation: [AIConversationTurn] = []
     @Published private(set) var pendingRequest: AIPendingRequest?
     @Published private(set) var isPreparing = false
@@ -74,6 +75,7 @@ final class AIReadingStore: ObservableObject {
                         pageNumbers: (0..<store.pageCount).map { $0 + 1 }
                     )
                     summaryMarkdown = localOutlineFallback(from: store, context: context)
+                    summaryRevision += 1
                     resultStore.summaryMarkdown = summaryMarkdown
                     errorMessage = "Cloud AI is not configured. Showing a local structural outline instead."
                 }
@@ -124,6 +126,25 @@ final class AIReadingStore: ObservableObject {
         }
     }
 
+    func useAnnotationSelection(
+        _ text: String,
+        documentName: String,
+        pageNumber: Int
+    ) {
+        guard !isPreparing, !isRunning else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        capturedSelection = AIContextPackage(
+            title: documentName,
+            text: trimmed,
+            pageNumbers: [pageNumber]
+        )
+        conversation = []
+        resultStore.conversation = []
+        pendingRequest = nil
+        errorMessage = nil
+    }
+
     func sendPendingRequest() {
         guard let pendingRequest, !isRunning else { return }
         self.pendingRequest = nil
@@ -148,6 +169,7 @@ final class AIReadingStore: ObservableObject {
                         pendingRequest.context,
                         provider: provider
                     )
+                    summaryRevision += 1
                     resultStore.summaryMarkdown = summaryMarkdown
                 case .askSelection:
                     guard let question = pendingRequest.question else { return }
@@ -208,6 +230,7 @@ final class AIReadingStore: ObservableObject {
         capturedSelection = nil
         resultStore.clear()
         summaryMarkdown = ""
+        summaryRevision = 0
         conversation = []
         questionText = ""
         errorMessage = nil
@@ -224,8 +247,8 @@ final class AIReadingStore: ObservableObject {
         progressDescription = "Uploading and summarizing the complete PDF..."
         return try await provider.respond(
             to: AIResponseRequest(
-                instructions: "Summarize the attached complete PDF faithfully in well-structured Markdown. Preserve important claims and include useful [p. N] page references. Do not invent facts. Use the predominant language of the document.",
-                input: "Create one coherent summary of the complete document: \(context.title)",
+                instructions: "Summarize the attached complete PDF faithfully in concise Markdown. Use 3–5 short bullets or a brief paragraph, normally no more than 180 words. Preserve the central claim, strongest evidence, and important limitation with useful [p. N] page references. Do not invent facts. Use the predominant language of the document.",
+                input: "Create a brief reading summary of the complete document: \(context.title)",
                 file: file
             )
         ).text

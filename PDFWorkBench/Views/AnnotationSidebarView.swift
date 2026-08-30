@@ -6,11 +6,18 @@ struct AnnotationSidebarView: View {
     let expandedSections: Set<ReaderSidebarSection>
     let onToggleSection: (ReaderSidebarSection) -> Void
 
+    private let maximumVisibleAIHighlightGroupRows = 5
+    private let aiHighlightGroupRowHeight: CGFloat = 24
+    private let aiHighlightGroupRowSpacing: CGFloat = 5
+
     var body: some View {
         VStack(spacing: 0) {
-            expandableSection(.fullText) {
-                documentSearchSection
-            }
+            documentSearchSection
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, expandedSections.contains(.fullText) ? 12 : 6)
+                .frame(height: layout.height(for: .fullText))
+                .clipped()
 
             ExpandableSidebarSection(
                 section: .dogears,
@@ -43,8 +50,11 @@ struct AnnotationSidebarView: View {
 
     private var annotationSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("Search highlights and notes", text: $documentStore.searchText)
-                .textFieldStyle(.roundedBorder)
+            if !documentStore.aiHighlightGroups.isEmpty {
+                aiHighlightGroupSection
+
+                Divider()
+            }
 
             HStack(spacing: 8) {
                 Text(documentStore.filteredAnnotationCountDescription)
@@ -75,10 +85,10 @@ struct AnnotationSidebarView: View {
                     Image(systemName: "highlighter")
                         .foregroundStyle(.secondary)
 
-                    Text("No Matches")
+                    Text("No Annotations")
                         .font(.callout.weight(.semibold))
 
-                    Text("Highlights and notes appear here.")
+                    Text(emptyAnnotationDescription)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -92,7 +102,6 @@ struct AnnotationSidebarView: View {
                     } label: {
                         AnnotationRowView(
                             annotation: annotation,
-                            searchText: documentStore.searchText,
                             isSelected: annotation.id == documentStore.selectedAnnotationID
                         )
                     }
@@ -109,6 +118,91 @@ struct AnnotationSidebarView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var aiHighlightGroupSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Toggle(
+                "AI Highlights",
+                isOn: Binding(
+                    get: { documentStore.showsAIGeneratedContent },
+                    set: { documentStore.setAllAIHighlightGroupsVisible($0) }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .font(.caption.weight(.semibold))
+
+            ScrollView(
+                .vertical,
+                showsIndicators: documentStore.aiHighlightGroups.count
+                    > maximumVisibleAIHighlightGroupRows
+            ) {
+                LazyVStack(alignment: .leading, spacing: aiHighlightGroupRowSpacing) {
+                    ForEach(documentStore.aiHighlightGroups) { group in
+                        let isActive = documentStore.activeAIHighlightGroupID == group.id
+                        HStack(spacing: 7) {
+                            Toggle(
+                                "",
+                                isOn: Binding(
+                                    get: {
+                                        documentStore.isAIHighlightGroupVisible(group.id)
+                                    },
+                                    set: {
+                                        documentStore.setAIHighlightGroupVisible(
+                                            group.id,
+                                            isVisible: $0
+                                        )
+                                    }
+                                )
+                            )
+                            .labelsHidden()
+                            .toggleStyle(.checkbox)
+
+                            Button {
+                                documentStore.activateAIHighlightGroup(isActive ? nil : group.id)
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Text(group.displayTitle)
+                                        .font(.caption.weight(isActive ? .semibold : .regular))
+                                        .lineLimit(1)
+                                    Spacer(minLength: 6)
+                                    Text("\(documentStore.aiHighlightCount(in: group.id))")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(
+                                    isActive ? Color.accentColor.opacity(0.12) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 5)
+                                )
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .frame(height: aiHighlightGroupRowHeight)
+                    }
+                }
+            }
+            .frame(height: aiHighlightGroupListHeight)
+        }
+    }
+
+    private var aiHighlightGroupListHeight: CGFloat {
+        let rowCount = min(
+            documentStore.aiHighlightGroups.count,
+            maximumVisibleAIHighlightGroupRows
+        )
+        guard rowCount > 0 else { return 0 }
+        return CGFloat(rowCount) * aiHighlightGroupRowHeight
+            + CGFloat(rowCount - 1) * aiHighlightGroupRowSpacing
+    }
+
+    private var emptyAnnotationDescription: LocalizedStringKey {
+        documentStore.activeAIHighlightGroupID == nil
+            ? "Highlights and notes appear here."
+            : "No highlights match the current AI Highlight group."
     }
 
     private var dogearSection: some View {
@@ -144,43 +238,45 @@ struct AnnotationSidebarView: View {
             TextField("Search document text", text: $documentStore.documentSearchText)
                 .textFieldStyle(.roundedBorder)
 
-            HStack(spacing: 8) {
-                Text(documentStore.documentSearchCountDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if expandedSections.contains(.fullText) {
+                HStack(spacing: 8) {
+                    Text(documentStore.documentSearchCountDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-                Spacer()
+                    Spacer()
 
-                Button {
-                    documentStore.selectPreviousDocumentSearchResult()
-                } label: {
-                    Image(systemName: "chevron.up")
-                }
-                .disabled(documentStore.documentSearchResults.isEmpty)
-                .help("Previous text match")
-
-                Button {
-                    documentStore.selectNextDocumentSearchResult()
-                } label: {
-                    Image(systemName: "chevron.down")
-                }
-                .disabled(documentStore.documentSearchResults.isEmpty)
-                .help("Next text match")
-            }
-
-            if !documentStore.documentSearchResults.isEmpty {
-                List(documentStore.documentSearchResults) { result in
                     Button {
-                        documentStore.selectDocumentSearchResult(result)
+                        documentStore.selectPreviousDocumentSearchResult()
                     } label: {
-                        SearchResultRowView(
-                            result: result,
-                            isSelected: result.id == documentStore.selectedDocumentSearchResultID
-                        )
+                        Image(systemName: "chevron.up")
                     }
-                    .buttonStyle(.plain)
+                    .disabled(documentStore.documentSearchResults.isEmpty)
+                    .help("Previous text match")
+
+                    Button {
+                        documentStore.selectNextDocumentSearchResult()
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .disabled(documentStore.documentSearchResults.isEmpty)
+                    .help("Next text match")
                 }
-                .listStyle(.inset)
+
+                if !documentStore.documentSearchResults.isEmpty {
+                    List(documentStore.documentSearchResults) { result in
+                        Button {
+                            documentStore.selectDocumentSearchResult(result)
+                        } label: {
+                            SearchResultRowView(
+                                result: result,
+                                isSelected: result.id == documentStore.selectedDocumentSearchResultID
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.inset)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -307,7 +403,6 @@ private struct SearchResultRowView: View {
 
 private struct AnnotationRowView: View {
     let annotation: PDFAnnotationItem
-    let searchText: String
     let isSelected: Bool
 
     var body: some View {
@@ -319,12 +414,24 @@ private struct AnnotationRowView: View {
 
                 Spacer()
 
-                Text(annotation.kind.rawValue)
+                if annotation.isAIGenerated {
+                    Text("AI")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.cyan)
+
+                    if let category = annotation.aiCategory {
+                        Text(category.displayTitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text(annotation.kind.displayTitle)
                     .font(.caption2)
                     .foregroundStyle(annotation.kind == .highlight ? .yellow : .blue)
             }
 
-            highlightedText(annotation.displayText, query: searchText)
+            Text(annotation.displayText)
                 .font(.callout)
                 .lineLimit(4)
                 .foregroundStyle(.primary)
@@ -335,31 +442,4 @@ private struct AnnotationRowView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
-    private func highlightedText(_ text: String, query: String) -> Text {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !trimmedQuery.isEmpty else {
-            return Text(text)
-        }
-
-        var attributedText = AttributedString(text)
-        var searchStart = text.startIndex
-
-        while searchStart < text.endIndex,
-              let range = text.range(
-                of: trimmedQuery,
-                options: [.caseInsensitive, .diacriticInsensitive],
-                range: searchStart..<text.endIndex
-              ) {
-            if let attributedStart = AttributedString.Index(range.lowerBound, within: attributedText),
-               let attributedEnd = AttributedString.Index(range.upperBound, within: attributedText) {
-                attributedText[attributedStart..<attributedEnd].font = .body.bold()
-                attributedText[attributedStart..<attributedEnd].foregroundColor = .accentColor
-            }
-
-            searchStart = range.upperBound
-        }
-
-        return Text(attributedText)
-    }
 }

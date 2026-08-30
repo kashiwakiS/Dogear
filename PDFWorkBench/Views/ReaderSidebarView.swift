@@ -4,6 +4,7 @@ import SwiftUI
 struct ReaderSidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
     @ObservedObject var aiStore: AIReadingStore
+    @ObservedObject var aiHighlightStore: AIHighlightGenerationStore
 
     @State private var expandedSections: Set<ReaderSidebarSection> = [
         .annotations,
@@ -35,6 +36,7 @@ struct ReaderSidebarView: View {
                 AISidebarView(
                     documentStore: documentStore,
                     aiStore: aiStore,
+                    aiHighlightStore: aiHighlightStore,
                     layout: layout,
                     expandedSections: expandedSections,
                     onToggleSection: {
@@ -44,9 +46,29 @@ struct ReaderSidebarView: View {
             }
             .onAppear {
                 enforceExpansionCapacity(availableHeight: availableHeight)
+                if !documentStore.documentSearchText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty {
+                    expand(.fullText, availableHeight: availableHeight)
+                }
             }
             .onChange(of: geometry.size.height) { _, newHeight in
                 enforceExpansionCapacity(availableHeight: max(1, newHeight))
+            }
+            .onChange(of: documentStore.activeAIHighlightGroupID) { _, groupID in
+                guard groupID != nil else { return }
+                expand(.annotations, availableHeight: availableHeight)
+            }
+            .onChange(of: documentStore.documentSearchText) { _, query in
+                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    collapseFullTextSearch()
+                } else {
+                    expand(.fullText, availableHeight: availableHeight)
+                }
+            }
+            .onChange(of: aiStore.capturedSelection) { _, selection in
+                guard selection != nil else { return }
+                expand(.askSelection, availableHeight: availableHeight)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -85,6 +107,30 @@ struct ReaderSidebarView: View {
         }
     }
 
+    private func expand(
+        _ section: ReaderSidebarSection,
+        availableHeight: CGFloat
+    ) {
+        withAnimation(.easeInOut(duration: 0.22)) {
+            expandedSections.insert(section)
+            expansionOrder.removeAll { $0 == section }
+            expansionOrder.append(section)
+            trimExpandedSections(
+                to: ReaderSidebarLayout.maximumExpandedSectionCount(
+                    for: availableHeight
+                ),
+                preserving: section
+            )
+        }
+    }
+
+    private func collapseFullTextSearch() {
+        withAnimation(.easeInOut(duration: 0.22)) {
+            expandedSections.remove(.fullText)
+            expansionOrder.removeAll { $0 == .fullText }
+        }
+    }
+
     private func trimExpandedSections(
         to maximumCount: Int,
         preserving preservedSection: ReaderSidebarSection?
@@ -101,19 +147,22 @@ struct ReaderSidebarView: View {
     }
 }
 
+private enum PendingAIHighlightContinuation: Equatable {
+    case overview(summaryRevision: Int)
+    case question(String, conversationCount: Int)
+}
+
 private struct AISidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
     @ObservedObject var aiStore: AIReadingStore
+    @ObservedObject var aiHighlightStore: AIHighlightGenerationStore
     let layout: ReaderSidebarLayout
     let expandedSections: Set<ReaderSidebarSection>
     let onToggleSection: (ReaderSidebarSection) -> Void
+    @State private var pendingHighlightContinuation: PendingAIHighlightContinuation?
 
     var body: some View {
         VStack(spacing: 0) {
-            expandableSection(.documentSummary) {
-                summarySection
-            }
-
             ExpandableSidebarSection(
                 section: .askSelection,
                 isExpanded: expandedSections.contains(.askSelection),
@@ -143,6 +192,25 @@ private struct AISidebarView: View {
                                     .foregroundStyle(.orange)
                                     .textSelection(.enabled)
                             }
+
+                            if let report = aiHighlightStore.lastReport {
+                                Label(report, systemImage: "checkmark.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+
+                            if let error = aiHighlightStore.errorMessage {
+                                Label(error, systemImage: "exclamationmark.triangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                    .textSelection(.enabled)
+                            }
+
+#if DEBUG
+                            Divider()
+                            highlightDiagnostics
+#endif
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -151,52 +219,44 @@ private struct AISidebarView: View {
         }
         .overlay {
             if aiStore.isPreparing
-                || (aiStore.isRunning && aiStore.activeTaskKind == .summarizeDocument) {
+                || (aiStore.isRunning && aiStore.activeTaskKind == .summarizeDocument)
+                || aiHighlightStore.isRunning {
                 VStack(spacing: 10) {
                     ProgressView()
-                    Text(aiStore.progressDescription.isEmpty ? "Preparing context..." : aiStore.progressDescription)
+                    Text(documentActionProgressDescription)
                         .font(.caption)
-                    Button("Cancel") { aiStore.cancel() }
+                    Button("Cancel") { cancelDocumentAction() }
                 }
                 .padding(18)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
-    }
-
-    private func expandableSection<Content: View>(
-        _ section: ReaderSidebarSection,
-        @ViewBuilder content: @escaping () -> Content
-    ) -> some View {
-        ExpandableSidebarSection(
-            section: section,
-            isExpanded: expandedSections.contains(section),
-            height: layout.height(for: section),
-            onToggle: { onToggleSection(section) },
-            content: content
-        )
-    }
-
-    private var summarySection: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                Button("Review Complete-PDF Summary") {
-                    aiStore.prepareDocumentSummary(from: documentStore)
-                }
-                .disabled(documentStore.document == nil || aiStore.isPreparing || aiStore.isRunning)
-
-                if !aiStore.summaryMarkdown.isEmpty {
-                    markdownText(aiStore.summaryMarkdown)
-                        .textSelection(.enabled)
-
-                    Button("Copy Summary") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(aiStore.summaryMarkdown, forType: .string)
-                    }
-                    .font(.caption)
-                }
+        .onChange(of: aiStore.summaryRevision) { _, revision in
+            guard case .overview(let startingRevision) = pendingHighlightContinuation,
+                  revision > startingRevision
+            else {
+                return
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            pendingHighlightContinuation = nil
+            aiHighlightStore.generateOverview(from: documentStore)
+        }
+        .onChange(of: aiStore.conversation.count) { _, count in
+            guard case .question(let question, let startingCount) = pendingHighlightContinuation,
+                  count > startingCount
+            else {
+                return
+            }
+            pendingHighlightContinuation = nil
+            aiHighlightStore.questionText = question
+            aiHighlightStore.generateForQuestion(from: documentStore)
+        }
+        .onChange(of: aiStore.errorMessage) { _, errorMessage in
+            if errorMessage != nil {
+                pendingHighlightContinuation = nil
+            }
+        }
+        .onChange(of: documentStore.document.map(ObjectIdentifier.init)) { _, _ in
+            pendingHighlightContinuation = nil
         }
     }
 
@@ -211,9 +271,26 @@ private struct AISidebarView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Select text in the PDF to begin.")
+                Text("Select PDF or margin-note text for an answer. Without a selection, a question finds evidence highlights in the document.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !aiStore.summaryMarkdown.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    markdownText(aiStore.summaryMarkdown)
+                        .textSelection(.enabled)
+
+                    Button("Copy Summary") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(aiStore.summaryMarkdown, forType: .string)
+                    }
+                    .font(.caption)
+                }
+                .padding(9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
 
             ForEach(aiStore.conversation) { turn in
@@ -233,7 +310,10 @@ private struct AISidebarView: View {
                                 : aiStore.progressDescription)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Button("Cancel") { aiStore.cancel() }
+                            Button("Cancel") {
+                                pendingHighlightContinuation = nil
+                                aiStore.cancel()
+                            }
                                 .font(.caption)
                         }
                         .padding(.top, 4)
@@ -243,30 +323,145 @@ private struct AISidebarView: View {
             }
 
             VStack(alignment: .trailing, spacing: 7) {
-                TextField("Ask a question...", text: $aiStore.questionText, axis: .vertical)
+                ZStack(alignment: .topLeading) {
+                    TextField(
+                        "",
+                        text: $aiStore.questionText,
+                        axis: .vertical
+                    )
                     .lineLimit(2...5)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { sendQuestion() }
+                    .onSubmit { submitQuestionIfPossible() }
 
-                Button(action: sendQuestion) {
-                    Label("Send", systemImage: "arrow.up")
-                        .font(.callout.weight(.semibold))
+                    if aiStore.questionText.isEmpty {
+                        Text("Ask a question, or leave blank to summarize and highlight…")
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 5)
+                            .allowsHitTesting(false)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .help("Send")
-                .accessibilityLabel("Send")
-                .disabled(
-                    aiStore.questionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || (aiStore.capturedSelection == nil && documentStore.currentTextSelection == nil)
-                        || aiStore.isRunning
-                )
+                .accessibilityLabel("Ask a question, or leave blank to summarize and highlight…")
+
+                HStack {
+                    Spacer()
+
+                    Button(action: submitUnifiedAction) {
+                        Label("Send", systemImage: "arrow.up")
+                            .font(.callout.weight(.semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help(submitActionHelp)
+                    .accessibilityLabel("Send")
+                    .disabled(!canSubmit)
+                }
+                .controlSize(.small)
             }
         }
     }
 
-    private func sendQuestion() {
-        aiStore.sendQuestion(from: documentStore)
+    private var isAnyAIActionRunning: Bool {
+        aiStore.isPreparing
+            || aiStore.isRunning
+            || aiStore.pendingRequest != nil
+            || aiHighlightStore.isRunning
     }
+
+    private var canSubmit: Bool {
+        documentStore.document != nil && !isAnyAIActionRunning
+    }
+
+    private var submitActionHelp: String {
+        let question = aiStore.questionText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if question.isEmpty {
+            return L10n.string("Summarize and highlight the document")
+        }
+        if aiStore.capturedSelection != nil || documentStore.currentTextSelection != nil {
+            return L10n.string("Ask and highlight supporting evidence")
+        }
+        return L10n.string("Highlight evidence for this question")
+    }
+
+    private var documentActionProgressDescription: String {
+        if aiHighlightStore.isRunning {
+            return aiHighlightStore.progressDescription.isEmpty
+                ? String(localized: "Preparing highlights…")
+                : aiHighlightStore.progressDescription
+        }
+        return aiStore.progressDescription.isEmpty
+            ? String(localized: "Preparing context...")
+            : aiStore.progressDescription
+    }
+
+    private func cancelDocumentAction() {
+        pendingHighlightContinuation = nil
+        if aiHighlightStore.isRunning {
+            aiHighlightStore.cancel()
+        } else {
+            aiStore.cancel()
+        }
+    }
+
+    private func submitQuestionIfPossible() {
+        guard canSubmit else { return }
+        submitUnifiedAction()
+    }
+
+    private func submitUnifiedAction() {
+        let question = aiStore.questionText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if question.isEmpty {
+            pendingHighlightContinuation = .overview(
+                summaryRevision: aiStore.summaryRevision
+            )
+            aiStore.prepareDocumentSummary(from: documentStore)
+            return
+        }
+
+        if aiStore.capturedSelection != nil || documentStore.currentTextSelection != nil {
+            pendingHighlightContinuation = .question(
+                question,
+                conversationCount: aiStore.conversation.count
+            )
+            aiStore.sendQuestion(from: documentStore)
+        } else {
+            aiHighlightStore.questionText = question
+            aiHighlightStore.generateForQuestion(from: documentStore)
+        }
+    }
+
+#if DEBUG
+    private var highlightDiagnostics: some View {
+        DisclosureGroup("Diagnostics") {
+            VStack(alignment: .leading, spacing: 7) {
+                Toggle(
+                    "Include passage content in local logs",
+                    isOn: $aiHighlightStore.recordsDetailedTraceContent
+                )
+                .font(.caption)
+
+                Text("Detailed logs contain document excerpts and questions. API keys and authorization headers are never recorded.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(aiHighlightStore.providerDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Reveal Workflow Log") {
+                    aiHighlightStore.revealTraceLog()
+                }
+                .font(.caption)
+            }
+            .padding(.top, 4)
+        }
+        .font(.caption)
+    }
+#endif
 
     private func conversationTurn(_ turn: AIConversationTurn) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -345,7 +540,10 @@ private struct AISidebarView: View {
             }
 
             HStack {
-                Button("Cancel", role: .cancel) { aiStore.cancelPendingRequest() }
+                Button("Cancel", role: .cancel) {
+                    pendingHighlightContinuation = nil
+                    aiStore.cancelPendingRequest()
+                }
                 Spacer()
                 Button("Send to Provider") { aiStore.sendPendingRequest() }
                     .buttonStyle(.borderedProminent)

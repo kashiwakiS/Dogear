@@ -1,15 +1,16 @@
-# Dogear 0.1.5
+# Dogear 0.2.1
 
-发布日期：2026-08-29
-版本：0.1.5
+发布日期：2026-08-30
+版本：0.2.1
 
 ## 中文
 
 ### 本版更新
 
-- 每份 PDF 现在会分别记住“适合页宽”“适合整页”或自定义缩放比例；首次打开的文档默认使用“适合页宽”，切换和重新打开文档时的缩放恢复也更加稳定。
-- 优化批注与 AI 侧边栏的空间利用，展开内容可使用更多可用高度，并在窗口空间不足时更合理地自动折叠。
-- 优化 FreeText 备注的拖动体验，移动过程更加流畅，只在拖动结束后保存最终位置。
+- 新增来源可追溯的 AI Highlights：可从统一 Ask 入口生成文档概览，或按问题定位并高亮相关证据。
+- 每次 AI 请求形成独立的命名批注组，可显示任意组合、限定导航范围、在文档位置导航条中查看来源，并在导出 PDF 时选择需要保留的组。
+- 新增 Margin Canvas，在 PDF 页面右侧显示批注说明；其中的文本可直接选中并作为后续提问上下文。
+- AI Highlights 以标准 PDF 批注写入应用管理的工作副本，整组生成可一次撤销和重做，原始 PDF 仍保持不变。
 
 ### 使用要求
 
@@ -19,9 +20,10 @@
 
 ### What's new
 
-- Each PDF now remembers its Fit Width, Fit Page, or custom zoom setting; newly opened documents default to Fit Width, with more reliable restoration when switching or reopening documents.
-- Improved space usage in the Annotations and AI sidebar so expanded content can use more of the available height and collapse more appropriately when space is limited.
-- Improved FreeText note dragging for smoother movement, with the final position saved only after the drag finishes.
+- Added source-grounded AI Highlights from the unified Ask workflow, for both document overviews and question-focused evidence.
+- Each AI request becomes a named annotation group. Show any combination, scope navigation to one request, see its source positions in the document rail, and choose which groups to retain when exporting a PDF.
+- Added Margin Canvas for reading annotation explanations beside the PDF page and selecting that text as context for a follow-up question.
+- AI Highlights remain standard PDF annotations in the app-managed working copy; a generated group can be undone or redone as one operation while the original PDF stays unchanged.
 
 ### Requirements
 

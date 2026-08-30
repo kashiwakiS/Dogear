@@ -4,6 +4,23 @@ import Foundation
 import PDFKit
 import UniformTypeIdentifiers
 
+enum AIHighlightCommitError: LocalizedError {
+    case incompleteResolution
+    case missingPage(Int)
+    case annotationCommitFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .incompleteResolution:
+            return "The verified AI highlight draft did not have a complete anchor set."
+        case .missingPage(let pageNumber):
+            return "PDF page \(pageNumber) is no longer available."
+        case .annotationCommitFailed:
+            return "Dogear could not apply the complete AI highlight batch."
+        }
+    }
+}
+
 @MainActor
 final class PDFDocumentStore: ObservableObject {
     @Published var selectedPDFURL: URL?
@@ -11,7 +28,6 @@ final class PDFDocumentStore: ObservableObject {
     @Published var hasUnsavedChanges = false
     @Published var annotations: [PDFAnnotationItem] = []
     @Published var selectedAnnotationID: PDFAnnotationItem.ID?
-    @Published var searchText = ""
     @Published var documentSearchText = "" {
         didSet {
             refreshDocumentSearchResults()
@@ -27,6 +43,16 @@ final class PDFDocumentStore: ObservableObject {
     @Published private(set) var outlineNavigationRequest: PDFOutlineNavigationRequest?
     @Published private(set) var currentTextSelection: PDFTextSelectionSnapshot?
     @Published private(set) var dogears: [DogearMarker] = []
+    @Published private(set) var aiHighlightGroups: [AIHighlightGroup] = []
+    @Published private(set) var visibleAIHighlightGroupIDs: Set<UUID> = []
+    @Published private(set) var activeAIHighlightGroupID: UUID?
+    @Published var showsAIGeneratedContent = true {
+        didSet {
+            guard oldValue != showsAIGeneratedContent else { return }
+            guard !isSynchronizingAIMasterVisibility else { return }
+            setAllAIHighlightGroupsVisible(showsAIGeneratedContent)
+        }
+    }
 
     private let outlineProvider: KeywordOutlineProviding
     private let documentOutlineProvider: DocumentOutlineProviding
@@ -34,6 +60,7 @@ final class PDFDocumentStore: ObservableObject {
     private let saveQueue: PDFSaveQueue
     private let feedbackCenter: OperationFeedbackCenter
     private let metadataStore: DocumentMetadataStore
+    private let aiHighlightGroupStore: AIHighlightGroupStore
     private var accessedSecurityScopedURL: URL?
     private var openedDocumentID = UUID()
     private var saveGeneration = 0
@@ -41,12 +68,14 @@ final class PDFDocumentStore: ObservableObject {
     private var outlineLoadingTask: Task<Void, Never>?
     private weak var undoManager: UndoManager?
     private var currentLibraryFileID: UUID?
+    private var isSynchronizingAIMasterVisibility = false
 
     init(
         feedbackCenter: OperationFeedbackCenter,
         outlineProvider: KeywordOutlineProviding? = nil,
         documentOutlineProvider: DocumentOutlineProviding? = nil,
         metadataStore: DocumentMetadataStore? = nil,
+        aiHighlightGroupStore: AIHighlightGroupStore? = nil,
         workingCopyStore: PDFWorkingCopyStore? = nil,
         saveQueue: PDFSaveQueue? = nil
     ) {
@@ -54,6 +83,7 @@ final class PDFDocumentStore: ObservableObject {
         self.outlineProvider = outlineProvider ?? FallbackKeywordOutlineProvider()
         self.documentOutlineProvider = documentOutlineProvider ?? DocumentOutlineService()
         self.metadataStore = metadataStore ?? .shared
+        self.aiHighlightGroupStore = aiHighlightGroupStore ?? .shared
         self.workingCopyStore = workingCopyStore ?? (try? PDFWorkingCopyStore())
         self.saveQueue = saveQueue ?? .shared
     }
@@ -67,15 +97,19 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     var filteredAnnotations: [PDFAnnotationItem] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !query.isEmpty else {
-            return annotations
+        var visibleAnnotations = annotations.filter { annotation in
+            guard annotation.isAIGenerated else { return true }
+            guard let groupID = annotation.aiGroupID else { return false }
+            return visibleAIHighlightGroupIDs.contains(groupID)
         }
 
-        return annotations.filter {
-            $0.searchableText.localizedCaseInsensitiveContains(query)
+        if let activeAIHighlightGroupID {
+            visibleAnnotations = visibleAnnotations.filter {
+                $0.aiGroupID == activeAIHighlightGroupID
+            }
         }
+
+        return visibleAnnotations
     }
 
     var selectedAnnotation: PDFAnnotationItem? {
@@ -96,14 +130,88 @@ final class PDFDocumentStore: ObservableObject {
 
     var filteredAnnotationCountDescription: String {
         let count = filteredAnnotations.count
-        let noun = count == 1 ? "match" : "matches"
-        return "\(count) \(noun)"
+        return count == 1
+            ? L10n.string("1 annotation")
+            : L10n.string("\(count) annotations")
     }
 
     var documentSearchCountDescription: String {
         let count = documentSearchResults.count
-        let noun = count == 1 ? "match" : "matches"
-        return "\(count) \(noun)"
+        return count == 1
+            ? L10n.string("1 match")
+            : L10n.string("\(count) matches")
+    }
+
+    var visibleAIHighlightRailMarkers: [AIHighlightRailMarker] {
+        guard let document else { return [] }
+        let groupsByID = Dictionary(uniqueKeysWithValues: aiHighlightGroups.map { ($0.id, $0) })
+        var markers: [AIHighlightRailMarker] = []
+
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let pageBounds = page.bounds(for: .cropBox)
+            guard pageBounds.height > 0 else { continue }
+
+            for (annotationIndex, annotation) in page.annotations.enumerated() {
+                let classification = AIAnnotationProvenance.classify(annotation)
+                guard classification.isAI,
+                      let groupID = AIAnnotationProvenance.displayGroupID(of: annotation),
+                      visibleAIHighlightGroupIDs.contains(groupID)
+                else {
+                    continue
+                }
+
+                let annotationID = PDFAnnotationItem.id(
+                    pageIndex: pageIndex,
+                    annotationIndex: annotationIndex,
+                    annotation: annotation
+                )
+                let relativePosition = min(
+                    1,
+                    max(0, (pageBounds.maxY - annotation.bounds.maxY) / pageBounds.height)
+                )
+                let inheritedLevel = outlineEntries
+                    .filter { entry in
+                        guard entry.target.pageIndex <= pageIndex else { return false }
+                        if entry.target.pageIndex < pageIndex { return true }
+                        return (entry.target.relativePagePosition ?? 0) <= relativePosition
+                    }
+                    .max { lhs, rhs in
+                        let lhsPosition = (
+                            lhs.target.pageIndex,
+                            lhs.target.relativePagePosition ?? 0
+                        )
+                        let rhsPosition = (
+                            rhs.target.pageIndex,
+                            rhs.target.relativePagePosition ?? 0
+                        )
+                        return lhsPosition < rhsPosition
+                    }?
+                    .level ?? 0
+
+                markers.append(
+                    AIHighlightRailMarker(
+                        id: annotationID,
+                        annotationID: annotationID,
+                        pageIndex: pageIndex,
+                        relativePagePosition: relativePosition,
+                        level: inheritedLevel,
+                        title: groupsByID[groupID]?.displayTitle
+                            ?? L10n.string("AI Highlight")
+                    )
+                )
+            }
+        }
+
+        return markers.sorted { lhs, rhs in
+            if lhs.pageIndex != rhs.pageIndex {
+                return lhs.pageIndex < rhs.pageIndex
+            }
+            if lhs.relativePagePosition != rhs.relativePagePosition {
+                return lhs.relativePagePosition < rhs.relativePagePosition
+            }
+            return lhs.id < rhs.id
+        }
     }
 
     var canDeleteCurrentPage: Bool {
@@ -195,7 +303,12 @@ final class PDFDocumentStore: ObservableObject {
         currentTextSelection = nil
         currentLibraryFileID = nil
         dogears = []
+        aiHighlightGroups = []
+        visibleAIHighlightGroupIDs = []
+        activeAIHighlightGroupID = nil
+        synchronizeAIMasterVisibility()
         refreshAnnotations()
+        refreshAIHighlightGroups()
         refreshDocumentSearchResults(selectFirstResult: true)
         refreshDocumentOutline(for: document)
         postFeedback(
@@ -211,6 +324,7 @@ final class PDFDocumentStore: ObservableObject {
     func bindLibraryFile(_ fileID: UUID) {
         currentLibraryFileID = fileID
         refreshDogears()
+        refreshAIHighlightGroups()
     }
 
     var currentPageDogear: DogearMarker? {
@@ -309,9 +423,169 @@ final class PDFDocumentStore: ObservableObject {
         enqueueCurrentDocumentSave(action: action, trigger: trigger)
     }
 
+    @discardableResult
+    func applyAIHighlights(
+        stagedHighlights: [StagedAIHighlight],
+        anchors: [ResolvedAIHighlightAnchor],
+        group: AIHighlightGroup? = nil,
+        trigger: FeedbackTrigger? = nil
+    ) throws -> Int {
+        guard let document else { return 0 }
+        let anchorsByCandidateID = Dictionary(
+            uniqueKeysWithValues: anchors.map { ($0.candidateID, $0) }
+        )
+        guard anchorsByCandidateID.count == anchors.count,
+              stagedHighlights.count == anchors.count
+        else {
+            throw AIHighlightCommitError.incompleteResolution
+        }
+
+        let factory = AIHighlightNativeAnnotationFactory()
+        let effectiveGroup = group ?? AIHighlightGroup(
+            requestKind: .recovered,
+            providerName: AIAnnotationProvenance.authorName,
+            modelName: "",
+            promptVersion: AIHighlightWorkflowService.promptVersion
+        )
+        var prepared: [AIAnnotationUndoRecord] = []
+        for staged in stagedHighlights {
+            guard let anchor = anchorsByCandidateID[staged.candidate.candidateID] else {
+                throw AIHighlightCommitError.incompleteResolution
+            }
+            guard let page = document.page(at: anchor.pageNumber - 1) else {
+                throw AIHighlightCommitError.missingPage(anchor.pageNumber)
+            }
+            if hasDuplicateAIHighlight(anchor, on: page) {
+                continue
+            }
+            let annotation = try factory.makeAnnotation(
+                anchor: anchor,
+                staged: staged,
+                groupID: effectiveGroup.id
+            )
+            annotation.shouldDisplay = true
+            prepared.append(AIAnnotationUndoRecord(page: page, annotation: annotation))
+        }
+
+        guard !prepared.isEmpty else { return 0 }
+        var applied: [AIAnnotationUndoRecord] = []
+        for record in prepared {
+            record.page.addAnnotation(record.annotation)
+            guard record.annotation.page === record.page else {
+                for appliedRecord in applied where appliedRecord.annotation.page === appliedRecord.page {
+                    appliedRecord.page.removeAnnotation(appliedRecord.annotation)
+                }
+                throw AIHighlightCommitError.annotationCommitFailed
+            }
+            applied.append(record)
+        }
+
+        var committedGroup = effectiveGroup
+        committedGroup.annotationUniqueNames = applied.compactMap {
+            AIAnnotationProvenance.uniqueName(of: $0.annotation)
+        }
+        registerAIHighlightGroup(committedGroup, visible: true)
+        registerUndoForAddedAIAnnotationBatch(
+            applied,
+            group: committedGroup,
+            actionName: "Generate AI Highlights"
+        )
+        selectedAnnotationID = nil
+        markAnnotationsChanged(
+            message: "Added \(applied.count) AI highlight(s). Saving working copy.",
+            action: "Generate AI Highlights",
+            trigger: trigger
+        )
+        if let firstAnnotation = filteredAnnotations.first {
+            selectAnnotation(firstAnnotation)
+        }
+        return applied.count
+    }
+
     func selectAnnotation(_ annotation: PDFAnnotationItem) {
         selectedDocumentSearchResultID = nil
         selectedAnnotationID = annotation.id
+    }
+
+    func selectMarginAnnotation(_ annotation: PDFAnnotationItem) {
+        activeAIHighlightGroupID = annotation.aiGroupID
+        selectAnnotation(annotation)
+    }
+
+    func activateAIHighlightGroup(_ groupID: UUID?) {
+        guard let groupID else {
+            activeAIHighlightGroupID = nil
+            return
+        }
+        guard aiHighlightGroups.contains(where: { $0.id == groupID }) else {
+            return
+        }
+
+        if !visibleAIHighlightGroupIDs.contains(groupID) {
+            visibleAIHighlightGroupIDs.insert(groupID)
+            persistAIHighlightGroupState()
+            synchronizeAIMasterVisibility()
+            applyAIAnnotationDisplayPreference()
+            refreshAnnotations()
+        }
+
+        activeAIHighlightGroupID = groupID
+        if selectedAnnotation?.aiGroupID != groupID {
+            selectedAnnotationID = nil
+        }
+        if let firstAnnotation = filteredAnnotations.first,
+           selectedAnnotationID == nil {
+            selectAnnotation(firstAnnotation)
+        }
+    }
+
+    func isAIHighlightGroupVisible(_ groupID: UUID) -> Bool {
+        visibleAIHighlightGroupIDs.contains(groupID)
+    }
+
+    func aiHighlightCount(in groupID: UUID) -> Int {
+        annotations.reduce(into: 0) { count, annotation in
+            if annotation.aiGroupID == groupID {
+                count += 1
+            }
+        }
+    }
+
+    func setAIHighlightGroupVisible(_ groupID: UUID, isVisible: Bool) {
+        guard aiHighlightGroups.contains(where: { $0.id == groupID }) else {
+            return
+        }
+        if isVisible {
+            visibleAIHighlightGroupIDs.insert(groupID)
+        } else {
+            visibleAIHighlightGroupIDs.remove(groupID)
+            if activeAIHighlightGroupID == groupID {
+                activeAIHighlightGroupID = nil
+            }
+            if selectedAnnotation?.aiGroupID == groupID {
+                selectedAnnotationID = nil
+            }
+        }
+        persistAIHighlightGroupState()
+        synchronizeAIMasterVisibility()
+        applyAIAnnotationDisplayPreference()
+        refreshAnnotations()
+    }
+
+    func setAllAIHighlightGroupsVisible(_ isVisible: Bool) {
+        visibleAIHighlightGroupIDs = isVisible
+            ? Set(aiHighlightGroups.map(\.id))
+            : []
+        if !isVisible, selectedAnnotation?.isAIGenerated == true {
+            selectedAnnotationID = nil
+        }
+        if !isVisible {
+            activeAIHighlightGroupID = nil
+        }
+        persistAIHighlightGroupState()
+        synchronizeAIMasterVisibility()
+        applyAIAnnotationDisplayPreference()
+        refreshAnnotations()
     }
 
     func removeAnnotation(
@@ -418,12 +692,30 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
+        let hasAIAnnotations = (0..<document.pageCount).contains { pageIndex in
+            document.page(at: pageIndex)?.annotations.contains {
+                AIAnnotationProvenance.classify($0).isAI
+            } == true
+        }
+        guard let aiSelection = hasAIAnnotations
+            ? requestAIAnnotationExportSelection()
+            : .include
+        else {
+            postFeedback(
+                "Export canceled.",
+                action: "Export Annotated Copy",
+                trigger: trigger
+            )
+            return
+        }
+
         writePDF(
             document,
             suggestedName: suggestedFileName(suffix: "annotated"),
             successMessage: "Annotated copy exported",
             action: "Export Annotated Copy",
-            trigger: trigger
+            trigger: trigger,
+            aiSelection: aiSelection
         )
     }
 
@@ -741,7 +1033,8 @@ final class PDFDocumentStore: ObservableObject {
         suggestedName: String,
         successMessage: String,
         action: String,
-        trigger: FeedbackTrigger?
+        trigger: FeedbackTrigger?,
+        aiSelection: AIAnnotationExportSelection = .include
     ) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
@@ -763,7 +1056,13 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
-        guard let data = document.dataRepresentationWithFreeTextAnnotationsDisplayed() else {
+        let data: Data
+        do {
+            data = try AIAnnotationSelectiveExporter.dataRepresentation(
+                of: document,
+                selection: aiSelection
+            )
+        } catch {
             postFeedback(
                 "Export failed. Original PDF was not changed.",
                 kind: .error,
@@ -789,6 +1088,76 @@ final class PDFDocumentStore: ObservableObject {
                 trigger: trigger
             )
         }
+    }
+
+    private func requestAIAnnotationExportSelection() -> AIAnnotationExportSelection? {
+        let alert = NSAlert()
+        alert.messageText = String(
+            localized: "Choose AI Highlight groups to export"
+        )
+        alert.informativeText = String(
+            localized: "Only the selected groups are written to the new compatible PDF copy. The open working copy and original PDF are unchanged."
+        )
+
+        let groups = aiHighlightGroups.sorted { $0.createdAt > $1.createdAt }
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        var buttonsByGroupID: [UUID: NSButton] = [:]
+
+        for group in groups {
+            let title = "\(group.displayTitle)  (\(aiHighlightCount(in: group.id)))"
+            let button = NSButton(
+                checkboxWithTitle: title,
+                target: nil,
+                action: nil
+            )
+            button.state = visibleAIHighlightGroupIDs.contains(group.id) ? .on : .off
+            button.toolTip = group.question
+            stack.addArrangedSubview(button)
+            buttonsByGroupID[group.id] = button
+        }
+
+        if groups.isEmpty {
+            let button = NSButton(
+                checkboxWithTitle: String(localized: "Recovered AI Highlights"),
+                target: nil,
+                action: nil
+            )
+            button.state = showsAIGeneratedContent ? .on : .off
+            stack.addArrangedSubview(button)
+            buttonsByGroupID[AIAnnotationProvenance.legacyGroupID] = button
+        }
+
+        let contentHeight = max(28, CGFloat(buttonsByGroupID.count) * 26)
+        stack.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 360,
+            height: contentHeight
+        )
+        let scrollView = NSScrollView(
+            frame: NSRect(
+                x: 0,
+                y: 0,
+                width: 376,
+                height: min(contentHeight, 260)
+            )
+        )
+        scrollView.documentView = stack
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = contentHeight > 260
+        scrollView.autohidesScrollers = true
+        alert.accessoryView = scrollView
+        alert.addButton(withTitle: String(localized: "Export Selected Groups"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let selectedGroupIDs = Set(buttonsByGroupID.compactMap { groupID, button in
+            button.state == .on ? groupID : nil
+        })
+        return .selectedGroups(selectedGroupIDs)
     }
 
     private func writeMarkdown(
@@ -858,7 +1227,7 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
-        guard let data = document.dataRepresentationWithFreeTextAnnotationsDisplayed() else {
+        guard let data = document.dataRepresentationWithAIAnnotationsDisplayed() else {
             postFeedback(
                 "Could not prepare PDF data. Original PDF was not changed.",
                 kind: .error,
@@ -939,6 +1308,244 @@ final class PDFDocumentStore: ObservableObject {
             target.restoreAnnotation(annotation, to: page, actionName: actionName)
         }
         undoManager?.setActionName(actionName)
+    }
+
+    private struct AIAnnotationUndoRecord {
+        let page: PDFPage
+        let annotation: PDFAnnotation
+    }
+
+    private func registerUndoForAddedAIAnnotationBatch(
+        _ records: [AIAnnotationUndoRecord],
+        group: AIHighlightGroup,
+        actionName: String
+    ) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.removeAIAnnotationBatchForUndo(
+                records,
+                group: group,
+                actionName: actionName
+            )
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func removeAIAnnotationBatchForUndo(
+        _ records: [AIAnnotationUndoRecord],
+        group: AIHighlightGroup,
+        actionName: String
+    ) {
+        let wasVisible = visibleAIHighlightGroupIDs.contains(group.id)
+        for record in records where record.annotation.page === record.page {
+            record.page.removeAnnotation(record.annotation)
+        }
+        removeAIHighlightGroup(group.id)
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.restoreAIAnnotationBatchForRedo(
+                records,
+                group: group,
+                visible: wasVisible,
+                actionName: actionName
+            )
+        }
+        undoManager?.setActionName(actionName)
+        finishUndoableDocumentMutation(actionName: actionName)
+    }
+
+    private func restoreAIAnnotationBatchForRedo(
+        _ records: [AIAnnotationUndoRecord],
+        group: AIHighlightGroup,
+        visible: Bool,
+        actionName: String
+    ) {
+        registerAIHighlightGroup(group, visible: visible)
+        for record in records where record.annotation.page == nil {
+            record.annotation.shouldDisplay = visibleAIHighlightGroupIDs.contains(group.id)
+            record.page.addAnnotation(record.annotation)
+        }
+        registerUndoForAddedAIAnnotationBatch(
+            records,
+            group: group,
+            actionName: actionName
+        )
+        finishUndoableDocumentMutation(actionName: actionName)
+    }
+
+    private func hasDuplicateAIHighlight(
+        _ anchor: ResolvedAIHighlightAnchor,
+        on page: PDFPage
+    ) -> Bool {
+        let expectedBounds = anchor.annotationBounds.cgRect
+        let expectedPoints = anchor.quadrilateralPoints.map(\.cgPoint)
+        return page.annotations.contains { annotation in
+            guard AIAnnotationProvenance.classify(annotation).isAI,
+                  annotation.type == "Highlight",
+                  approximatelyEqual(annotation.bounds, expectedBounds),
+                  let points = annotation.quadrilateralPoints?.map(\.pointValue),
+                  points.count == expectedPoints.count
+            else {
+                return false
+            }
+            return zip(points, expectedPoints).allSatisfy {
+                approximatelyEqual($0.0, $0.1)
+            }
+        }
+    }
+
+    private func approximatelyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        approximatelyEqual(lhs.origin, rhs.origin)
+            && abs(lhs.width - rhs.width) <= 0.5
+            && abs(lhs.height - rhs.height) <= 0.5
+    }
+
+    private func approximatelyEqual(_ lhs: CGPoint, _ rhs: CGPoint) -> Bool {
+        abs(lhs.x - rhs.x) <= 0.5 && abs(lhs.y - rhs.y) <= 0.5
+    }
+
+    private func applyAIAnnotationDisplayPreference() {
+        guard let document else { return }
+        _ = AIAnnotationDisplayController.setAIAnnotationGroupsShouldDisplay(
+            visibleGroupIDs: visibleAIHighlightGroupIDs,
+            in: document
+        )
+    }
+
+    private func registerAIHighlightGroup(
+        _ group: AIHighlightGroup,
+        visible: Bool
+    ) {
+        aiHighlightGroups.removeAll { $0.id == group.id }
+        aiHighlightGroups.append(group)
+        aiHighlightGroups.sort { $0.createdAt > $1.createdAt }
+        if visible {
+            visibleAIHighlightGroupIDs.insert(group.id)
+            activeAIHighlightGroupID = group.id
+        } else {
+            visibleAIHighlightGroupIDs.remove(group.id)
+        }
+        persistAIHighlightGroupState()
+        synchronizeAIMasterVisibility()
+        applyAIAnnotationDisplayPreference()
+    }
+
+    private func removeAIHighlightGroup(_ groupID: UUID) {
+        aiHighlightGroups.removeAll { $0.id == groupID }
+        visibleAIHighlightGroupIDs.remove(groupID)
+        if activeAIHighlightGroupID == groupID {
+            activeAIHighlightGroupID = nil
+        }
+        persistAIHighlightGroupState()
+        synchronizeAIMasterVisibility()
+        applyAIAnnotationDisplayPreference()
+    }
+
+    private func refreshAIHighlightGroups(
+        refreshAnnotationList: Bool = true
+    ) {
+        guard let document else {
+            aiHighlightGroups = []
+            visibleAIHighlightGroupIDs = []
+            activeAIHighlightGroupID = nil
+            synchronizeAIMasterVisibility()
+            return
+        }
+
+        var namesByGroupID: [UUID: [String]] = [:]
+        var creationDateByGroupID: [UUID: Date] = [:]
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                guard let identity = AIAnnotationProvenance.identity(of: annotation) else {
+                    continue
+                }
+                let groupID = identity.groupID ?? AIAnnotationProvenance.legacyGroupID
+                namesByGroupID[groupID, default: []].append(identity.uniqueName)
+                let date = annotation.modificationDate ?? Date()
+                creationDateByGroupID[groupID] = min(
+                    creationDateByGroupID[groupID] ?? date,
+                    date
+                )
+            }
+        }
+
+        let persistedState = currentLibraryFileID.flatMap {
+            aiHighlightGroupStore.documentState(for: $0)
+        }
+        var groups: [AIHighlightGroup] = []
+        var knownGroupIDs: Set<UUID> = []
+        let baseGroups = persistedState?.groups ?? aiHighlightGroups
+        for var group in baseGroups {
+            guard let names = namesByGroupID[group.id], !names.isEmpty else {
+                continue
+            }
+            group.annotationUniqueNames = names.sorted()
+            groups.append(group)
+            knownGroupIDs.insert(group.id)
+        }
+
+        for (groupID, names) in namesByGroupID where !knownGroupIDs.contains(groupID) {
+            groups.append(
+                AIHighlightGroup(
+                    id: groupID,
+                    requestKind: .recovered,
+                    providerName: AIAnnotationProvenance.authorName,
+                    modelName: "",
+                    promptVersion: "unknown",
+                    annotationUniqueNames: names.sorted(),
+                    createdAt: creationDateByGroupID[groupID] ?? Date()
+                )
+            )
+        }
+
+        groups.sort { $0.createdAt > $1.createdAt }
+        let availableGroupIDs = Set(groups.map(\.id))
+        let baseVisibleGroupIDs = persistedState?.visibleGroupIDs
+            ?? visibleAIHighlightGroupIDs
+        var visibleGroupIDs = baseVisibleGroupIDs.isEmpty && persistedState == nil
+            ? availableGroupIDs
+            : baseVisibleGroupIDs.intersection(availableGroupIDs)
+        if persistedState != nil || !baseGroups.isEmpty {
+            let recoveredGroupIDs = availableGroupIDs.subtracting(
+                Set(baseGroups.map(\.id))
+            )
+            visibleGroupIDs.formUnion(recoveredGroupIDs)
+        }
+
+        aiHighlightGroups = groups
+        visibleAIHighlightGroupIDs = visibleGroupIDs
+        if let activeAIHighlightGroupID,
+           !visibleGroupIDs.contains(activeAIHighlightGroupID) {
+            self.activeAIHighlightGroupID = nil
+        }
+        persistAIHighlightGroupState()
+        synchronizeAIMasterVisibility()
+        applyAIAnnotationDisplayPreference()
+        if refreshAnnotationList {
+            refreshAnnotations()
+        }
+    }
+
+    private func persistAIHighlightGroupState() {
+        guard let currentLibraryFileID else { return }
+        if aiHighlightGroups.isEmpty {
+            aiHighlightGroupStore.removeDocumentState(for: currentLibraryFileID)
+            return
+        }
+        aiHighlightGroupStore.replaceDocumentState(
+            AIHighlightDocumentGroupState(
+                documentID: currentLibraryFileID,
+                groups: aiHighlightGroups,
+                visibleGroupIDs: visibleAIHighlightGroupIDs
+            )
+        )
+    }
+
+    private func synchronizeAIMasterVisibility() {
+        let newValue = !visibleAIHighlightGroupIDs.isEmpty
+        guard showsAIGeneratedContent != newValue else { return }
+        isSynchronizingAIMasterVisibility = true
+        showsAIGeneratedContent = newValue
+        isSynchronizingAIMasterVisibility = false
     }
 
     private func restoreAnnotation(
@@ -1246,7 +1853,7 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
-        guard let data = document.dataRepresentationWithFreeTextAnnotationsDisplayed() else {
+        guard let data = document.dataRepresentationWithAIAnnotationsDisplayed() else {
             postFeedback(
                 "Could not prepare working copy data.",
                 kind: .error,

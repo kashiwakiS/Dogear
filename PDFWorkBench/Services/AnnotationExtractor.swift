@@ -1,6 +1,7 @@
 import Foundation
 import PDFKit
 
+@MainActor
 enum AnnotationExtractor {
     static func annotationItems(in document: PDFDocument) -> [PDFAnnotationItem] {
         var items: [PDFAnnotationItem] = []
@@ -15,9 +16,14 @@ enum AnnotationExtractor {
                     continue
                 }
 
-                let contents = annotationContents(annotation, on: page, kind: kind)
-                let text = kind == .highlight ? contents : ""
-                let note = kind == .note ? contents : ""
+                let storedContents = annotation.contents?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let text = kind == .highlight
+                    ? annotationHighlightText(annotation, on: page)
+                    : ""
+                let note = kind == .note || kind == .highlight ? storedContents : ""
+                let classification = AIAnnotationProvenance.classify(annotation)
+                let metadata = AIAnnotationProvenance.embeddedMetadata(of: annotation)
 
                 items.append(
                     PDFAnnotationItem(
@@ -30,7 +36,15 @@ enum AnnotationExtractor {
                         annotationIndex: annotationIndex,
                         kind: kind,
                         text: text,
-                        note: note
+                        note: note,
+                        origin: classification.isAI
+                            ? .dogearAI(
+                                category: metadata?.category,
+                                groupID: AIAnnotationProvenance.displayGroupID(
+                                    of: annotation
+                                ) ?? AIAnnotationProvenance.legacyGroupID
+                            )
+                            : .manual
                     )
                 )
             }
@@ -64,21 +78,10 @@ enum AnnotationExtractor {
         }
     }
 
-    private static func annotationContents(
+    private static func annotationHighlightText(
         _ annotation: PDFAnnotation,
-        on page: PDFPage,
-        kind: PDFAnnotationItem.Kind
+        on page: PDFPage
     ) -> String {
-        let storedContents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if !storedContents.isEmpty {
-            return storedContents
-        }
-
-        guard kind == .highlight else {
-            return ""
-        }
-
         let quadrilateralText = annotationQuadrilateralText(annotation, on: page)
         if !quadrilateralText.isEmpty {
             return quadrilateralText
@@ -127,37 +130,51 @@ enum AnnotationExtractor {
 }
 
 extension PDFDocument {
-    typealias FreeTextDisplayState = (annotation: PDFAnnotation, shouldDisplay: Bool)
+    typealias NoteDisplayState = (annotation: PDFAnnotation, shouldDisplay: Bool)
 
     @discardableResult
-    func setFreeTextAnnotationsShouldDisplay(_ shouldDisplay: Bool) -> [FreeTextDisplayState] {
-        var states: [FreeTextDisplayState] = []
+    func setNoteAnnotationsShouldDisplay(_ shouldDisplay: Bool) -> [NoteDisplayState] {
+        var states: [NoteDisplayState] = []
+        var visited: Set<ObjectIdentifier> = []
+
+        func update(_ annotation: PDFAnnotation) {
+            let identifier = ObjectIdentifier(annotation)
+            guard visited.insert(identifier).inserted else { return }
+            states.append((annotation, annotation.shouldDisplay))
+            annotation.shouldDisplay = shouldDisplay
+        }
 
         for pageIndex in 0..<pageCount {
             guard let page = page(at: pageIndex) else {
                 continue
             }
 
-            for annotation in page.annotations where annotation.type == "FreeText" {
-                states.append((annotation, annotation.shouldDisplay))
-                annotation.shouldDisplay = shouldDisplay
+            for annotation in page.annotations {
+                if annotation.type == "FreeText"
+                    || annotation.type == "Text"
+                    || annotation.type == "Popup" {
+                    update(annotation)
+                }
+                if let popup = annotation.popup {
+                    update(popup)
+                }
             }
         }
 
         return states
     }
 
-    func restoreFreeTextAnnotationDisplayStates(_ states: [FreeTextDisplayState]) {
+    func restoreNoteAnnotationDisplayStates(_ states: [NoteDisplayState]) {
         for state in states {
             state.annotation.shouldDisplay = state.shouldDisplay
         }
     }
 
     @MainActor
-    func dataRepresentationWithFreeTextAnnotationsDisplayed() -> Data? {
-        let states = setFreeTextAnnotationsShouldDisplay(true)
+    func dataRepresentationWithNoteAnnotationsDisplayed() -> Data? {
+        let states = setNoteAnnotationsShouldDisplay(true)
         defer {
-            restoreFreeTextAnnotationDisplayStates(states)
+            restoreNoteAnnotationDisplayStates(states)
         }
 
         return QuietLinkDisplayRegistry.shared
