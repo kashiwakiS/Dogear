@@ -11,7 +11,21 @@
 - 原生PDFKit实现阅读功能
 - PDF文件分组管理、页面整理功能
 - 便捷的键盘交互
-- AI API接口集成
+- 可选的 AI 摘要、问答与来源可追溯的 AI Highlights
+- 可按请求分组显示、导航和导出 AI 批注
+- 在页面右侧展示批注说明的 Margin Canvas
+
+<p align="center">
+  <img
+    src="assets/screenshots/dogear-ai-highlights-hd.png"
+    alt="Dogear 的 AI Highlights、Margin Canvas 与统一 Ask 侧边栏"
+    width="100%"
+  >
+</p>
+
+<p align="center">
+  <sub>按请求分组的 AI Highlights、来源对应的页边说明与统一 Ask 工作流。</sub>
+</p>
 
 <p align="center">
   <img
@@ -88,7 +102,7 @@ GitHub Actions 会在每次推送和 Pull Request 中运行相同的源码扫描
 
 ## 隐私和文件安全
 
-Dogear 没有遥测，也不需要账户。资料库数据只保存在你的 Mac 上。云 AI 为可选功能，默认关闭；文档摘要会将你确认过的 PDF 发送给你配置的提供商，选区提问则只发送选中的文本和对话内容。详见 [PRIVACY.md](PRIVACY.md)。
+Dogear 没有遥测，也不需要账户。资料库数据只保存在你的 Mac 上。云 AI 为可选功能，默认关闭；文档摘要会将你确认过的 PDF 发送给你配置的提供商，选区提问只发送选中的文本和对话内容，AI Highlights 工作流只发送工具按需读取的原生文本片段而不会附加 PDF 文件。详见 [PRIVACY.md](PRIVACY.md)。
 
 在正常编辑中，Dogear 绝不会覆盖原始 PDF。页面更改和批注会保存到应用管理的工作副本中。明确的“保存到原文件”命令需要确认，并使用原子写入。
 

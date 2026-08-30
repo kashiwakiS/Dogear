@@ -21,6 +21,7 @@ enum OutlineRailSpacingMode: String, CaseIterable, Identifiable {
 struct DocumentOutlineRailView: View {
     let entries: [DocumentOutlineEntry]
     let dogears: [DogearMarker]
+    let aiHighlights: [AIHighlightRailMarker]
     let pageCount: Int
     let currentPageIndex: Int
     let isLoading: Bool
@@ -28,6 +29,7 @@ struct DocumentOutlineRailView: View {
     let selectedEntryID: DocumentOutlineEntry.ID?
     let onSelect: (DocumentOutlineEntry) -> Void
     let onSelectDogear: (DogearMarker) -> Void
+    let onSelectAIHighlight: (AIHighlightRailMarker) -> Void
 
     @State private var hoveredRowID: RailRow.ID?
     @State private var hoverPosition: CGFloat?
@@ -106,6 +108,10 @@ struct DocumentOutlineRailView: View {
             }
         }
         .frame(width: presentationWidth, height: preferredHeight, alignment: .leading)
+        .animation(
+            .easeInOut(duration: 0.22),
+            value: displayedRailRows.map(\.id)
+        )
     }
 
     private func railButton(for row: RailRow, at index: Int) -> some View {
@@ -122,6 +128,8 @@ struct DocumentOutlineRailView: View {
                 }
             case .dogear(let marker):
                 onSelectDogear(marker)
+            case .aiHighlight(let marker):
+                onSelectAIHighlight(marker)
             }
         } label: {
             Capsule()
@@ -135,6 +143,12 @@ struct DocumentOutlineRailView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .transition(
+            .asymmetric(
+                insertion: .scale(scale: 0.12, anchor: .leading).combined(with: .opacity),
+                removal: .scale(scale: 0.12, anchor: .leading).combined(with: .opacity)
+            )
+        )
         .help(row.help(language: languageStore.selection))
         .overlay(alignment: .leading) {
             if isHovered {
@@ -177,15 +191,24 @@ struct DocumentOutlineRailView: View {
             return entries.contains { $0.id == activeEntryID }
         case .dogear(let marker):
             return marker.pageIndex == currentPageIndex
+        case .aiHighlight:
+            return false
         }
     }
 
     private func rowFill(_ row: RailRow, isActive: Bool, isHovered: Bool) -> Color {
         switch row {
         case .outline:
-            return isHovered || isActive ? Color.accentColor : inactiveLineColor
+            if isActive {
+                return isNightMode ? Color.white : Color.black
+            }
+            return isHovered
+                ? (isNightMode ? Color.white.opacity(0.82) : Color.black.opacity(0.78))
+                : inactiveLineColor
         case .dogear:
             return Color.yellow
+        case .aiHighlight:
+            return isHovered ? Color.blue.opacity(0.82) : Color.blue
         }
     }
 
@@ -209,6 +232,7 @@ struct DocumentOutlineRailView: View {
 private enum RailRow: Identifiable {
     case outline([DocumentOutlineEntry])
     case dogear(DogearMarker)
+    case aiHighlight(AIHighlightRailMarker)
 
     var id: String {
         switch self {
@@ -219,6 +243,8 @@ private enum RailRow: Identifiable {
             return "outline.\(component)"
         case .dogear(let marker):
             return "dogear.\(marker.id.uuidString)"
+        case .aiHighlight(let marker):
+            return "ai-highlight.\(marker.id)"
         }
     }
 
@@ -227,6 +253,8 @@ private enum RailRow: Identifiable {
         case .outline(let entries):
             return entries.first?.target.pageIndex ?? 0
         case .dogear(let marker):
+            return marker.pageIndex
+        case .aiHighlight(let marker):
             return marker.pageIndex
         }
     }
@@ -242,6 +270,8 @@ private enum RailRow: Identifiable {
             positionWithinPage = entries.first?.target.relativePagePosition ?? 0
         case .dogear:
             positionWithinPage = 0
+        case .aiHighlight(let marker):
+            positionWithinPage = marker.relativePagePosition
         }
 
         let position = (CGFloat(pageIndex) + positionWithinPage) / CGFloat(max(1, pageCount))
@@ -260,6 +290,8 @@ private enum RailRow: Identifiable {
             return "\(firstEntry.title) (+\(entries.count - 1))"
         case .dogear(let marker):
             return marker.displayTitle(language: language)
+        case .aiHighlight(let marker):
+            return marker.title
         }
     }
 
@@ -269,6 +301,8 @@ private enum RailRow: Identifiable {
             return entries.first?.level ?? 0
         case .dogear:
             return 0
+        case .aiHighlight(let marker):
+            return marker.level
         }
     }
 
@@ -288,6 +322,8 @@ private enum RailRow: Identifiable {
             )
         case .dogear:
             return L10n.string("Page \(pageNumber)", language: language)
+        case .aiHighlight:
+            return L10n.string("AI Highlight on page \(pageNumber)", language: language)
         }
     }
 }
@@ -304,6 +340,7 @@ private extension DocumentOutlineRailView {
     struct RailItem {
         let row: RailRow
         let pageIndex: Int
+        let relativePagePosition: CGFloat
         let section: Int
         let order: Int
     }
@@ -350,6 +387,7 @@ private extension DocumentOutlineRailView {
             RailItem(
                 row: .outline([entry]),
                 pageIndex: entry.target.pageIndex,
+                relativePagePosition: entry.target.relativePagePosition ?? 0,
                 section: 1,
                 order: index
             )
@@ -385,6 +423,7 @@ private extension DocumentOutlineRailView {
             RailItem(
                 row: .outline(group.entries),
                 pageIndex: group.pageIndex,
+                relativePagePosition: group.entries.first?.target.relativePagePosition ?? 0,
                 section: 1,
                 order: group.order
             )
@@ -406,12 +445,31 @@ private extension DocumentOutlineRailView {
         }
 
         let dogearItems = sortedDogears.enumerated().map { index, item in
-            RailItem(row: .dogear(item.element), pageIndex: item.element.pageIndex, section: 0, order: index)
+            RailItem(
+                row: .dogear(item.element),
+                pageIndex: item.element.pageIndex,
+                relativePagePosition: 0,
+                section: 0,
+                order: index
+            )
         }
 
-        return (outlineItems + dogearItems).sorted { lhs, rhs in
+        let aiHighlightItems = aiHighlights.enumerated().map { index, marker in
+            RailItem(
+                row: .aiHighlight(marker),
+                pageIndex: marker.pageIndex,
+                relativePagePosition: marker.relativePagePosition,
+                section: 2,
+                order: index
+            )
+        }
+
+        return (outlineItems + dogearItems + aiHighlightItems).sorted { lhs, rhs in
             if lhs.pageIndex != rhs.pageIndex {
                 return lhs.pageIndex < rhs.pageIndex
+            }
+            if lhs.relativePagePosition != rhs.relativePagePosition {
+                return lhs.relativePagePosition < rhs.relativePagePosition
             }
             if lhs.section != rhs.section {
                 return lhs.section < rhs.section

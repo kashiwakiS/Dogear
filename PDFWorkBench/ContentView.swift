@@ -8,6 +8,7 @@ struct ContentView: View {
     @StateObject private var documentStore: PDFDocumentStore
     @StateObject private var feedbackCenter: OperationFeedbackCenter
     @StateObject private var aiReadingStore: AIReadingStore
+    @StateObject private var aiHighlightStore: AIHighlightGenerationStore
     @State private var windowFrameController = WindowFrameController()
     @State private var nativeTabPreviewController = NativeTabGroupPreviewController()
     @ObservedObject private var externalPDFOpenCoordinator = ExternalPDFOpenCoordinator.shared
@@ -42,6 +43,7 @@ struct ContentView: View {
     @State private var pageJumpText = "1"
     @State private var readingDisplayStyle: PDFReadingDisplayStyle = .continuous
     @State private var isNightMode = false
+    @State private var isMarginCanvasVisible = true
     @State private var zoomCommandCounter = 0
     @State private var zoomCommand: PDFZoomCommand?
     @State private var zoomScalePercent = 100
@@ -75,6 +77,7 @@ struct ContentView: View {
             wrappedValue: PDFDocumentStore(feedbackCenter: feedbackCenter)
         )
         _aiReadingStore = StateObject(wrappedValue: AIReadingStore())
+        _aiHighlightStore = StateObject(wrappedValue: AIHighlightGenerationStore())
         self.libraryStore = libraryStore
         self.initialGroupID = initialGroupID
         self.initialSessionID = initialSessionID
@@ -212,6 +215,7 @@ struct ContentView: View {
             aiReadingStore.documentDidChange(
                 to: documentStore.selectedPDFURL?.libraryComparablePath
             )
+            aiHighlightStore.documentDidChange(to: documentStore.document)
         }
         .onDisappear {
             flushPendingZoomPersistence()
@@ -280,7 +284,8 @@ struct ContentView: View {
             if isAnnotationSidebarVisible {
                 ReaderSidebarView(
                     documentStore: documentStore,
-                    aiStore: aiReadingStore
+                    aiStore: aiReadingStore,
+                    aiHighlightStore: aiHighlightStore
                 )
                     .frame(width: annotationSidebarWidth)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -528,11 +533,21 @@ struct ContentView: View {
                     outlineNavigationRequest: documentStore.outlineNavigationRequest,
                     outlineEntries: documentStore.outlineEntries,
                     dogears: documentStore.dogears,
+                    aiHighlightRailMarkers: documentStore.visibleAIHighlightRailMarkers,
                     isLoadingOutline: documentStore.isLoadingOutline,
                     isNightMode: isNightMode,
+                    isMarginCanvasVisible: isMarginCanvasVisible,
                     freeTextRequestID: documentStore.freeTextRequestID,
                     onSelectOutlineEntry: documentStore.navigate,
                     onSelectDogear: documentStore.navigate,
+                    onSelectAIHighlight: { marker in
+                        guard let annotation = documentStore.annotations.first(where: {
+                            $0.id == marker.annotationID
+                        }) else {
+                            return
+                        }
+                        documentStore.selectAnnotation(annotation)
+                    },
                     onToggleDogear: {
                         documentStore.toggleDogearOnCurrentPage(
                             trigger: .keyboard(shortcut: "D")
@@ -540,6 +555,21 @@ struct ContentView: View {
                     },
                     onToggleDogearAtPage: { pageIndex in
                         documentStore.toggleDogear(onPage: pageIndex, trigger: .pointer)
+                    },
+                    onSelectMarginAnnotation: { annotationID in
+                        guard let annotation = documentStore.annotations.first(where: {
+                            $0.id == annotationID
+                        }) else {
+                            return
+                        }
+                        documentStore.selectMarginAnnotation(annotation)
+                    },
+                    onSelectMarginText: { text, pageNumber in
+                        aiReadingStore.useAnnotationSelection(
+                            text,
+                            documentName: documentStore.selectedDocumentName,
+                            pageNumber: pageNumber
+                        )
                     },
                     onHighlightCreated: {
                         documentStore.markAnnotationsChanged(
@@ -756,6 +786,25 @@ struct ContentView: View {
                 Image(systemName: isNightMode ? "sun.max.fill" : "moon.fill")
             }
             .help(isNightMode ? "Use light PDF display" : "Use night PDF display")
+
+            Button {
+                isMarginCanvasVisible.toggle()
+                postFeedback(
+                    isMarginCanvasVisible
+                        ? L10n.string("Margin notes shown.")
+                        : L10n.string("Margin notes hidden."),
+                    action: L10n.string("Toggle Margin Notes"),
+                    trigger: .pointer
+                )
+            } label: {
+                Image(systemName: isMarginCanvasVisible
+                    ? "rectangle.righthalf.inset.filled"
+                    : "rectangle.split.2x1")
+            }
+            .disabled(readingDisplayStyle == .twoUp)
+            .help(readingDisplayStyle == .twoUp
+                ? "Margin notes are unavailable in Two-Up layout"
+                : isMarginCanvasVisible ? "Hide margin notes" : "Show margin notes")
 
             Spacer(minLength: 0)
         }
@@ -1526,7 +1575,7 @@ struct ContentView: View {
             let data: Data
             if documentStore.selectedPDFURL?.libraryComparablePath == item.path,
                let document = documentStore.document,
-               let currentData = document.dataRepresentationWithFreeTextAnnotationsDisplayed() {
+               let currentData = document.dataRepresentationWithNoteAnnotationsDisplayed() {
                 data = currentData
             } else {
                 data = try Data(contentsOf: sourceURL)

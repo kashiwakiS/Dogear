@@ -7,6 +7,8 @@
 I built Dogear for long-form PDF reading on the Mac. It keeps the reading
 surface quiet, makes annotations portable, and keeps page operations reversible.
 
+![Dogear AI Highlights, Margin Canvas, and unified Ask sidebar](assets/screenshots/dogear-ai-highlights-hd.png)
+
 ![Dogear reader with Library, outline rail, PDF canvas, and annotation tools](assets/screenshots/dogear-reader.png)
 
 ## What you can do
@@ -15,10 +17,16 @@ surface quiet, makes annotations portable, and keeps page operations reversible.
   controls, and a non-destructive night display.
 - Keep a local Library with Groups, ordering, native tabs, and per-window file
   sessions.
-- Add standard PDF highlights and FreeText notes, then search, navigate, and
-  export them as Markdown.
+- Add standard PDF highlights and FreeText notes, then navigate them and export
+  them as Markdown.
 - Use bookmarks, detected headings, and Dog-ear page markers to move through a
   document.
+- Generate source-grounded AI Highlights for a document overview or question,
+  organize them by named request group, show any subset, and navigate directly
+  to the supporting passages.
+- Read annotation explanations in the page-side Margin Canvas, select their
+  text for follow-up questions, and export a PDF containing exactly the AI
+  groups you choose.
 - Organize, rotate, duplicate, delete, and export pages from an app-managed
   working copy. The original PDF stays untouched until you explicitly confirm
   an overwrite.
@@ -79,8 +87,10 @@ to `9` to open that file.
 
 Dogear has no telemetry and no account requirement. Library data stays on the
 Mac. Cloud AI is optional and off by default; a document summary sends the
-reviewed PDF to the provider you configure, and a selection question sends the
-selected text and conversation. See [PRIVACY.md](PRIVACY.md).
+reviewed PDF to the provider you configure, a selection question sends the
+selected text and conversation, and the AI Highlights workflow sends only the
+native-text passages read through its targeted tools without attaching the PDF.
+See [PRIVACY.md](PRIVACY.md).
 
 Dogear never overwrites the original PDF during normal editing. Page changes
 and annotations are saved to an app-managed working copy. The explicit Save to

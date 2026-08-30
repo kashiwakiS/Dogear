@@ -312,6 +312,20 @@ final class AIConfigurationStore: ObservableObject {
     }
 
     func provider() throws -> OpenAICompatibleResponsesProvider {
+        try OpenAICompatibleResponsesProvider(
+            configuration: configuration,
+            apiKey: resolvedAPIKey()
+        )
+    }
+
+    func toolCallingProvider() throws -> OpenAICompatibleToolCallingProvider {
+        try OpenAICompatibleToolCallingProvider(
+            configuration: configuration,
+            apiKey: resolvedAPIKey()
+        )
+    }
+
+    private func resolvedAPIKey() throws -> String {
         let key: String
         switch configuration.secretStorageMode {
         case .plaintextFile:
@@ -334,10 +348,7 @@ final class AIConfigurationStore: ObservableObject {
         guard !key.isEmpty else {
             throw AIProviderError.missingAPIKey
         }
-        return try OpenAICompatibleResponsesProvider(
-            configuration: configuration,
-            apiKey: key
-        )
+        return key
     }
 
     func testConnection() {

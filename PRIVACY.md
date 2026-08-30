@@ -11,6 +11,12 @@ preferences, and app-managed PDF working copies under its sandbox and
 locations. Working-copy operations do not overwrite originals unless the user
 separately confirms an atomic Save to Original action.
 
+AI Highlights are standard PDF annotations stored in the app-managed working
+copy. Their request titles, group visibility, and diagnostic records are local
+application data. Routine diagnostics redact document passages and questions;
+detailed local capture is available only when explicitly enabled in a Debug
+build.
+
 ## Optional cloud AI
 
 Cloud AI is disabled by default. After a provider is configured and enabled:
@@ -18,9 +24,13 @@ Cloud AI is disabled by default. After a provider is configured and enabled:
 - Test Connection contacts the configured endpoint without PDF content.
 - A document summary review states that the complete PDF will be uploaded; the
   request is sent only after confirmation.
-- A selected-text question shows the selection, question, and retained
-  conversation before sending them.
-- Results remain in memory for the current document/window session.
+- A selected-text question sends the displayed selection, question, and
+  retained conversation when the user chooses Send.
+- An AI Highlights request sends the user question when present and only the
+  native-text passages returned by targeted read tools. The PDF file is not
+  attached to this workflow.
+- Summaries and conversations remain in memory for the current document/window
+  session. Applied AI Highlights and their group metadata persist locally.
 - Dogear asks compatible Responses APIs not to store results, but the selected
   provider's own terms and retention policy still apply.
 

@@ -14,14 +14,19 @@ struct PDFKitView: NSViewRepresentable {
     let outlineNavigationRequest: PDFOutlineNavigationRequest?
     let outlineEntries: [DocumentOutlineEntry]
     let dogears: [DogearMarker]
+    let aiHighlightRailMarkers: [AIHighlightRailMarker]
     let isLoadingOutline: Bool
     let isNightMode: Bool
+    let isMarginCanvasVisible: Bool
     let freeTextRequestID: Int
     let shortcutSet: PDFReadingShortcutSet = .defaultReading
     let onSelectOutlineEntry: (DocumentOutlineEntry) -> Void
     let onSelectDogear: (DogearMarker) -> Void
+    let onSelectAIHighlight: (AIHighlightRailMarker) -> Void
     let onToggleDogear: () -> Void
     let onToggleDogearAtPage: (Int) -> Void
+    let onSelectMarginAnnotation: (PDFAnnotationItem.ID) -> Void
+    let onSelectMarginText: (String, Int) -> Void
     let onHighlightCreated: () -> Void
     let onHighlightRemoved: (FeedbackTrigger) -> Void
     let onAnnotationChanged: () -> Void
@@ -68,10 +73,12 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.applyNightMode(isNightMode)
         container.updateOutlineOverlay(
             entries: outlineEntries,
+            aiHighlights: aiHighlightRailMarkers,
             currentPageIndex: targetPageIndex,
             isLoading: isLoadingOutline,
             isNightMode: isNightMode,
-            onSelect: onSelectOutlineEntry
+            onSelect: onSelectOutlineEntry,
+            onSelectAIHighlight: onSelectAIHighlight
         )
         container.updateDogears(
             dogears,
@@ -81,6 +88,8 @@ struct PDFKitView: NSViewRepresentable {
             onSelect: onSelectDogear,
             onToggleAtPage: onToggleDogearAtPage
         )
+        container.onSelectMarginAnnotation = onSelectMarginAnnotation
+        container.onSelectMarginText = onSelectMarginText
 
         context.coordinator.observePageChanges(for: pdfView, in: container)
         context.coordinator.observeScaleChanges(for: pdfView, in: container)
@@ -103,7 +112,7 @@ struct PDFKitView: NSViewRepresentable {
                 onToggleAtPage: onToggleDogearAtPage
             )
             pdfView.document = document
-            pdfView.hideNativeFreeTextAnnotations()
+            pdfView.hideNativeNoteAnnotations()
             context.coordinator.resetNavigationState(targetPageIndex: targetPageIndex)
             pdfView.goToPage(index: targetPageIndex)
             context.coordinator.reportScale(from: pdfView)
@@ -116,6 +125,7 @@ struct PDFKitView: NSViewRepresentable {
                 pdfView.applyZoomState(initialZoomState)
                 container.updateActiveFitScaleIfNeeded()
                 context.coordinator.reportScale(from: pdfView)
+                container.layoutMarginCanvas()
                 context.coordinator.observeLiveScrolling(for: pdfView, in: container)
             }
         }
@@ -128,15 +138,20 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.onDogearShortcut = onToggleDogear
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
+        pdfView.hideNativeNoteAnnotations()
+        container.onSelectMarginAnnotation = onSelectMarginAnnotation
+        container.onSelectMarginText = onSelectMarginText
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onScaleChanged = onScaleChanged
         context.coordinator.onSelectionChanged = onSelectionChanged
         container.updateOutlineOverlay(
             entries: outlineEntries,
+            aiHighlights: aiHighlightRailMarkers,
             currentPageIndex: targetPageIndex,
             isLoading: isLoadingOutline,
             isNightMode: isNightMode,
-            onSelect: onSelectOutlineEntry
+            onSelect: onSelectOutlineEntry,
+            onSelectAIHighlight: onSelectAIHighlight
         )
         container.updateDogears(
             dogears,
@@ -145,6 +160,12 @@ struct PDFKitView: NSViewRepresentable {
             isNightMode: isNightMode,
             onSelect: onSelectDogear,
             onToggleAtPage: onToggleDogearAtPage
+        )
+        container.updateMarginCanvas(
+            isVisible: isMarginCanvasVisible,
+            isSupported: displayStyle != .twoUp,
+            isNightMode: isNightMode,
+            selectedAnnotationID: selectedAnnotation?.id
         )
         context.coordinator.observeLiveScrolling(for: pdfView, in: container)
 
@@ -155,6 +176,7 @@ struct PDFKitView: NSViewRepresentable {
             DispatchQueue.main.async {
                 container.layoutDocumentViewForTwoUpIfNeeded()
                 container.updateActiveFitScaleIfNeeded()
+                container.layoutMarginCanvas()
                 context.coordinator.observeLiveScrolling(for: pdfView, in: container)
             }
         }
@@ -287,6 +309,7 @@ struct PDFKitView: NSViewRepresentable {
                 DispatchQueue.main.async {
                     container?.layoutDocumentViewForTwoUpIfNeeded()
                     container?.updateActiveFitScaleIfNeeded()
+                    container?.layoutMarginCanvas()
                 }
             }
         }
@@ -328,6 +351,7 @@ struct PDFKitView: NSViewRepresentable {
                 }
 
                 self.reportPageChange(document.index(for: visiblePage), in: container)
+                container.layoutMarginCanvas()
             }
         }
 
@@ -355,10 +379,12 @@ struct PDFKitView: NSViewRepresentable {
                 }
 
                 container?.layoutOutlineOverlay()
+                container?.layoutMarginCanvas()
                 self.reportScale(from: pdfView)
                 DispatchQueue.main.async {
                     container?.layoutDocumentViewForTwoUpIfNeeded()
                     container?.updateActiveFitScaleIfNeeded()
+                    container?.layoutMarginCanvas()
                 }
             }
         }
@@ -534,26 +560,50 @@ enum PDFReadingShortcutAction {
 
 final class PDFReaderContainerView: NSView {
     let pdfView = HighlightingPDFView()
+    let marginCanvasView = MarginCanvasView()
 
     private let outlineInteractionWidth: CGFloat = 72
     private let outlinePresentationWidth: CGFloat = 260
+    private let preferredMarginCanvasWidth: CGFloat = 248
+    private let minimumMarginCanvasWidth: CGFloat = 164
+    private let marginCanvasEdgeInset: CGFloat = 10
+    private let marginCanvasContentGap: CGFloat = 12
     private var outlineHostingView: NSHostingView<DocumentOutlineRailView>?
     private var outlineEntries: [DocumentOutlineEntry] = []
+    private var aiHighlightRailMarkers: [AIHighlightRailMarker] = []
     private var outlineCurrentPageIndex = 0
     private var isLoadingOutline = false
     private var isOutlineNightMode = false
     private var onSelectOutlineEntry: ((DocumentOutlineEntry) -> Void)?
+    private var onSelectAIHighlight: ((AIHighlightRailMarker) -> Void)?
     private var selectedOutlineEntryID: DocumentOutlineEntry.ID?
     private var selectedOutlinePageIndex: Int?
     private var dogears: [DogearMarker] = []
     private var dogearPageCount = 0
     private var onSelectDogear: ((DogearMarker) -> Void)?
     private let dogearOverlayProvider = DogearPageOverlayViewProvider()
+    private var requestsMarginCanvas = false
+    private var supportsMarginCanvas = true
+    private var isMarginCanvasNightMode = false
+    private var selectedMarginAnnotationID: PDFAnnotationItem.ID?
+    private weak var marginContentBoundsDocument: PDFDocument?
+    private var marginContentBoundsByPage: [ObjectIdentifier: NSRect] = [:]
+    var onSelectMarginAnnotation: ((PDFAnnotationItem.ID) -> Void)?
+    var onSelectMarginText: ((String, Int) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         addSubview(pdfView)
+        marginCanvasView.pdfView = pdfView
+        marginCanvasView.onSelectText = { [weak self] text, entry in
+            self?.onSelectMarginText?(text, entry.pageNumber)
+        }
+        addSubview(marginCanvasView, positioned: .above, relativeTo: pdfView)
+        marginCanvasView.isHidden = true
+        pdfView.onAnnotatedHighlightPressed = { [weak self] annotation in
+            self?.activateMarginAnnotation(annotation) ?? false
+        }
         pdfView.pageOverlayViewProvider = dogearOverlayProvider
     }
 
@@ -580,9 +630,231 @@ final class PDFReaderContainerView: NSView {
     override func layout() {
         super.layout()
         pdfView.frame = bounds
+        marginCanvasView.frame = bounds
         pdfView.updateActiveFitScaleIfNeeded()
         layoutDocumentViewForTwoUpIfNeeded()
         layoutOutlineOverlay()
+        layoutMarginCanvas()
+    }
+
+    func updateMarginCanvas(
+        isVisible: Bool,
+        isSupported: Bool,
+        isNightMode: Bool,
+        selectedAnnotationID: PDFAnnotationItem.ID?
+    ) {
+        let requiresLayout = requestsMarginCanvas != isVisible
+            || supportsMarginCanvas != isSupported
+        requestsMarginCanvas = isVisible
+        supportsMarginCanvas = isSupported
+        isMarginCanvasNightMode = isNightMode
+        selectedMarginAnnotationID = selectedAnnotationID
+        if requiresLayout {
+            needsLayout = true
+            layoutSubtreeIfNeeded()
+        } else {
+            layoutMarginCanvas()
+        }
+    }
+
+    func layoutMarginCanvas() {
+        guard isMarginCanvasActive,
+              let document = pdfView.document
+        else {
+            marginCanvasView.isHidden = true
+            marginCanvasView.update(
+                entries: [],
+                laneFrame: .zero,
+                selectedEntryID: nil,
+                isNightMode: isMarginCanvasNightMode
+            )
+            return
+        }
+
+        if marginContentBoundsDocument !== document {
+            marginContentBoundsDocument = document
+            marginContentBoundsByPage = [:]
+        }
+
+        var entries: [MarginCanvasAnnotationEntry] = []
+        var visiblePageFrames: [NSRect] = []
+        var visibleContentFrames: [NSRect] = []
+
+        for page in pdfView.visiblePages {
+            let pageIndex = document.index(for: page)
+            guard pageIndex != NSNotFound else { continue }
+            let pageFrame = convert(
+                pdfView.convert(page.bounds(for: pdfView.displayBox), from: page),
+                from: pdfView
+            )
+            visiblePageFrames.append(pageFrame)
+            let contentBounds = estimatedContentBounds(for: page)
+            visibleContentFrames.append(
+                convert(pdfView.convert(contentBounds, from: page), from: pdfView)
+            )
+
+            for (annotationIndex, annotation) in page.annotations.enumerated() {
+                guard Self.supportsMarginCard(annotation),
+                      let note = annotation.contents?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !note.isEmpty
+                else {
+                    continue
+                }
+
+                let classification = AIAnnotationProvenance.classify(annotation)
+                if classification.isAI && !annotation.shouldDisplay {
+                    continue
+                }
+
+                let anchorFrame = convert(
+                    pdfView.convert(annotation.bounds, from: page),
+                    from: pdfView
+                )
+                let entryID = PDFAnnotationItem.id(
+                    pageIndex: pageIndex,
+                    annotationIndex: annotationIndex,
+                    annotation: annotation
+                )
+                entries.append(
+                    MarginCanvasAnnotationEntry(
+                        id: entryID,
+                        pageIndex: pageIndex,
+                        annotation: annotation,
+                        note: note,
+                        anchorFrame: anchorFrame,
+                        pageFrame: pageFrame,
+                        isAIGenerated: classification.isAI,
+                        category: AIAnnotationProvenance.embeddedMetadata(of: annotation)?.category
+                    )
+                )
+            }
+        }
+
+        let laneFrame = floatingMarginCanvasFrame(
+            pageFrames: visiblePageFrames,
+            contentFrames: visibleContentFrames
+        )
+        guard !laneFrame.isEmpty else {
+            marginCanvasView.isHidden = true
+            marginCanvasView.update(
+                entries: [],
+                laneFrame: .zero,
+                selectedEntryID: nil,
+                isNightMode: isMarginCanvasNightMode
+            )
+            return
+        }
+
+        marginCanvasView.isHidden = false
+        marginCanvasView.update(
+            entries: entries,
+            laneFrame: laneFrame,
+            selectedEntryID: selectedMarginAnnotationID,
+            isNightMode: isMarginCanvasNightMode
+        )
+    }
+
+    private var isMarginCanvasActive: Bool {
+        requestsMarginCanvas && supportsMarginCanvas
+    }
+
+    private func estimatedContentBounds(for page: PDFPage) -> NSRect {
+        let key = ObjectIdentifier(page)
+        if let cached = marginContentBoundsByPage[key] {
+            return cached
+        }
+
+        let pageBounds = page.bounds(for: pdfView.displayBox)
+        let textLength = page.string.map { ($0 as NSString).length } ?? 0
+        let contentBounds: NSRect
+        if textLength > 0,
+           let selection = page.selection(for: NSRange(location: 0, length: textLength)) {
+            let selectedBounds = selection.bounds(for: page).intersection(pageBounds)
+            contentBounds = selectedBounds.width > 1 && selectedBounds.height > 1
+                ? selectedBounds
+                : pageBounds
+        } else {
+            contentBounds = pageBounds
+        }
+
+        marginContentBoundsByPage[key] = contentBounds
+        return contentBounds
+    }
+
+    private func floatingMarginCanvasFrame(
+        pageFrames: [NSRect],
+        contentFrames: [NSRect]
+    ) -> NSRect {
+        guard !pageFrames.isEmpty,
+              bounds.width >= minimumMarginCanvasWidth + marginCanvasEdgeInset * 2
+        else {
+            return .zero
+        }
+
+        let rightEdge = bounds.maxX - marginCanvasEdgeInset
+        let rightmostContentEdge = contentFrames
+            .map(\.maxX)
+            .max()
+            ?? pageFrames.map(\.maxX).max()
+            ?? rightEdge
+        let clearWidth = rightEdge - rightmostContentEdge - marginCanvasContentGap
+        let fallbackWidth = min(
+            preferredMarginCanvasWidth,
+            max(minimumMarginCanvasWidth, bounds.width * 0.28)
+        )
+        let width = clearWidth >= minimumMarginCanvasWidth
+            ? min(preferredMarginCanvasWidth, clearWidth)
+            : fallbackWidth
+
+        return NSRect(
+            x: rightEdge - width,
+            y: bounds.minY,
+            width: width,
+            height: bounds.height
+        )
+    }
+
+    private static func supportsMarginCard(_ annotation: PDFAnnotation) -> Bool {
+        switch annotation.type {
+        case "Highlight", "Text", "FreeText":
+            return true
+        default:
+            return false
+        }
+    }
+
+    @discardableResult
+    private func activateMarginAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        guard isMarginCanvasActive,
+              let page = annotation.page,
+              let document = pdfView.document,
+              Self.supportsMarginCard(annotation),
+              annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        else {
+            return false
+        }
+
+        if AIAnnotationProvenance.classify(annotation).isAI,
+           !annotation.shouldDisplay {
+            return false
+        }
+
+        let pageIndex = document.index(for: page)
+        guard pageIndex != NSNotFound,
+              let annotationIndex = page.annotations.firstIndex(where: { $0 === annotation })
+        else {
+            return false
+        }
+        let entryID = PDFAnnotationItem.id(
+            pageIndex: pageIndex,
+            annotationIndex: annotationIndex,
+            annotation: annotation
+        )
+        selectedMarginAnnotationID = entryID
+        marginCanvasView.select(entryID: entryID)
+        onSelectMarginAnnotation?(entryID)
+        return true
     }
 
     func layoutDocumentViewForTwoUpIfNeeded() {
@@ -627,16 +899,20 @@ final class PDFReaderContainerView: NSView {
 
     func updateOutlineOverlay(
         entries: [DocumentOutlineEntry],
+        aiHighlights: [AIHighlightRailMarker],
         currentPageIndex: Int,
         isLoading: Bool,
         isNightMode: Bool,
-        onSelect: @escaping (DocumentOutlineEntry) -> Void
+        onSelect: @escaping (DocumentOutlineEntry) -> Void,
+        onSelectAIHighlight: @escaping (AIHighlightRailMarker) -> Void
     ) {
         outlineEntries = entries
+        aiHighlightRailMarkers = aiHighlights
         outlineCurrentPageIndex = currentPageIndex
         isLoadingOutline = isLoading
         isOutlineNightMode = isNightMode
         onSelectOutlineEntry = onSelect
+        self.onSelectAIHighlight = onSelectAIHighlight
         if let selectedOutlineEntryID,
            !entries.contains(where: { $0.id == selectedOutlineEntryID }) {
             self.selectedOutlineEntryID = nil
@@ -667,6 +943,7 @@ final class PDFReaderContainerView: NSView {
         let rootView = DocumentOutlineRailView(
             entries: outlineEntries,
             dogears: dogears,
+            aiHighlights: aiHighlightRailMarkers,
             pageCount: dogearPageCount,
             currentPageIndex: outlineCurrentPageIndex,
             isLoading: isLoadingOutline,
@@ -677,6 +954,9 @@ final class PDFReaderContainerView: NSView {
             },
             onSelectDogear: { [weak self] marker in
                 self?.onSelectDogear?(marker)
+            },
+            onSelectAIHighlight: { [weak self] marker in
+                self?.onSelectAIHighlight?(marker)
             }
         )
 
@@ -755,10 +1035,12 @@ final class HighlightingPDFView: PDFView {
     var onFreeTextShortcut: (() -> Void)?
     var onDogearShortcut: (() -> Void)?
     var onShortcutActivated: ((PDFReadingShortcutAction, String) -> Void)?
+    var onAnnotatedHighlightPressed: ((PDFAnnotation) -> Bool)?
 
     private var freeTextDrag: FreeTextDrag?
     private var freeTextEditor: FreeTextEditor?
     private weak var selectedHighlight: PDFAnnotation?
+    private var consumedAnnotatedHighlightPress = false
     private var highlightMenuEndTrackingObserver: NSObjectProtocol?
     private weak var quietLinkDocument: PDFDocument?
     private weak var hoveredQuietLink: PDFAnnotation?
@@ -884,6 +1166,11 @@ final class HighlightingPDFView: PDFView {
         }
 
         selectedHighlight = highlightAnnotation(at: event)
+        if let selectedHighlight,
+           onAnnotatedHighlightPressed?(selectedHighlight) == true {
+            consumedAnnotatedHighlightPress = true
+            return
+        }
         super.mouseDown(with: event)
     }
 
@@ -918,6 +1205,11 @@ final class HighlightingPDFView: PDFView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if consumedAnnotatedHighlightPress {
+            consumedAnnotatedHighlightPress = false
+            return
+        }
+
         if let pressedQuietLink {
             self.pressedQuietLink = nil
             if quietLinkAnnotation(at: event) === pressedQuietLink {
@@ -1171,12 +1463,27 @@ final class HighlightingPDFView: PDFView {
             return
         }
 
+        goToAnnotation(annotation, on: page)
+        setCurrentSelection(nil, animate: false)
+    }
+
+    func goToAnnotation(_ annotation: PDFAnnotation, on page: PDFPage) {
+        let pageBounds = page.bounds(for: displayBox)
+        let annotationBounds = annotation.bounds.intersection(pageBounds)
+        guard !annotationBounds.isEmpty else {
+            go(to: page)
+            return
+        }
+
+        let contextHeight = min(120, max(56, annotationBounds.height * 0.75))
         let destination = PDFDestination(
             page: page,
-            at: NSPoint(x: annotation.bounds.midX, y: annotation.bounds.midY)
+            at: NSPoint(
+                x: max(pageBounds.minX, annotationBounds.minX),
+                y: min(pageBounds.maxY, annotationBounds.maxY + contextHeight)
+            )
         )
         go(to: destination)
-        setCurrentSelection(nil, animate: false)
     }
 
     func goToSearchResult(_ result: PDFSearchResult) {
@@ -1184,8 +1491,8 @@ final class HighlightingPDFView: PDFView {
         setCurrentSelection(result.selection, animate: true)
     }
 
-    func hideNativeFreeTextAnnotations() {
-        document?.setFreeTextAnnotationsShouldDisplay(false)
+    func hideNativeNoteAnnotations() {
+        document?.setNoteAnnotationsShouldDisplay(false)
     }
 
     func beginFreeTextEditing() {

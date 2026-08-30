@@ -5,6 +5,18 @@ struct PDFAnnotationItem: Identifiable, Equatable {
     enum Kind: String {
         case highlight = "Highlight"
         case note = "Note"
+
+        var displayTitle: String {
+            switch self {
+            case .highlight: return L10n.string("Highlight")
+            case .note: return L10n.string("Note")
+            }
+        }
+    }
+
+    enum Origin: Equatable {
+        case manual
+        case dogearAI(category: AIHighlightCategory?, groupID: UUID)
     }
 
     let id: String
@@ -13,6 +25,22 @@ struct PDFAnnotationItem: Identifiable, Equatable {
     let kind: Kind
     let text: String
     let note: String
+    let origin: Origin
+
+    var isAIGenerated: Bool {
+        if case .dogearAI = origin { return true }
+        return false
+    }
+
+    var aiCategory: AIHighlightCategory? {
+        guard case .dogearAI(let category, _) = origin else { return nil }
+        return category
+    }
+
+    var aiGroupID: UUID? {
+        guard case .dogearAI(_, let groupID) = origin else { return nil }
+        return groupID
+    }
 
     var pageNumber: Int {
         pageIndex + 1
@@ -31,10 +59,14 @@ struct PDFAnnotationItem: Identifiable, Equatable {
             return note
         }
 
-        return "\(kind.rawValue) on page \(pageNumber)"
+        return L10n.string("\(kind.displayTitle) on page \(pageNumber)")
     }
 
     static func id(pageIndex: Int, annotationIndex: Int, annotation: PDFAnnotation) -> String {
+        if let uniqueName = annotation.value(forAnnotationKey: .name) as? String,
+           !uniqueName.isEmpty {
+            return "nm:\(uniqueName)"
+        }
         let bounds = annotation.bounds
         let type = annotation.type ?? "Unknown"
         return [
@@ -62,5 +94,18 @@ struct PDFSearchResult: Identifiable, Equatable {
 
     static func == (lhs: PDFSearchResult, rhs: PDFSearchResult) -> Bool {
         lhs.id == rhs.id
+    }
+}
+
+struct AIHighlightRailMarker: Identifiable, Equatable {
+    let id: String
+    let annotationID: PDFAnnotationItem.ID
+    let pageIndex: Int
+    let relativePagePosition: CGFloat
+    let level: Int
+    let title: String
+
+    var pageNumber: Int {
+        pageIndex + 1
     }
 }

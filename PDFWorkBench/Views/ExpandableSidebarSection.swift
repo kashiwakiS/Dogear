@@ -4,7 +4,6 @@ enum ReaderSidebarSection: CaseIterable, Hashable {
     case fullText
     case dogears
     case annotations
-    case documentSummary
     case askSelection
 
     var titleKey: String.LocalizationValue {
@@ -15,10 +14,8 @@ enum ReaderSidebarSection: CaseIterable, Hashable {
             return "Dog-ears"
         case .annotations:
             return "Annotations"
-        case .documentSummary:
-            return "Document Summary"
         case .askSelection:
-            return "Ask About Selection"
+            return "Ask"
         }
     }
 }
