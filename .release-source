@@ -1,3 +1,3 @@
-source_branch=release/phase-1-mvp
-source_commit=1046af11a5a99704837219e08451bcc54975bb86
-status=release-candidate-v0.2.1
+source_branch=phase-2-MVP
+source_commit=1cfb4ce5ce7339693d4f71fd9e322639e1b278af
+status=development-snapshot-do-not-publish

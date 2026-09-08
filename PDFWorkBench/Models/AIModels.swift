@@ -26,12 +26,15 @@ enum AISecretStorageMode: String, Codable, CaseIterable, Identifiable {
 }
 
 struct AIProviderConfiguration: Codable, Equatable {
+    /// Version 3 also discloses question-scoped memory replay for stateless providers.
+    static let currentCloudConsentVersion = 3
     var id: UUID
     var name: String
     var baseURL: String
     var model: String
     var isCloudAIEnabled: Bool
     var hasCloudConsent: Bool
+    var cloudConsentVersion: Int
     var secretStorageMode: AISecretStorageMode
 
     static let `default` = AIProviderConfiguration(
@@ -51,6 +54,7 @@ struct AIProviderConfiguration: Codable, Equatable {
         case model
         case isCloudAIEnabled
         case hasCloudConsent
+        case cloudConsentVersion
         case secretStorageMode
     }
 
@@ -61,7 +65,8 @@ struct AIProviderConfiguration: Codable, Equatable {
         model: String,
         isCloudAIEnabled: Bool,
         hasCloudConsent: Bool,
-        secretStorageMode: AISecretStorageMode
+        secretStorageMode: AISecretStorageMode,
+        cloudConsentVersion: Int = AIProviderConfiguration.currentCloudConsentVersion
     ) {
         self.id = id
         self.name = name
@@ -69,6 +74,7 @@ struct AIProviderConfiguration: Codable, Equatable {
         self.model = model
         self.isCloudAIEnabled = isCloudAIEnabled
         self.hasCloudConsent = hasCloudConsent
+        self.cloudConsentVersion = cloudConsentVersion
         self.secretStorageMode = secretStorageMode
     }
 
@@ -80,6 +86,13 @@ struct AIProviderConfiguration: Codable, Equatable {
         model = try container.decode(String.self, forKey: .model)
         isCloudAIEnabled = try container.decode(Bool.self, forKey: .isCloudAIEnabled)
         hasCloudConsent = try container.decode(Bool.self, forKey: .hasCloudConsent)
+        cloudConsentVersion = try container.decodeIfPresent(Int.self, forKey: .cloudConsentVersion) ?? 0
+        if cloudConsentVersion != Self.currentCloudConsentVersion {
+            // Earlier consent promised store:false; never silently reuse it for
+            // provider-retained conversations. Preserve provider/key settings.
+            hasCloudConsent = false
+            isCloudAIEnabled = false
+        }
         secretStorageMode = try container.decodeIfPresent(
             AISecretStorageMode.self,
             forKey: .secretStorageMode

@@ -5,6 +5,53 @@ nonisolated enum AIHighlightIntent: Equatable, Sendable {
     case question(String)
 }
 
+nonisolated struct AIHighlightIntentPolicy: Equatable, Sendable {
+    let allowedCategories: [AIHighlightCategory]
+    let maximumDraftItems: Int
+    let allowsEmptyDraft: Bool
+    let densityGuidance: String
+
+    var allowsAnnotations: Bool { maximumDraftItems > 0 }
+
+    /// Recognize explicit user vetoes, never instructions in retrieved text.
+    static func explicitlyForbidsAnnotations(_ intent: AIHighlightIntent) -> Bool {
+        guard case .question(let question) = intent else { return false }
+        let patterns = [
+            #"\b(?:do\s+not|don't|don’t|never)\s+(?:add|create|make|insert|apply)\s+(?:any\s+|new\s+)?(?:highlights?|annotations?|notes?)\b"#,
+            #"\b(?:no|without)\s+(?:highlights?|annotations?)\b"#,
+            #"(?:不要|不需要|禁止|不得|不)(?:添加|创建|生成|做|进行)?(?:任何)?(?:高亮|注释|标注)"#,
+            #"(?:只|仅)(?:需|要)?(?:回答|输出|显示)(?:文字|文本)"#
+        ]
+        return patterns.contains { question.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
+    }
+
+    static func make(for intent: AIHighlightIntent, allowsAnnotations: Bool = true) -> AIHighlightIntentPolicy {
+        let permitted = allowsAnnotations && !explicitlyForbidsAnnotations(intent)
+        switch intent {
+        case .overview:
+            return AIHighlightIntentPolicy(
+                allowedCategories: [
+                    .keyFinding, .definition, .method, .evidence, .conclusion,
+                    .limitation, .caveat
+                ],
+                maximumDraftItems: permitted ? 15 : 0,
+                allowsEmptyDraft: true,
+                densityGuidance: "Select only the most useful overview evidence."
+            )
+        case .question:
+            return AIHighlightIntentPolicy(
+                allowedCategories: [
+                    .directAnswer, .supportingEvidence, .counterEvidence,
+                    .definition, .limitation
+                ],
+                maximumDraftItems: permitted ? 10 : 0,
+                allowsEmptyDraft: true,
+                densityGuidance: "Highlight only evidence that materially helps answer the question."
+            )
+        }
+    }
+}
+
 nonisolated enum AITextSourceKind: String, Codable, Equatable, Hashable, Sendable {
     case nativeText
     case ocrText
@@ -243,6 +290,14 @@ nonisolated struct AIReadSegment: Codable, Equatable, Sendable {
     let explicitlyRequested: Bool
 }
 
+nonisolated struct AIReadSegmentsResult: Codable, Equatable, Sendable {
+    let readIDs: [AISegmentID]
+    let alreadyReadIDs: [AISegmentID]
+    let segments: [AIReadSegment]
+    var omittedIDs: [AISegmentID] = []
+    var missingIDs: [AISegmentID] = []
+}
+
 nonisolated enum AIHighlightCategory: String, Codable, CaseIterable, Equatable,
     Hashable, Sendable
 {
@@ -305,11 +360,23 @@ nonisolated enum AIStageItemStatusCode: String, Codable, Equatable, Sendable {
 nonisolated struct AIStageItemStatus: Codable, Equatable, Sendable {
     let candidateID: String
     let code: AIStageItemStatusCode
+    let missingReadIDs: [AISegmentID]?
+
+    init(
+        candidateID: String,
+        code: AIStageItemStatusCode,
+        missingReadIDs: [AISegmentID]? = nil
+    ) {
+        self.candidateID = candidateID
+        self.code = code
+        self.missingReadIDs = missingReadIDs
+    }
 }
 
 nonisolated enum AIStageBatchErrorCode: String, Codable, Equatable, Sendable {
     case staleRevision
     case invalidItems
+    case annotationsForbidden
 }
 
 nonisolated struct AIStageHighlightsResult: Codable, Equatable, Sendable {
@@ -317,10 +384,56 @@ nonisolated struct AIStageHighlightsResult: Codable, Equatable, Sendable {
     let revision: Int
     let items: [AIStageItemStatus]
     let error: AIStageBatchErrorCode?
+    var unchanged = false
 }
 
 nonisolated struct StagedAIHighlight: Equatable, Sendable {
     let candidate: AIHighlightCandidate
     let pageNumber: Int
     let sourceKind: AITextSourceKind
+}
+
+nonisolated enum AIAnswerCompletionStatus: String, Codable, Equatable, Sendable {
+    case answered
+    case partial
+    case notFound
+}
+
+nonisolated struct AIPublishAnswerRequest: Equatable, Sendable {
+    let completionStatus: AIAnswerCompletionStatus
+    let title: String
+    let resultMarkdown: String
+    let evidenceSegmentIDs: [AISegmentID]
+    let finalDraftRevision: Int
+    let terminate: Bool
+}
+
+nonisolated enum AIPublishAnswerErrorCode: String, Codable, Equatable, Sendable {
+    case terminalMustBeSoleCall
+    case emptyTitle
+    case emptyResult
+    case missingEvidence
+    case unreadEvidence
+    case staleDraftRevision
+    case highlightsNotCoveredByEvidence
+    case evidenceReviewFailed
+    case evidenceReviewRequired
+}
+
+nonisolated struct AIPublishedAnswer: Codable, Equatable, Sendable {
+    let completionStatus: AIAnswerCompletionStatus
+    let title: String
+    let resultMarkdown: String
+    let evidenceSegmentIDs: [AISegmentID]
+    let finalDraftRevision: Int
+    let terminate: Bool
+}
+
+nonisolated struct AIPublishAnswerResult: Codable, Equatable, Sendable {
+    let accepted: Bool
+    let error: AIPublishAnswerErrorCode?
+    let currentDraftRevision: Int
+    let missingReadIDs: [AISegmentID]
+    let publication: AIPublishedAnswer?
+    var reviewIssues: [String] = []
 }

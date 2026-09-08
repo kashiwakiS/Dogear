@@ -34,7 +34,7 @@ struct ContentView: View {
     @State private var newGroupName = ""
     @State private var librarySidebarWidth: CGFloat = 300
     @State private var librarySidebarDragStartWidth: CGFloat = 300
-    @State private var annotationSidebarDragStartWidth: CGFloat = 268
+    @State private var annotationSidebarDragStartWidth: CGFloat = 284
     @State private var latestContentWidth: CGFloat = 984
     @State private var lockedWorkspaceWidth: CGFloat?
     @State private var workspaceLockID = UUID()
@@ -51,7 +51,9 @@ struct ContentView: View {
     @State private var zoomPersistenceTask: Task<Void, Never>?
 
     private let librarySidebarRange: ClosedRange<CGFloat> = 240...440
-    private let annotationSidebarRange: ClosedRange<CGFloat> = 220...390
+    // Includes the reserved 16-point resize target. The ReaderSidebarView
+    // content therefore retains its previous 220...390-point width range.
+    private let annotationSidebarRange: ClosedRange<CGFloat> = 236...406
     private let centerMinimumWidth: CGFloat = 520
     private let sidebarHandleWidth: CGFloat = 16
     private let minimumWorkspaceWithoutAnnotation: CGFloat = 520
@@ -282,19 +284,23 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
 
             if isAnnotationSidebarVisible {
-                ReaderSidebarView(
-                    documentStore: documentStore,
-                    aiStore: aiReadingStore,
-                    aiHighlightStore: aiHighlightStore
-                )
-                    .frame(width: annotationSidebarWidth)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-            }
+                // Reserve the resize target inside the sidebar, away from both
+                // PDFKit's scrollbar and the sidebar's interactive content.
+                HStack(spacing: 0) {
+                    annotationResizeHandle(availableWidth: availableWidth)
 
-            if isAnnotationSidebarVisible {
-                annotationResizeHandle(availableWidth: availableWidth)
-                    .offset(x: availableWidth - annotationSidebarWidth - sidebarHandleWidth / 2)
-                    .zIndex(1)
+                    ReaderSidebarView(
+                        documentStore: documentStore,
+                        aiStore: aiReadingStore,
+                        aiHighlightStore: aiHighlightStore
+                    )
+                    .clipped()
+                }
+                .frame(width: annotationSidebarWidth)
+                .background(Color(nsColor: .controlBackgroundColor))
+                // The reader can remain wider while the window expansion settles.
+                // Keep the entire sidebar beyond its actual edge in that interval.
+                .offset(x: max(readerWidth, availableWidth - annotationSidebarWidth))
             }
         }
     }
@@ -307,6 +313,7 @@ struct ContentView: View {
     private func annotationResizeHandle(availableWidth: CGFloat) -> some View {
         SidebarResizeHandle(
             width: sidebarHandleWidth,
+            dividerAlignment: .leading,
             onBegin: {
                 annotationSidebarDragStartWidth = annotationSidebarWidth
                 lockReaderWorkspaceWidth()
@@ -1950,7 +1957,7 @@ private final class WindowAnnotationSidebarState {
     var isVisible: Bool
     var width: CGFloat
 
-    init(isVisible: Bool = true, width: CGFloat = 268) {
+    init(isVisible: Bool = true, width: CGFloat = 284) {
         self.isVisible = isVisible
         self.width = width
     }
@@ -2487,12 +2494,13 @@ private struct GroupNameSheet: View {
 
 private struct SidebarResizeHandle: View {
     let width: CGFloat
+    var dividerAlignment: Alignment = .center
     let onBegin: () -> Void
     let onDrag: (CGFloat) -> Void
     let onEnd: () -> Void
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: dividerAlignment) {
             Divider()
                 .frame(width: 1)
                 .allowsHitTesting(false)

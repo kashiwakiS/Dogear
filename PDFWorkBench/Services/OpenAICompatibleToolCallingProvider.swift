@@ -3,6 +3,8 @@ import Foundation
 nonisolated enum OpenAICompatibleToolProviderError: LocalizedError, Equatable {
     case workflowNotStarted
     case responseMismatch
+    case missingResponseID
+    case serverContinuationUnsupported
     case malformedToolSchema(String)
     case malformedToolCall
 
@@ -12,6 +14,10 @@ nonisolated enum OpenAICompatibleToolProviderError: LocalizedError, Equatable {
             return "The AI tool workflow has not been started."
         case .responseMismatch:
             return "The AI provider response does not match the active workflow."
+        case .missingResponseID:
+            return "The AI provider did not return a response ID required to continue this request."
+        case .serverContinuationUnsupported:
+            return "The AI provider stopped storing responses after server continuation began. Dogear cannot safely reconstruct the missing conversation history."
         case .malformedToolSchema(let name):
             return "Tool \(name) has an invalid JSON schema."
         case .malformedToolCall:
@@ -62,6 +68,7 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
     func beginToolWorkflow(
         _ request: AIToolWorkflowProviderRequest
     ) async throws -> AIToolProviderTurn {
+        try Task.checkCancellation()
         guard !configuration.model.isEmpty else {
             throw AIProviderError.missingModel
         }
@@ -73,60 +80,149 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
             ])
         ]
         let context = WorkflowContext(
+            generationID: UUID(),
             instructions: request.instructions,
             tools: tools,
-            input: initialInput,
-            latestResponseID: nil
+            latestResponseID: nil,
+            responseStored: nil,
+            continuationMode: .serverCursor,
+            turnRevision: 0
         )
-        let envelope = try await send(context: context)
-        var updated = context
-        updated.input.append(contentsOf: envelope.output)
-        updated.latestResponseID = envelope.id
-        let turn = try makeTurn(from: envelope)
-        if turn.toolCalls.isEmpty {
-            workflows.removeValue(forKey: request.workflowID)
-        } else {
-            workflows[request.workflowID] = updated
+        workflows[request.workflowID] = context
+        do {
+            let envelope = try await send(context: context, input: initialInput)
+            try Task.checkCancellation()
+            guard workflows[request.workflowID]?.generationID == context.generationID else {
+                throw OpenAICompatibleToolProviderError.workflowNotStarted
+            }
+            let isStateless = envelope.store == false
+            let turn = try makeTurn(from: envelope, requiresResponseID: !isStateless)
+            var updated = context
+            updated.latestResponseID = turn.responseID
+            updated.responseStored = envelope.store
+            updated.turnRevision += 1
+            if isStateless {
+                updated.continuationMode = .stateless(history: initialInput + envelope.output)
+            }
+            if turn.toolCalls.isEmpty {
+                workflows.removeValue(forKey: request.workflowID)
+            } else {
+                workflows[request.workflowID] = updated
+            }
+            return turn
+        } catch {
+            discardIfCurrent(request.workflowID, context: context)
+            throw error
         }
-        return turn
     }
 
     func continueToolWorkflow(
         _ request: AIToolWorkflowContinuationRequest
     ) async throws -> AIToolProviderTurn {
-        guard var context = workflows[request.workflowID] else {
+        try Task.checkCancellation()
+        guard let context = workflows[request.workflowID] else {
             throw OpenAICompatibleToolProviderError.workflowNotStarted
         }
-        if let expected = request.previousResponseID,
-           expected != context.latestResponseID
-        {
+        guard request.previousResponseID == context.latestResponseID else {
             throw OpenAICompatibleToolProviderError.responseMismatch
         }
+        if case .serverCursor = context.continuationMode {
+            guard let expected = request.previousResponseID,
+                  !expected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw OpenAICompatibleToolProviderError.responseMismatch
+            }
+            // A server workflow has deliberately discarded earlier raw output.
+            // It cannot switch to a partial local replay after losing storage.
+            // An already-terminal call still finishes locally without this path.
+            if context.responseStored == false {
+                discardIfCurrent(request.workflowID, context: context)
+                throw OpenAICompatibleToolProviderError.serverContinuationUnsupported
+            }
+        }
 
-        context.input.append(contentsOf: request.toolOutputs.map { output in
-            .object([
+        let toolOutputs: [AIJSONValue] = request.toolOutputs.map { output in
+            AIJSONValue.object([
                 "type": .string("function_call_output"),
                 "call_id": .string(output.callID),
                 "output": .string(String(decoding: output.output, as: UTF8.self))
             ])
-        })
-        let envelope = try await send(context: context)
-        context.input.append(contentsOf: envelope.output)
-        context.latestResponseID = envelope.id
-        let turn = try makeTurn(from: envelope)
-        if turn.toolCalls.isEmpty {
-            workflows.removeValue(forKey: request.workflowID)
-        } else {
-            workflows[request.workflowID] = context
         }
-        return turn
+        let input: [AIJSONValue]
+        switch context.continuationMode {
+        case .serverCursor:
+            input = toolOutputs
+        case .stateless(let history):
+            // Build an immutable attempt payload. Advance history only after a
+            // successful response, so transient retries never append twice.
+            input = history + toolOutputs
+        }
+        do {
+            let envelope = try await send(context: context, input: input,
+                instructionsSupplement: request.instructionsSupplement,
+                allowedToolNames: request.allowedToolNames)
+            try Task.checkCancellation()
+            guard let current = workflows[request.workflowID],
+                  current.generationID == context.generationID else {
+                throw OpenAICompatibleToolProviderError.workflowNotStarted
+            }
+            guard current.turnRevision == context.turnRevision else {
+                throw OpenAICompatibleToolProviderError.responseMismatch
+            }
+            let turn = try makeTurn(
+                from: envelope, requiresResponseID: context.continuationMode.usesServerCursor
+            )
+            var updated = context
+            updated.latestResponseID = turn.responseID
+            updated.responseStored = envelope.store
+            updated.turnRevision += 1
+            if case .stateless = context.continuationMode {
+                // Keep the first-response choice until disposal even if a later
+                // endpoint response claims storage is available again.
+                updated.continuationMode = .stateless(history: input + envelope.output)
+            }
+            if turn.toolCalls.isEmpty {
+                workflows.removeValue(forKey: request.workflowID)
+            } else {
+                workflows[request.workflowID] = updated
+            }
+            return turn
+        } catch {
+            // A bounded transport retry must reuse the same server cursor.
+            // Terminal failures and cancellation must not retain a live workflow.
+            if !AIToolWorkflowRunner.isTransientError(error) || Task.isCancelled {
+                discardIfCurrent(request.workflowID, context: context)
+            }
+            throw error
+        }
     }
 
-    func discardWorkflow(_ workflowID: UUID) {
+    func discardToolWorkflow(_ workflowID: UUID) async {
         workflows.removeValue(forKey: workflowID)
     }
 
-    private func send(context: WorkflowContext) async throws -> ResponsesEnvelope {
+    // Metadata-only diagnostics: never expose retained prompt or response text.
+    func diagnosticRetainedItemCount(for workflowID: UUID) async -> Int? {
+        guard let context = workflows[workflowID] else { return nil }
+        switch context.continuationMode {
+        case .serverCursor: return 0
+        case .stateless(let history): return history.count
+        }
+    }
+
+    private func discardIfCurrent(_ workflowID: UUID, context: WorkflowContext) {
+        guard let current = workflows[workflowID],
+              current.generationID == context.generationID,
+              current.turnRevision == context.turnRevision else { return }
+        workflows.removeValue(forKey: workflowID)
+    }
+
+    private func send(
+        context: WorkflowContext,
+        input: [AIJSONValue],
+        instructionsSupplement: String? = nil,
+        allowedToolNames: [String]? = nil
+    ) async throws -> ResponsesEnvelope {
+        try Task.checkCancellation()
         var request = URLRequest(url: endpoint(path: "responses"))
         request.httpMethod = "POST"
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -135,13 +231,22 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
         request.httpBody = try JSONEncoder().encode(
             ResponsesRequestBody(
                 model: configuration.model,
-                instructions: context.instructions,
-                input: context.input,
-                tools: context.tools,
-                store: false
+                instructions: context.instructions + (instructionsSupplement.map { "\n" + $0 } ?? ""),
+                input: input,
+                tools: allowedToolNames.map { allowed in context.tools.filter { allowed.contains($0.name) } } ?? context.tools,
+                previousResponseID: context.continuationMode.usesServerCursor ? context.latestResponseID : nil,
+                store: context.continuationMode.usesServerCursor
             )
         )
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            try Task.checkCancellation()
+            throw error
+        }
+        try Task.checkCancellation()
         try validate(response: response, data: data)
         return try JSONDecoder().decode(ResponsesEnvelope.self, from: data)
     }
@@ -165,7 +270,9 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
         )
     }
 
-    private func makeTurn(from envelope: ResponsesEnvelope) throws -> AIToolProviderTurn {
+    private func makeTurn(
+        from envelope: ResponsesEnvelope, requiresResponseID: Bool
+    ) throws -> AIToolProviderTurn {
         let calls = try envelope.output.compactMap { item -> AIToolInvocation? in
             guard case .object(let object) = item,
                   object["type"]?.stringValue == "function_call"
@@ -184,6 +291,10 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
                 name: name,
                 arguments: argumentData
             )
+        }
+        if requiresResponseID, !calls.isEmpty,
+           envelope.id?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            throw OpenAICompatibleToolProviderError.missingResponseID
         }
         return AIToolProviderTurn(
             responseID: envelope.id,
@@ -213,10 +324,23 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
     }
 
     private struct WorkflowContext {
+        let generationID: UUID
         let instructions: String
         let tools: [FunctionTool]
-        var input: [AIJSONValue]
         var latestResponseID: String?
+        var responseStored: Bool?
+        var continuationMode: ContinuationMode
+        var turnRevision: Int
+    }
+
+    private enum ContinuationMode {
+        case serverCursor
+        case stateless(history: [AIJSONValue])
+
+        var usesServerCursor: Bool {
+            if case .serverCursor = self { return true }
+            return false
+        }
     }
 
     private struct ResponsesRequestBody: Encodable {
@@ -224,7 +348,13 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
         let instructions: String
         let input: [AIJSONValue]
         let tools: [FunctionTool]
+        let previousResponseID: String?
         let store: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case model, instructions, input, tools, store
+            case previousResponseID = "previous_response_id"
+        }
     }
 
     private struct FunctionTool: Codable {
@@ -239,9 +369,10 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
         let id: String?
         let output: [AIJSONValue]
         let usage: Usage?
+        let store: Bool?
 
         private enum CodingKeys: String, CodingKey {
-            case id, output, usage
+            case id, output, usage, store
         }
     }
 

@@ -8,7 +8,6 @@ import SwiftUI
 import AppKit
 import Combine
 
-@main
 struct PDFWorkBenchApp: App {
     @NSApplicationDelegateAdaptor(PDFWorkBenchAppDelegate.self) private var appDelegate
     @StateObject private var libraryStore = LibraryStore()
@@ -52,6 +51,22 @@ struct PDFWorkBenchApp: App {
                 languageStore: languageStore
             )
             .environment(\.locale, languageStore.locale)
+        }
+    }
+}
+
+@main
+enum DogearEntryPoint {
+    @MainActor static func main() {
+        if CommandLine.arguments.contains("--run-ai-diagnostics") {
+            // Enter before constructing the SwiftUI app or its persisted Library.
+            Task { @MainActor in
+                let succeeded = await AIWorkflowDiagnosticSuite.run()
+                exit(succeeded ? EXIT_SUCCESS : EXIT_FAILURE)
+            }
+            RunLoop.main.run()
+        } else {
+            PDFWorkBenchApp.main()
         }
     }
 }

@@ -84,6 +84,51 @@ nonisolated struct ResolvedAIHighlightAnchor: Equatable, Sendable {
     let quadrilateralPoints: [AIPagePoint]
 }
 
+/// The app can rearrange/rotate pages while a cooperative text scan yields.
+/// Retain the page objects so an earlier page cannot silently change identity
+/// between its fingerprint check and the final MainActor commit.
+@MainActor
+struct NativePDFDocumentLayoutSnapshot {
+    private struct PageState {
+        let page: PDFPage
+        let rotation: Int
+        let mediaBox: CGRect
+        let cropBox: CGRect
+    }
+
+    private let pages: [PageState]
+
+    init(document: PDFDocument) throws {
+        pages = try (0..<document.pageCount).map { index in
+            guard let page = document.page(at: index) else {
+                throw AIHighlightNativePDFBridgeError.missingPage(index + 1)
+            }
+            return PageState(
+                page: page,
+                rotation: page.rotation,
+                mediaBox: page.bounds(for: .mediaBox),
+                cropBox: page.bounds(for: .cropBox)
+            )
+        }
+    }
+
+    func validate(in document: PDFDocument) throws {
+        guard document.pageCount == pages.count else {
+            throw AIHighlightNativePDFBridgeError.documentFingerprintChanged
+        }
+        for (index, state) in pages.enumerated() {
+            guard let page = document.page(at: index),
+                  page === state.page,
+                  page.rotation == state.rotation,
+                  page.bounds(for: .mediaBox) == state.mediaBox,
+                  page.bounds(for: .cropBox) == state.cropBox
+            else {
+                throw AIHighlightNativePDFBridgeError.documentFingerprintChanged
+            }
+        }
+    }
+}
+
 @MainActor
 struct NativePDFTextSnapshotBuilder: AIHighlightTextSnapshotBuilding {
     let document: PDFDocument
@@ -123,6 +168,49 @@ struct NativePDFTextSnapshotBuilder: AIHighlightTextSnapshotBuilding {
         )
     }
 
+    func makeTextSnapshotCooperatively() async throws -> AIHighlightTextSnapshot {
+        guard document.pageCount > 0 else {
+            throw AIHighlightNativePDFBridgeError.emptyDocument
+        }
+
+        let layout = try NativePDFDocumentLayoutSnapshot(document: document)
+        var pageSnapshots: [AITextPageSnapshot] = []
+        var pageFingerprints: [String] = []
+        pageSnapshots.reserveCapacity(document.pageCount)
+        pageFingerprints.reserveCapacity(document.pageCount)
+        for pageIndex in 0..<document.pageCount {
+            try Task.checkCancellation()
+            await Task.yield()
+            try Task.checkCancellation()
+            guard let page = document.page(at: pageIndex) else {
+                throw AIHighlightNativePDFBridgeError.missingPage(pageIndex + 1)
+            }
+            let pageNumber = pageIndex + 1
+            let fingerprint = NativePDFTextFingerprint.page(
+                page,
+                pageNumber: pageNumber
+            )
+            pageFingerprints.append(fingerprint)
+            pageSnapshots.append(
+                AITextPageSnapshot(
+                    pageNumber: pageNumber,
+                    text: page.string ?? "",
+                    fingerprint: fingerprint,
+                    sourceKind: .nativeText
+                )
+            )
+        }
+
+        try Task.checkCancellation()
+        try layout.validate(in: document)
+        return AIHighlightTextSnapshot(
+            fingerprint: NativePDFTextFingerprint.document(
+                pageFingerprints: pageFingerprints
+            ),
+            pages: pageSnapshots
+        )
+    }
+
     func makeRegistry(
         segmenter: AISegmenter = AISegmenter()
     ) throws -> AISegmentRegistry {
@@ -132,6 +220,41 @@ struct NativePDFTextSnapshotBuilder: AIHighlightTextSnapshotBuilding {
 
 @MainActor
 struct AIHighlightNativeAnchorResolver {
+    func validateSnapshotCooperatively(
+        fingerprint: String,
+        in document: PDFDocument
+    ) async throws {
+        let currentSnapshot = try await NativePDFTextSnapshotBuilder(document: document)
+            .makeTextSnapshotCooperatively()
+        try Task.checkCancellation()
+        guard currentSnapshot.fingerprint == fingerprint else {
+            throw AIHighlightNativePDFBridgeError.documentFingerprintChanged
+        }
+    }
+
+    func resolveCooperatively(
+        _ stagedHighlights: [StagedAIHighlight],
+        registry: AISegmentRegistry,
+        in document: PDFDocument
+    ) async throws -> [ResolvedAIHighlightAnchor] {
+        try Task.checkCancellation()
+        let layout = try NativePDFDocumentLayoutSnapshot(document: document)
+        try await validateSnapshotCooperatively(
+            fingerprint: registry.snapshotFingerprint,
+            in: document
+        )
+        var anchors: [ResolvedAIHighlightAnchor] = []
+        anchors.reserveCapacity(stagedHighlights.count)
+        for staged in stagedHighlights {
+            await Task.yield()
+            try Task.checkCancellation()
+            anchors.append(try resolve(staged, registry: registry, in: document))
+        }
+        try Task.checkCancellation()
+        try layout.validate(in: document)
+        return anchors
+    }
+
     func resolve(
         _ stagedHighlights: [StagedAIHighlight],
         registry: AISegmentRegistry,
@@ -209,6 +332,10 @@ struct AIHighlightNativeAnchorResolver {
               let page = document.page(at: pageNumber - 1)
         else {
             throw AIHighlightNativePDFBridgeError.missingPage(pageNumber)
+        }
+        let currentPageFingerprint = NativePDFTextFingerprint.page(page, pageNumber: pageNumber)
+        guard records.allSatisfy({ $0.pageFingerprint == currentPageFingerprint }) else {
+            throw AIHighlightNativePDFBridgeError.pageFingerprintChanged(pageNumber)
         }
         let source = (page.string ?? "") as NSString
         let sourceRange = NSRange(

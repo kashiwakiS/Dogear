@@ -13,22 +13,7 @@ struct KeychainAISecretStore: AISecretStoring {
     private let service = "com.KashiwakiS.PDFWorkBench.ai-credentials"
 
     func readSecret(profileID: UUID) throws -> String? {
-        var query = baseQuery(profileID: profileID)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
-            return nil
-        }
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let secret = String(data: data, encoding: .utf8)
-        else {
-            throw KeychainError(status: status)
-        }
-        return secret
+        try KeychainAISecretReader().readSecret(profileID: profileID)
     }
 
     func saveSecret(
@@ -99,9 +84,12 @@ struct KeychainAISecretStore: AISecretStoring {
     }
 }
 
-enum AIConfigurationError: LocalizedError {
+enum AIConfigurationError: LocalizedError, Equatable {
     case invalidConfigurationName
     case keychainVerificationFailed
+    case configurationChanged
+    case cloudAIUnavailable
+    case asynchronousCredentialReaderUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -109,8 +97,21 @@ enum AIConfigurationError: LocalizedError {
             return "Enter a configuration name first."
         case .keychainVerificationFailed:
             return "The key was written to Keychain but could not be verified. The plaintext configuration was kept."
+        case .configurationChanged:
+            return "The AI configuration or credential changed while this request was preparing. Send the request again."
+        case .cloudAIUnavailable:
+            return "Cloud AI is disabled or its current data-sharing terms have not been accepted."
+        case .asynchronousCredentialReaderUnavailable:
+            return "The AI configuration has no asynchronous credential reader."
         }
     }
+}
+
+/// Captured at Send, before PDF preparation. It contains no secret and cannot
+/// become a credential cache; an edited key invalidates it even if config is equal.
+struct AIProviderRequestTicket: Equatable {
+    let configuration: AIProviderConfiguration
+    fileprivate let credentialRevision: UInt64
 }
 
 @MainActor
@@ -119,6 +120,7 @@ final class AIConfigurationStore: ObservableObject {
 
     @Published var configuration: AIProviderConfiguration {
         didSet {
+            if configuration != oldValue { credentialRevision &+= 1 }
             guard !isApplyingTransaction else { return }
             do {
                 try persistConfiguration()
@@ -136,8 +138,9 @@ final class AIConfigurationStore: ObservableObject {
     let configurationURL: URL
 
     private var plaintextAPIKey: String
-    private var cachedKeychainAPIKey: String?
     private let secretStore: AISecretStoring
+    private let backgroundSecretReader: AIBackgroundSecretReader?
+    private var credentialRevision: UInt64 = 0
     private let legacyConfigurationKey = "PDFWorkBench.AIProviderConfiguration"
     private var isApplyingTransaction = false
 
@@ -145,17 +148,20 @@ final class AIConfigurationStore: ObservableObject {
         self.init(
             configurationURL: Self.defaultConfigurationURL,
             legacyUserDefaults: .standard,
-            secretStore: KeychainAISecretStore()
+            secretStore: KeychainAISecretStore(),
+            secretReader: KeychainAISecretReader()
         )
     }
 
     init(
         configurationURL: URL,
         legacyUserDefaults: UserDefaults = .standard,
-        secretStore: AISecretStoring
+        secretStore: AISecretStoring,
+        secretReader: (any AISecretReading)? = nil
     ) {
         self.configurationURL = configurationURL
         self.secretStore = secretStore
+        backgroundSecretReader = secretReader.map { AIBackgroundSecretReader(reader: $0) }
 
         if let data = try? Data(contentsOf: configurationURL),
            let stored = try? JSONDecoder().decode(StoredAIConfiguration.self, from: data) {
@@ -241,6 +247,7 @@ final class AIConfigurationStore: ObservableObject {
     }
 
     func saveAPIKey(_ apiKey: String) throws {
+        credentialRevision &+= 1
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             try removeAPIKey()
@@ -269,7 +276,6 @@ final class AIConfigurationStore: ObservableObject {
             guard try secretStore.readSecret(profileID: configuration.id) == trimmed else {
                 throw AIConfigurationError.keychainVerificationFailed
             }
-            cachedKeychainAPIKey = trimmed
             hasKeychainAPIKey = true
             isAPIKeyConfigured = true
             try persistConfiguration()
@@ -278,6 +284,7 @@ final class AIConfigurationStore: ObservableObject {
     }
 
     func removeAPIKey() throws {
+        credentialRevision &+= 1
         switch configuration.secretStorageMode {
         case .plaintextFile:
             let previousKey = plaintextAPIKey
@@ -292,7 +299,6 @@ final class AIConfigurationStore: ObservableObject {
             }
         case .keychain:
             try secretStore.removeSecret(profileID: configuration.id)
-            cachedKeychainAPIKey = nil
             hasKeychainAPIKey = false
             isAPIKeyConfigured = false
             try persistConfiguration()
@@ -301,8 +307,8 @@ final class AIConfigurationStore: ObservableObject {
     }
 
     func deleteKeychainAPIKey() throws {
+        credentialRevision &+= 1
         try secretStore.removeSecret(profileID: configuration.id)
-        cachedKeychainAPIKey = nil
         hasKeychainAPIKey = false
         if configuration.secretStorageMode == .keychain {
             isAPIKeyConfigured = false
@@ -325,17 +331,86 @@ final class AIConfigurationStore: ObservableObject {
         )
     }
 
+    func captureProviderRequest() -> AIProviderRequestTicket {
+        AIProviderRequestTicket(configuration: configuration, credentialRevision: credentialRevision)
+    }
+
+    func toolCallingProvider(
+        for ticket: AIProviderRequestTicket
+    ) async throws -> OpenAICompatibleToolCallingProvider {
+        let key = try await resolvedAPIKey(for: ticket, requiresCloudConsent: true)
+        try validate(ticket, requiresCloudConsent: true)
+        return try OpenAICompatibleToolCallingProvider(configuration: ticket.configuration, apiKey: key)
+    }
+
+    /// Compatibility overload. Callers that prepare PDFs first must capture and
+    /// pass a ticket at Send so same-configuration key edits are also detected.
+    func toolCallingProvider(
+        for expectedConfiguration: AIProviderConfiguration
+    ) async throws -> OpenAICompatibleToolCallingProvider {
+        guard configuration == expectedConfiguration else {
+            throw AIConfigurationError.configurationChanged
+        }
+        return try await toolCallingProvider(for: captureProviderRequest())
+    }
+
+    func provider(
+        for ticket: AIProviderRequestTicket
+    ) async throws -> OpenAICompatibleResponsesProvider {
+        let key = try await resolvedAPIKey(for: ticket, requiresCloudConsent: false)
+        try validate(ticket, requiresCloudConsent: false)
+        return try OpenAICompatibleResponsesProvider(configuration: ticket.configuration, apiKey: key)
+    }
+
+    private func validate(_ ticket: AIProviderRequestTicket, requiresCloudConsent: Bool) throws {
+        try Task.checkCancellation()
+        guard ticket.configuration == configuration,
+              ticket.credentialRevision == credentialRevision
+        else { throw AIConfigurationError.configurationChanged }
+        if requiresCloudConsent {
+            guard configuration.isCloudAIEnabled, configuration.hasCloudConsent,
+                  configuration.cloudConsentVersion == AIProviderConfiguration.currentCloudConsentVersion
+            else { throw AIConfigurationError.cloudAIUnavailable }
+        }
+    }
+
+    private func resolvedAPIKey(
+        for ticket: AIProviderRequestTicket,
+        requiresCloudConsent: Bool
+    ) async throws -> String {
+        try validate(ticket, requiresCloudConsent: requiresCloudConsent)
+        let key: String?
+        switch ticket.configuration.secretStorageMode {
+        case .plaintextFile:
+            key = plaintextAPIKey
+        case .keychain:
+            guard let backgroundSecretReader else {
+                throw AIConfigurationError.asynchronousCredentialReaderUnavailable
+            }
+            key = try await backgroundSecretReader.readSecret(profileID: ticket.configuration.id)
+        }
+        // In particular, an old nil result must not mark a newly selected
+        // profile/key as missing. Never write a late secret into global state.
+        try validate(ticket, requiresCloudConsent: requiresCloudConsent)
+        guard let key, !key.isEmpty else {
+            if ticket.configuration.secretStorageMode == .keychain {
+                hasKeychainAPIKey = false
+                isAPIKeyConfigured = false
+                try? persistConfiguration()
+            }
+            throw AIProviderError.missingAPIKey
+        }
+        return key
+    }
+
     private func resolvedAPIKey() throws -> String {
         let key: String
         switch configuration.secretStorageMode {
         case .plaintextFile:
             key = plaintextAPIKey
         case .keychain:
-            if let cachedKeychainAPIKey {
-                key = cachedKeychainAPIKey
-            } else if let storedKey = try secretStore.readSecret(profileID: configuration.id),
+            if let storedKey = try secretStore.readSecret(profileID: configuration.id),
                       !storedKey.isEmpty {
-                cachedKeychainAPIKey = storedKey
                 key = storedKey
             } else {
                 hasKeychainAPIKey = false
@@ -359,8 +434,10 @@ final class AIConfigurationStore: ObservableObject {
         Task {
             defer { isTestingConnection = false }
             do {
-                let modelProvider = try provider()
+                let initialTicket = captureProviderRequest()
+                let modelProvider = try await provider(for: initialTicket)
                 let models = try await modelProvider.listModels()
+                try validate(initialTicket, requiresCloudConsent: false)
                 availableModels = models
                 if configuration.model.isEmpty {
                     if let preferred = models.first(where: { $0.id.localizedCaseInsensitiveContains("flash") }) {
@@ -370,13 +447,15 @@ final class AIConfigurationStore: ObservableObject {
                     }
                 }
 
-                let testedProvider = try provider()
+                let testTicket = captureProviderRequest()
+                let testedProvider = try await provider(for: testTicket)
                 _ = try await testedProvider.respond(
                     to: AIResponseRequest(
                         instructions: "Return only the word OK.",
                         input: "Connection test"
                     )
                 )
+                try validate(testTicket, requiresCloudConsent: false)
                 connectionStatus = "Connected. Models and /responses are available."
             } catch {
                 connectionStatus = error.localizedDescription
@@ -385,6 +464,7 @@ final class AIConfigurationStore: ObservableObject {
     }
 
     private func migratePlaintextKeyToKeychain() throws {
+        credentialRevision &+= 1
         let key = plaintextAPIKey
         if !key.isEmpty {
             try secretStore.saveSecret(
@@ -407,7 +487,6 @@ final class AIConfigurationStore: ObservableObject {
         isApplyingTransaction = true
         configuration = updated
         plaintextAPIKey = ""
-        cachedKeychainAPIKey = key.isEmpty ? nil : key
         if !key.isEmpty {
             hasKeychainAPIKey = true
         }
@@ -425,7 +504,6 @@ final class AIConfigurationStore: ObservableObject {
             isApplyingTransaction = true
             configuration = previousConfiguration
             plaintextAPIKey = previousKey
-            cachedKeychainAPIKey = nil
             isAPIKeyConfigured = previousConfiguredState
             hasKeychainAPIKey = previousKeychainState
             isApplyingTransaction = false
