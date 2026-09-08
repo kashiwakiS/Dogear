@@ -45,12 +45,29 @@ git -C "$SOURCE_WORKTREE" archive "$source_commit" -- \
   PDFWorkBench.xcodeproj/project.pbxproj \
   PDFWorkBench.xcodeproj/project.xcworkspace/contents.xcworkspacedata \
   PDFWorkBench.xcodeproj/xcshareddata/xcschemes/PDFWorkBench.xcscheme \
+  scripts/model-assets/BGE-MIT-LICENSE.txt \
+  scripts/prepare-bge-small-en.py \
+  scripts/run-ai-diagnostics.sh \
   | tar -x -C "$staging"
 
 rsync -a --delete "$staging/Branding/" "$PUBLIC_ROOT/Branding/"
 rsync -a --delete "$staging/Config/" "$PUBLIC_ROOT/Config/"
 rsync -a --delete "$staging/PDFWorkBench/" "$PUBLIC_ROOT/PDFWorkBench/"
 rsync -a --delete "$staging/PDFWorkBench.xcodeproj/" "$PUBLIC_ROOT/PDFWorkBench.xcodeproj/"
+
+# Keep source-support files needed to prepare the optional local retrieval
+# model and to run the app's built-in AI diagnostics. Public build, release,
+# and packaging scripts remain authoritative in this worktree.
+mkdir -p "$PUBLIC_ROOT/scripts/model-assets"
+install -m 0644 \
+  "$staging/scripts/model-assets/BGE-MIT-LICENSE.txt" \
+  "$PUBLIC_ROOT/scripts/model-assets/BGE-MIT-LICENSE.txt"
+install -m 0755 \
+  "$staging/scripts/prepare-bge-small-en.py" \
+  "$PUBLIC_ROOT/scripts/prepare-bge-small-en.py"
+install -m 0755 \
+  "$staging/scripts/run-ai-diagnostics.sh" \
+  "$PUBLIC_ROOT/scripts/run-ai-diagnostics.sh"
 
 # Shared schemes must never run maintainer-local build side effects.
 scheme="$PUBLIC_ROOT/PDFWorkBench.xcodeproj/xcshareddata/xcschemes/PDFWorkBench.xcscheme"
