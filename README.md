@@ -82,16 +82,16 @@ GitHub Actions 会在每次推送和 Pull Request 中运行相同的源码扫描
 ### 可选的本地语义检索
 
 Ask 默认使用无需模型的轻量词法检索。英文论文也可在设置中选择实验性的
-“Semantic — Small EN”，并手动导入本地 BGE Small EN 模型包。Dogear
+“语义检索 — Small EN（实验性）”，并手动导入本地 BGE Small EN 模型包。Dogear
 不会自动下载模型。高级用户可按 `scripts/prepare-bge-small-en.py` 顶部列出的
 固定依赖，在隔离的 Python 环境中运行：
 
 ```bash
-python scripts/prepare-bge-small-en.py --output /path/to/output
+python3 scripts/prepare-bge-small-en.py --output /path/to/output
 ```
 
 脚本会下载固定版本的上游模型、校验权重并生成 `SmallEN` 文件夹；随后在
-Dogear 的 AI 设置中选择“Import Local Model…”导入该文件夹。词法检索始终可用，
+Dogear 的 AI 设置中选择“导入本地模型…”导入该文件夹。词法检索始终可用，
 无需执行这些步骤。
 
 ## 快捷键

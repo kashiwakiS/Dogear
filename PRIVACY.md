@@ -17,6 +17,10 @@ application data. Routine diagnostics redact document passages and questions;
 detailed local capture is available only when explicitly enabled in a Debug
 build.
 
+An imported local semantic model and its per-document index caches are also
+kept under local application support. The caches contain segment identifiers
+and numeric vectors, not AI answers or conversation history.
+
 ## Optional cloud AI
 
 Cloud AI is disabled by default. After a provider is configured and enabled:
@@ -24,10 +28,12 @@ Cloud AI is disabled by default. After a provider is configured and enabled:
 - Test Connection contacts the configured endpoint without PDF content.
 - Ask sends the question, any displayed selected text, and only the native-text
   passages returned by targeted read tools. The PDF file is not attached.
-- Each Send starts an independent question. Dogear may use a provider response
-  cursor while that question runs. With a stateless compatible endpoint, it
-  keeps and resends only the current question's context in memory until the
-  request completes, fails, or is canceled.
+- Each Send starts an independent question. With a compatible stateful
+  endpoint, Dogear requests provider-side response storage and uses the
+  returned response cursor only while that question runs. With a stateless
+  compatible endpoint, it requests no provider-side response storage and keeps
+  and resends only the current question's context in memory until the request
+  completes, fails, or is canceled.
 - Dogear does not save AI answers or conversation history to disk or reuse them
   for later questions. Applied AI Highlights and their group metadata persist
   locally as PDF annotations and application metadata.

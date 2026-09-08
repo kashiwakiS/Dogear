@@ -41,9 +41,7 @@ distribution package is signed with the developer account.
 
 ## Build from source
 
-Requirements: macOS 14 or later and Xcode 16.0 or later. Newer toolbar styling
-is enabled when building with Xcode 26 or later; Xcode 16 builds use the
-compatible flat toolbar.
+Requirements: macOS 14 or later and Xcode 16.0 or later.
 
 ```bash
 git clone https://github.com/kashiwakiS/Dogear.git
@@ -74,7 +72,7 @@ dependencies listed at the top of `scripts/prepare-bge-small-en.py` in an
 isolated Python environment, then run:
 
 ```bash
-python scripts/prepare-bge-small-en.py --output /path/to/output
+python3 scripts/prepare-bge-small-en.py --output /path/to/output
 ```
 
 The script downloads the pinned upstream model, verifies its weights, and
