@@ -17,22 +17,32 @@ application data. Routine diagnostics redact document passages and questions;
 detailed local capture is available only when explicitly enabled in a Debug
 build.
 
+An imported local semantic model and its per-document index caches are also
+kept under local application support. The caches contain segment identifiers
+and numeric vectors, not AI answers or conversation history.
+
 ## Optional cloud AI
 
 Cloud AI is disabled by default. After a provider is configured and enabled:
 
 - Test Connection contacts the configured endpoint without PDF content.
-- A document summary review states that the complete PDF will be uploaded; the
-  request is sent only after confirmation.
-- A selected-text question sends the displayed selection, question, and
-  retained conversation when the user chooses Send.
-- An AI Highlights request sends the user question when present and only the
-  native-text passages returned by targeted read tools. The PDF file is not
-  attached to this workflow.
-- Summaries and conversations remain in memory for the current document/window
-  session. Applied AI Highlights and their group metadata persist locally.
-- Dogear asks compatible Responses APIs not to store results, but the selected
-  provider's own terms and retention policy still apply.
+- Ask sends the question, any displayed selected text, and only the native-text
+  passages returned by targeted read tools. The PDF file is not attached.
+- Each Send starts an independent question. With a compatible stateful
+  endpoint, Dogear requests provider-side response storage and uses the
+  returned response cursor only while that question runs. With a stateless
+  compatible endpoint, it requests no provider-side response storage and keeps
+  and resends only the current question's context in memory until the request
+  completes, fails, or is canceled.
+- Dogear does not save AI answers or conversation history to disk or reuse them
+  for later questions. Applied AI Highlights and their group metadata persist
+  locally as PDF annotations and application metadata.
+- Provider-side storage and retention follow the selected provider's policy.
+
+The optional experimental BGE Small EN model is imported explicitly and runs
+locally for retrieval. The app does not download it automatically. Retrieved
+native-text passages are still sent to the configured cloud provider when Ask
+is used.
 
 Provider keys can be stored in macOS Keychain or, by explicit choice, as
 plaintext in a current-user-only local configuration file. Dogear does not

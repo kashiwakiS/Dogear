@@ -147,11 +147,6 @@ struct ReaderSidebarView: View {
     }
 }
 
-private enum PendingAIHighlightContinuation: Equatable {
-    case overview(summaryRevision: Int)
-    case question(String, conversationCount: Int)
-}
-
 private struct AISidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
     @ObservedObject var aiStore: AIReadingStore
@@ -159,7 +154,6 @@ private struct AISidebarView: View {
     let layout: ReaderSidebarLayout
     let expandedSections: Set<ReaderSidebarSection>
     let onToggleSection: (ReaderSidebarSection) -> Void
-    @State private var pendingHighlightContinuation: PendingAIHighlightContinuation?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -180,11 +174,6 @@ private struct AISidebarView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
                             questionSection
-
-                            if let pending = aiStore.pendingRequest {
-                                Divider()
-                                requestPreview(pending)
-                            }
 
                             if let error = aiStore.errorMessage {
                                 Label(error, systemImage: "exclamationmark.triangle")
@@ -207,56 +196,13 @@ private struct AISidebarView: View {
                                     .textSelection(.enabled)
                             }
 
-#if DEBUG
                             Divider()
                             highlightDiagnostics
-#endif
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             )
-        }
-        .overlay {
-            if aiStore.isPreparing
-                || (aiStore.isRunning && aiStore.activeTaskKind == .summarizeDocument)
-                || aiHighlightStore.isRunning {
-                VStack(spacing: 10) {
-                    ProgressView()
-                    Text(documentActionProgressDescription)
-                        .font(.caption)
-                    Button("Cancel") { cancelDocumentAction() }
-                }
-                .padding(18)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            }
-        }
-        .onChange(of: aiStore.summaryRevision) { _, revision in
-            guard case .overview(let startingRevision) = pendingHighlightContinuation,
-                  revision > startingRevision
-            else {
-                return
-            }
-            pendingHighlightContinuation = nil
-            aiHighlightStore.generateOverview(from: documentStore)
-        }
-        .onChange(of: aiStore.conversation.count) { _, count in
-            guard case .question(let question, let startingCount) = pendingHighlightContinuation,
-                  count > startingCount
-            else {
-                return
-            }
-            pendingHighlightContinuation = nil
-            aiHighlightStore.questionText = question
-            aiHighlightStore.generateForQuestion(from: documentStore)
-        }
-        .onChange(of: aiStore.errorMessage) { _, errorMessage in
-            if errorMessage != nil {
-                pendingHighlightContinuation = nil
-            }
-        }
-        .onChange(of: documentStore.document.map(ObjectIdentifier.init)) { _, _ in
-            pendingHighlightContinuation = nil
         }
     }
 
@@ -271,20 +217,34 @@ private struct AISidebarView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Select PDF or margin-note text for an answer. Without a selection, a question finds evidence highlights in the document.")
+                Text("Ask about the document or select a passage to focus the answer. Highlights are added only when useful.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if !aiStore.summaryMarkdown.isEmpty {
+            if let answer = aiHighlightStore.currentAnswer {
                 VStack(alignment: .leading, spacing: 8) {
-                    markdownText(aiStore.summaryMarkdown)
+                    HStack {
+                        Text(answer.title)
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        if aiHighlightStore.isLocalOutline {
+                            Text("Local outline")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else if !answer.terminate {
+                            Text("Interim answer")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    markdownText(answer.resultMarkdown)
                         .textSelection(.enabled)
 
-                    Button("Copy Summary") {
+                    Button("Copy Answer") {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(aiStore.summaryMarkdown, forType: .string)
+                        NSPasteboard.general.setString(answer.resultMarkdown, forType: .string)
                     }
                     .font(.caption)
                 }
@@ -293,33 +253,33 @@ private struct AISidebarView: View {
                 .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
 
-            ForEach(aiStore.conversation) { turn in
-                conversationTurn(turn)
-            }
+            if aiHighlightStore.isRunning {
+                HStack(alignment: .top, spacing: 9) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.top, 2)
 
-            if aiStore.activeTaskKind == .askSelection,
-               let question = aiStore.activeQuestion {
-                VStack(alignment: .leading, spacing: 8) {
-                    userBubble(question: question, context: aiStore.capturedSelection)
-                    DisclosureGroup("Thinking… \(formattedDuration(aiStore.elapsedTime))") {
-                        VStack(alignment: .leading, spacing: 7) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text(aiStore.progressDescription.isEmpty
-                                ? "Waiting for the provider…"
-                                : aiStore.progressDescription)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Button("Cancel") {
-                                pendingHighlightContinuation = nil
-                                aiStore.cancel()
-                            }
-                                .font(.caption)
-                        }
-                        .padding(.top, 4)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(aiHighlightStore.progressDescription)
+                            .font(.caption.weight(.medium))
+                        Text("\(aiHighlightStore.progressDetail) · \(formattedDuration(aiHighlightStore.elapsedTime))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button("Cancel") {
+                        aiHighlightStore.cancel()
                     }
                     .font(.caption)
                 }
+                .padding(9)
+                .background(
+                    Color.secondary.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 9)
+                )
+                .accessibilityElement(children: .contain)
             }
 
             VStack(alignment: .trailing, spacing: 7) {
@@ -334,7 +294,7 @@ private struct AISidebarView: View {
                     .onSubmit { submitQuestionIfPossible() }
 
                     if aiStore.questionText.isEmpty {
-                        Text("Ask a question, or leave blank to summarize and highlight…")
+                        Text("Ask a question, or leave blank for an overview…")
                             .foregroundStyle(.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 7)
@@ -342,10 +302,14 @@ private struct AISidebarView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .accessibilityLabel("Ask a question, or leave blank to summarize and highlight…")
+                .accessibilityLabel("Ask a question, or leave blank for an overview…")
 
                 HStack {
                     Spacer()
+
+                    Toggle("Allow highlights", isOn: $aiHighlightStore.allowsAnnotations)
+                        .toggleStyle(.checkbox)
+                        .disabled(isAnyAIActionRunning)
 
                     Button(action: submitUnifiedAction) {
                         Label("Send", systemImage: "arrow.up")
@@ -362,10 +326,7 @@ private struct AISidebarView: View {
     }
 
     private var isAnyAIActionRunning: Bool {
-        aiStore.isPreparing
-            || aiStore.isRunning
-            || aiStore.pendingRequest != nil
-            || aiHighlightStore.isRunning
+        aiHighlightStore.isRunning
     }
 
     private var canSubmit: Bool {
@@ -376,32 +337,14 @@ private struct AISidebarView: View {
         let question = aiStore.questionText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if question.isEmpty {
-            return L10n.string("Summarize and highlight the document")
+            return aiHighlightStore.canGenerate
+                ? L10n.string("Summarize the document with optional evidence highlights")
+                : L10n.string("Create a local outline without cloud AI")
         }
         if aiStore.capturedSelection != nil || documentStore.currentTextSelection != nil {
-            return L10n.string("Ask and highlight supporting evidence")
+            return L10n.string("Answer using the selected passage and relevant document evidence")
         }
-        return L10n.string("Highlight evidence for this question")
-    }
-
-    private var documentActionProgressDescription: String {
-        if aiHighlightStore.isRunning {
-            return aiHighlightStore.progressDescription.isEmpty
-                ? String(localized: "Preparing highlights…")
-                : aiHighlightStore.progressDescription
-        }
-        return aiStore.progressDescription.isEmpty
-            ? String(localized: "Preparing context...")
-            : aiStore.progressDescription
-    }
-
-    private func cancelDocumentAction() {
-        pendingHighlightContinuation = nil
-        if aiHighlightStore.isRunning {
-            aiHighlightStore.cancel()
-        } else {
-            aiStore.cancel()
-        }
+        return L10n.string("Answer from document evidence, with optional highlights")
     }
 
     private func submitQuestionIfPossible() {
@@ -413,29 +356,25 @@ private struct AISidebarView: View {
         let question = aiStore.questionText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if question.isEmpty {
-            pendingHighlightContinuation = .overview(
-                summaryRevision: aiStore.summaryRevision
-            )
-            aiStore.prepareDocumentSummary(from: documentStore)
+            aiHighlightStore.generateOverview(from: documentStore)
             return
         }
 
-        if aiStore.capturedSelection != nil || documentStore.currentTextSelection != nil {
-            pendingHighlightContinuation = .question(
-                question,
-                conversationCount: aiStore.conversation.count
-            )
-            aiStore.sendQuestion(from: documentStore)
-        } else {
-            aiHighlightStore.questionText = question
-            aiHighlightStore.generateForQuestion(from: documentStore)
-        }
+        let selectedContext = aiStore.contextForCurrentQuestion(from: documentStore)
+        // Keep the current question editable for retry/correction, including
+        // configuration failures before a workflow starts. This is composer
+        // state only; a later Send still starts an independent conversation.
+        aiHighlightStore.questionText = question
+        aiHighlightStore.generateForQuestion(
+            from: documentStore,
+            selectedContext: selectedContext
+        )
     }
 
-#if DEBUG
     private var highlightDiagnostics: some View {
         DisclosureGroup("Diagnostics") {
             VStack(alignment: .leading, spacing: 7) {
+#if DEBUG
                 Toggle(
                     "Include passage content in local logs",
                     isOn: $aiHighlightStore.recordsDetailedTraceContent
@@ -446,6 +385,17 @@ private struct AISidebarView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                Button("Choose Debug Log Folder…") { aiHighlightStore.chooseDebugLogFolder() }
+                    .disabled(isAnyAIActionRunning)
+                Text("New logs go into DogearDiagnostics inside the selected folder. Existing logs are not moved.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+#else
+                Text("Workflow logs record progress and errors without passage or answer text.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+#endif
 
                 Text(aiHighlightStore.providerDescription)
                     .font(.caption2)
@@ -456,12 +406,24 @@ private struct AISidebarView: View {
                     aiHighlightStore.revealTraceLog()
                 }
                 .font(.caption)
+                Text(aiHighlightStore.traceLocation)
+                    .id(aiHighlightStore.traceLocation)
+                    .font(.caption2)
+                    .textSelection(.enabled)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let status = aiHighlightStore.traceStatus {
+                    Text(status).font(.caption2).foregroundStyle(.orange)
+                }
             }
             .padding(.top, 4)
+            .task { await aiHighlightStore.refreshTraceLocation() }
+            .onChange(of: aiHighlightStore.isRunning) { _, running in
+                if !running { Task { await aiHighlightStore.refreshTraceLocation() } }
+            }
         }
         .font(.caption)
     }
-#endif
 
     private func conversationTurn(_ turn: AIConversationTurn) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -523,34 +485,6 @@ private struct AISidebarView: View {
 
     private func formattedDuration(_ duration: TimeInterval) -> String {
         String(format: "%.1fs", max(0, duration))
-    }
-
-    private func requestPreview(_ pending: AIPendingRequest) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Review Before Sending")
-                .font(.headline)
-            if let file = pending.context.file {
-                Text("\(pending.kind.rawValue) · \(file.pageCount) page(s) · \(formattedByteCount(file.byteCount)) · 1 request")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Label("The complete PDF “\(file.filename)” will be uploaded to the configured provider.", systemImage: "doc.badge.arrow.up")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
-            HStack {
-                Button("Cancel", role: .cancel) {
-                    pendingHighlightContinuation = nil
-                    aiStore.cancelPendingRequest()
-                }
-                Spacer()
-                Button("Send to Provider") { aiStore.sendPendingRequest() }
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(10)
-        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func markdownText(_ markdown: String) -> Text {

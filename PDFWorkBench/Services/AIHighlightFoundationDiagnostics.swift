@@ -83,9 +83,24 @@ nonisolated enum AIHighlightFoundationDiagnostics {
                 .readSegments(AIReadSegmentsRequest(ids: [selectedID]))
             )
             if case .readResults(let readResults) = readOutput {
-                check(readResults.count == 1, "Read tool did not return the selected segment.")
+                check(
+                    readResults.segments.count == 1,
+                    "Read tool did not return the selected segment."
+                )
             } else {
                 check(false, "Read tool returned the wrong output type.")
+            }
+            let repeatedReadOutput = await executor.execute(
+                .readSegments(AIReadSegmentsRequest(ids: [selectedID]))
+            )
+            if case .readResults(let repeated) = repeatedReadOutput {
+                check(
+                    repeated.segments.isEmpty
+                        && repeated.alreadyReadIDs.contains(selectedID),
+                    "Read tool resent passage text that was already returned."
+                )
+            } else {
+                check(false, "Repeated read returned the wrong output type.")
             }
 
             let candidate = AIHighlightCandidate(
@@ -117,6 +132,33 @@ nonisolated enum AIHighlightFoundationDiagnostics {
                 )
             } else {
                 check(false, "Stage tool returned the wrong output type.")
+            }
+
+            let idempotentCandidate = AIHighlightCandidate(
+                candidateID: "diagnostic-renamed",
+                segmentIDs: [selectedID],
+                category: .evidence,
+                importance: 4,
+                note: nil
+            )
+            let idempotentOutput = await executor.execute(
+                .stageHighlights(
+                    AIStageHighlightsRequest(
+                        draftRevision: 1,
+                        title: "Stable Result",
+                        items: [idempotentCandidate]
+                    )
+                )
+            )
+            if case .staged(let idempotent) = idempotentOutput {
+                check(
+                    idempotent.applied
+                        && idempotent.unchanged
+                        && idempotent.revision == 1,
+                    "A semantically identical draft advanced its revision."
+                )
+            } else {
+                check(false, "Idempotent stage returned the wrong output type.")
             }
 
             let staleOutput = await executor.execute(
@@ -163,6 +205,68 @@ nonisolated enum AIHighlightFoundationDiagnostics {
             } else {
                 check(false, "Invalid batch returned the wrong output type.")
             }
+
+            let published = await executor.execute(
+                .publishAnswer(
+                    AIPublishAnswerRequest(
+                        completionStatus: .answered,
+                        title: "Stable Result",
+                        resultMarkdown: "The result was stable [p. 1].",
+                        evidenceSegmentIDs: [selectedID],
+                        finalDraftRevision: 1,
+                        terminate: true
+                    )
+                )
+            )
+            if case .answerPublished(let result) = published {
+                check(
+                    result.accepted && result.publication?.terminate == true,
+                    "A valid terminal answer was rejected."
+                )
+            } else {
+                check(false, "Publish tool returned the wrong output type.")
+            }
+
+            let unreadExecutor = AIHighlightToolExecutor(
+                registry: registry,
+                intent: .question("What was stable?")
+            )
+            let unreadCandidate = AIHighlightCandidate(
+                candidateID: "unread",
+                segmentIDs: [selectedID],
+                category: .directAnswer,
+                importance: 5,
+                note: nil
+            )
+            let unreadOutput = await unreadExecutor.execute(
+                .stageHighlights(
+                    AIStageHighlightsRequest(
+                        draftRevision: 0,
+                        title: "Unread",
+                        items: [unreadCandidate]
+                    )
+                )
+            )
+            if case .staged(let unread) = unreadOutput {
+                check(
+                    unread.items.first?.code == .unread
+                        && unread.items.first?.missingReadIDs == [selectedID],
+                    "Unread repair did not return exact missing segment IDs."
+                )
+            } else {
+                check(false, "Unread stage returned the wrong output type.")
+            }
+
+            for intent in [AIHighlightIntent.overview, .question("test")] {
+                let policy = AIHighlightIntentPolicy.make(for: intent)
+                let schemaCategories = stageCategories(
+                    in: AIHighlightToolCodec.definitions(for: policy)
+                )
+                check(
+                    schemaCategories == Set(policy.allowedCategories.map(\.rawValue)),
+                    "Stage schema categories diverged from the active intent policy."
+                )
+            }
         } catch {
             failures.append(error.localizedDescription)
         }
@@ -171,5 +275,26 @@ nonisolated enum AIHighlightFoundationDiagnostics {
             checkCount: checkCount,
             failures: failures
         )
+    }
+
+    private static func stageCategories(
+        in definitions: [AIToolDefinition]
+    ) -> Set<String> {
+        guard let definition = definitions.first(where: {
+            $0.name == AIHighlightToolName.stageHighlights
+        }),
+        let root = try? JSONSerialization.jsonObject(
+            with: definition.strictInputSchema
+        ) as? [String: Any],
+        let properties = root["properties"] as? [String: Any],
+        let items = properties["items"] as? [String: Any],
+        let item = items["items"] as? [String: Any],
+        let itemProperties = item["properties"] as? [String: Any],
+        let category = itemProperties["category"] as? [String: Any],
+        let values = category["enum"] as? [String]
+        else {
+            return []
+        }
+        return Set(values)
     }
 }

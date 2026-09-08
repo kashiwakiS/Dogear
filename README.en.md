@@ -21,9 +21,9 @@ surface quiet, makes annotations portable, and keeps page operations reversible.
   them as Markdown.
 - Use bookmarks, detected headings, and Dog-ear page markers to move through a
   document.
-- Generate source-grounded AI Highlights for a document overview or question,
-  organize them by named request group, show any subset, and navigate directly
-  to the supporting passages.
+- Use unified Ask for an evidence-grounded document overview or answer, with
+  optional source-linked AI Highlights. Organize generated highlights by named
+  request group, show any subset, and navigate to supporting passages.
 - Read annotation explanations in the page-side Margin Canvas, select their
   text for follow-up questions, and export a PDF containing exactly the AI
   groups you choose.
@@ -41,7 +41,7 @@ distribution package is signed with the developer account.
 
 ## Build from source
 
-Requirements: macOS 14 or later and Xcode 26.5 or later.
+Requirements: macOS 14 or later and Xcode 16.0 or later.
 
 ```bash
 git clone https://github.com/kashiwakiS/Dogear.git
@@ -61,6 +61,23 @@ scripts/build.sh --release --clean --universal
 
 GitHub Actions runs the same source scan, Debug build, universal Release build,
 and app metadata checks for every push and pull request.
+
+### Optional local semantic retrieval
+
+Ask uses lightweight lexical retrieval by default and needs no local model.
+For English papers, Settings also offers the experimental “Semantic — Small
+EN” mode with a manually imported local BGE Small EN package. Dogear never
+downloads this model automatically. Advanced users can install the pinned
+dependencies listed at the top of `scripts/prepare-bge-small-en.py` in an
+isolated Python environment, then run:
+
+```bash
+python3 scripts/prepare-bge-small-en.py --output /path/to/output
+```
+
+The script downloads the pinned upstream model, verifies its weights, and
+creates a `SmallEN` folder. Import that folder with “Import Local Model…” in
+Dogear's AI settings. Lexical retrieval remains available without this setup.
 
 ## Shortcuts
 
@@ -86,11 +103,11 @@ to `9` to open that file.
 ## Privacy and file safety
 
 Dogear has no telemetry and no account requirement. Library data stays on the
-Mac. Cloud AI is optional and off by default; a document summary sends the
-reviewed PDF to the provider you configure, a selection question sends the
-selected text and conversation, and the AI Highlights workflow sends only the
-native-text passages read through its targeted tools without attaching the PDF.
-See [PRIVACY.md](PRIVACY.md).
+Mac. Cloud AI is optional and off by default. Ask sends the configured provider
+only the question, selected text, and native-text passages read through its
+targeted tools; it does not attach the PDF. Each Send starts an independent
+question, and Dogear does not save conversation history to disk. See
+[PRIVACY.md](PRIVACY.md).
 
 Dogear never overwrites the original PDF during normal editing. Page changes
 and annotations are saved to an app-managed working copy. The explicit Save to

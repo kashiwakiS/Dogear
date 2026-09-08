@@ -11,7 +11,7 @@
 - 原生PDFKit实现阅读功能
 - PDF文件分组管理、页面整理功能
 - 便捷的键盘交互
-- 可选的 AI 摘要、问答与来源可追溯的 AI Highlights
+- 可选的统一 Ask：基于文档证据回答，并按需生成来源可追溯的 AI Highlights
 - 可按请求分组显示、导航和导出 AI 批注
 - 在页面右侧展示批注说明的 Margin Canvas
 
@@ -79,6 +79,21 @@ scripts/build.sh --release --clean --universal
 
 GitHub Actions 会在每次推送和 Pull Request 中运行相同的源码扫描、Debug 构建、通用 Release 构建和应用元数据检查。
 
+### 可选的本地语义检索
+
+Ask 默认使用无需模型的轻量词法检索。英文论文也可在设置中选择实验性的
+“语义检索 — Small EN（实验性）”，并手动导入本地 BGE Small EN 模型包。Dogear
+不会自动下载模型。高级用户可按 `scripts/prepare-bge-small-en.py` 顶部列出的
+固定依赖，在隔离的 Python 环境中运行：
+
+```bash
+python3 scripts/prepare-bge-small-en.py --output /path/to/output
+```
+
+脚本会下载固定版本的上游模型、校验权重并生成 `SmallEN` 文件夹；随后在
+Dogear 的 AI 设置中选择“导入本地模型…”导入该文件夹。词法检索始终可用，
+无需执行这些步骤。
+
 ## 快捷键
 
 
@@ -102,7 +117,7 @@ GitHub Actions 会在每次推送和 Pull Request 中运行相同的源码扫描
 
 ## 隐私和文件安全
 
-Dogear 没有遥测，也不需要账户。资料库数据只保存在你的 Mac 上。云 AI 为可选功能，默认关闭；文档摘要会将你确认过的 PDF 发送给你配置的提供商，选区提问只发送选中的文本和对话内容，AI Highlights 工作流只发送工具按需读取的原生文本片段而不会附加 PDF 文件。详见 [PRIVACY.md](PRIVACY.md)。
+Dogear 没有遥测，也不需要账户。资料库数据只保存在你的 Mac 上。云 AI 为可选功能，默认关闭；Ask 只向你配置的提供商发送问题、选中的文字和工具按需读取的原生文本片段，不会附加 PDF 文件。每次发送都是独立问题，Dogear 不会在磁盘上保存对话历史。详见 [PRIVACY.md](PRIVACY.md)。
 
 在正常编辑中，Dogear 绝不会覆盖原始 PDF。页面更改和批注会保存到应用管理的工作副本中。明确的“保存到原文件”命令需要确认，并使用原子写入。
 

@@ -1,6 +1,1083 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+"Allow highlights" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"允许高亮"}}}},
+"Reviewing answer against evidence…" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"正在核验答案与证据…"}}}},
+"Choose Log Folder" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"选择日志文件夹"}}}},
+"Choose Debug Log Folder…" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"选择 Debug 日志文件夹…"}}}},
+"New logs go into DogearDiagnostics inside the selected folder. Existing logs are not moved." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"新日志将写入所选文件夹内的 DogearDiagnostics，现有日志不会移动。"}}}},
+"Could not select the log folder. Finish active requests and choose a writable folder." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"无法选择日志文件夹。请先结束正在进行的请求，再选择可写入的文件夹。"}}}},
+"This request originally added %lld highlight(s). Undo or later edits may change the current annotations." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"本次请求最初添加了 %lld 条高亮；撤销或后续编辑可能已改变当前标注。"}}}},
+"The answer still failed evidence review after one correction. No final answer or annotations were accepted." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"修改一次后，答案仍未通过证据核验。未接受最终答案，也未添加标注。"}}}},
+"The proposed answer or its cited evidence exceeds the bounded review size. Ask a narrower question. No annotations were applied." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"候选答案或所引证据超过核验长度限制。请缩小问题范围；未添加标注。"}}}},
+"The evidence reviewer returned an invalid result. No final answer or annotations were accepted." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"证据核验返回了无效结果。未接受最终答案，也未添加标注。"}}}},
+"Evidence Retrieval" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "证据检索"
+      }
+    }
+  }
+},
+"Retrieval Mode" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "检索方式"
+      }
+    }
+  }
+},
+"Lightweight — lexical" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "轻量检索 — 词语匹配"
+      }
+    }
+  }
+},
+"Semantic — Small EN (experimental)" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "语义检索 — Small EN（实验性）"
+      }
+    }
+  }
+},
+"Semantic retrieval uses BGE Small EN locally for English papers. Chinese questions can produce English search queries. Changes apply to the next request only." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "语义检索在本地使用 BGE Small EN 处理英文论文。中文问题可生成英文检索词。设置更改仅对新请求生效。"
+      }
+    }
+  }
+},
+"Import Local Model…" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "导入本地模型…"
+      }
+    }
+  }
+},
+"Checking and importing model…" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "正在校验并导入模型…"
+      }
+    }
+  }
+},
+"No local model imported" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "尚未导入本地模型"
+      }
+    }
+  }
+},
+"Model imported; validated before use" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "模型已导入，使用前会校验"
+      }
+    }
+  }
+},
+"Import the SmallEN folder produced by Dogear's model conversion script. No model downloads happen automatically. Lexical retrieval needs no local model." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "导入 Dogear 模型转换脚本生成的 SmallEN 文件夹。不会自动下载模型；词语检索不需要本地模型。"
+      }
+    }
+  }
+},
+"Building the local evidence index…" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "正在构建本地证据索引…"
+      }
+    }
+  }
+},
+"Loading the local embedding model…" : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "正在加载本地向量模型…"
+      }
+    }
+  }
+},
+"Import the BGE Small EN model in Settings before using semantic retrieval." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "使用语义检索前，请在设置中导入 BGE Small EN 模型。"
+      }
+    }
+  }
+},
+"Choose a supported retrieval mode in Settings." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "请在设置中选择支持的检索方式。"
+      }
+    }
+  }
+},
+"The local embedding model is invalid or incompatible. Import a verified model package." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "本地向量模型无效或不兼容，请导入已验证的模型包。"
+      }
+    }
+  }
+},
+"The local embedding model returned invalid vectors. No result was accepted." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "本地模型返回了无效向量，未接受任何结果。"
+      }
+    }
+  }
+},
+"A source sentence or search query exceeds this model's token limit. No text was silently truncated." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "原文句子或检索词超过了模型的 Token 限制，未静默截断文本。"
+      }
+    }
+  }
+},
+"This document exceeds the local embedding index limit. Choose lightweight retrieval." : {
+  "extractionState": "manual",
+  "localizations": {
+    "zh-Hans": {
+      "stringUnit": {
+        "state": "translated",
+        "value": "文档超过本地向量索引限制，请选择轻量检索。"
+      }
+    }
+  }
+},
+    "The AI configuration or credential changed while this request was preparing. Send the request again." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "准备请求期间，AI 配置或凭据发生了变化。请重新发送请求。"
+          }
+        }
+      }
+    },
+    "Cloud AI is disabled or its current data-sharing terms have not been accepted." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "云端 AI 已停用，或尚未同意当前的数据共享说明。"
+          }
+        }
+      }
+    },
+    "Dogear could not prepare the configured AI credentials. No provider request was sent." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dogear 无法准备已配置的 AI 凭据。未向供应商发送请求。"
+          }
+        }
+      }
+    },
+    "Interim answer" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "阶段性回答"
+          }
+        }
+      }
+    },
+    "Preparing credentials; check for a macOS Keychain prompt…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在准备凭据；请留意 macOS 钥匙串授权提示…"
+          }
+        }
+      }
+    },
+    "This provider does not support the server-stored conversation required by this workflow. No result was accepted." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此供应商不支持当前工作流所需的服务端会话保存与续接。未接受任何结果。"
+          }
+        }
+      }
+    },
+    "The answer is ready, but Dogear could not apply its optional highlights." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回答已完成，但 Dogear 未能应用可选高亮。"
+          }
+        }
+      }
+    },
+    "Local structural outline only. No provider requests or PDF uploads." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅生成本地结构提纲，不请求供应商或上传 PDF。"
+          }
+        }
+      }
+    },
+    "No model selected" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未选择模型"
+          }
+        }
+      }
+    },
+    "Provider: %@ · %@. Ask sends selected text and retrieved passages, not the PDF file." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "供应商：%1$@ · %2$@。Ask 发送选中文本和检索片段，不上传 PDF 文件。"
+          }
+        }
+      }
+    },
+    "Applied %lld verified AI highlight(s) as one undoable operation." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已应用 %lld 条经过验证的 AI 高亮，可一次性撤销。"
+          }
+        }
+      }
+    },
+    "The answer is ready. No highlights were added." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "回答已完成，未添加高亮。"
+          }
+        }
+      }
+    },
+    "Skipped %lld duplicate(s)." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已跳过 %lld 条重复项。"
+          }
+        }
+      }
+    },
+    "Provider turns: %lld; tool calls: %lld; source characters read: %lld." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "供应商轮次：%1$lld；工具调用：%2$lld；正文读取字数：%3$lld。"
+          }
+        }
+      }
+    },
+    "No workflow log yet. Run an AI request first." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚无工作流日志，请先运行一次 AI 请求。"
+          }
+        }
+      }
+    },
+    "Ask about the document or select a passage to focus the answer. Highlights are added only when useful." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可针对全文提问，也可选中片段聚焦回答。仅在有帮助时添加高亮。"
+          }
+        }
+      }
+    },
+    "Ask a question, or leave blank for an overview…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入问题，或留空生成概览…"
+          }
+        }
+      }
+    },
+    "Summarize the document with optional evidence highlights" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "总结文档，并按需高亮证据"
+          }
+        }
+      }
+    },
+    "Create a local outline without cloud AI" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在本地生成提纲，不使用云端 AI"
+          }
+        }
+      }
+    },
+    "Answer using the selected passage and relevant document evidence" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "结合选中片段与相关文档证据回答"
+          }
+        }
+      }
+    },
+    "Answer from document evidence, with optional highlights" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "依据文档证据回答，并按需高亮"
+          }
+        }
+      }
+    },
+    "Workflow logs record progress and errors without passage or answer text." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "工作流日志记录进度和错误，不包含正文片段或回答文本。"
+          }
+        }
+      }
+    },
+    "Ask sends your question, selected text, and retrieved document passages to the configured provider, not the PDF file. Each question starts a new conversation. Dogear reuses provider-stored responses when available; for stateless providers, it keeps and resends the current question’s context in memory until completion, failure, or cancellation. This context is not saved as conversation history on disk or reused for later questions. Provider data retention follows the provider’s policy." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask 会将问题、选中文本及检索到的文档片段发送给已配置的供应商，不会上传 PDF 文件。每个问题创建独立会话。Dogear 会在可用时复用供应商保存的响应；对于无状态供应商，会在内存中保留并重新发送当前问题的上下文，直到完成、失败或取消。这些上下文不会作为对话历史存盘，也不会用于后续问题。供应商的数据保留遵循其政策。"
+          }
+        }
+      }
+    },
+    "The API key is stored in macOS Keychain and cannot be displayed or exported by Dogear." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 密钥保存在 macOS 钥匙串中，Dogear 无法显示或导出。"
+          }
+        }
+      }
+    },
+    "The active API key is stored as plaintext in the local configuration file, protected only by current-user file permissions (0600). Any retained Keychain key is ignored until Keychain storage is selected again." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 API 密钥以明文保存在本地配置文件中，仅受当前用户文件权限（0600）保护。保留的钥匙串密钥会被忽略，直到重新选择钥匙串存储。"
+          }
+        }
+      }
+    },
+    "Cloud AI conversation handling has changed. Enable it again to review and accept the updated disclosure." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "云端 AI 的会话处理方式已更新。请重新启用并确认更新后的说明。"
+          }
+        }
+      }
+    },
+    "Local outline" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地提纲"
+          }
+        }
+      }
+    },
+    "Working" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "处理中"
+          }
+        }
+      }
+    },
+    "Copy Answer" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "复制回答"
+          }
+        }
+      }
+    },
+    "Preparing the AI workflow…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在准备 AI 工作流…"
+          }
+        }
+      }
+    },
+    "Turn %lld of %lld" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %1$lld / %2$lld 轮"
+          }
+        }
+      }
+    },
+    "%lld tool calls" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 次工具调用"
+          }
+        }
+      }
+    },
+    "%lld source characters" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已读取 %lld 字正文"
+          }
+        }
+      }
+    },
+    "Preparing the document snapshot…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在准备文档快照…"
+          }
+        }
+      }
+    },
+    "Mapping the document…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在分析文档结构…"
+          }
+        }
+      }
+    },
+    "Searching for relevant evidence…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在搜索相关证据…"
+          }
+        }
+      }
+    },
+    "Reading selected evidence…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在读取选定证据…"
+          }
+        }
+      }
+    },
+    "Validating optional highlights…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在验证高亮草稿…"
+          }
+        }
+      }
+    },
+    "Preparing the answer…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在整理回答…"
+          }
+        }
+      }
+    },
+    "Resolving highlight locations…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在定位高亮位置…"
+          }
+        }
+      }
+    },
+    "Applying verified highlights…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在应用已验证的高亮…"
+          }
+        }
+      }
+    },
+    "Waiting for the AI provider…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待 AI 供应商返回结果…"
+          }
+        }
+      }
+    },
+    "Retrying the AI provider…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在重试 AI 供应商请求…"
+          }
+        }
+      }
+    },
+    "The AI provider did not respond in time. No result was accepted." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商响应超时，未接受任何结果。"
+          }
+        }
+      }
+    },
+    "Dogear could not reach the AI provider. No result was accepted." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dogear 无法连接 AI 供应商，未接受任何结果。"
+          }
+        }
+      }
+    },
+    "The AI provider returned a response that did not match the active workflow. No result was accepted." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商的响应不符合当前工作流，未接受任何结果。"
+          }
+        }
+      }
+    },
+    "The AI workflow ended without a verified result." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 工作流结束，但未产生通过验证的结果。"
+          }
+        }
+      }
+    },
+    "The PDF changed while the AI request was running. No result was accepted." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 请求期间 PDF 已发生变化，未接受任何结果。"
+          }
+        }
+      }
+    },
+    "This PDF has no usable native text. OCR is not enabled." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 PDF 没有可用的原生文本，尚未启用 OCR。"
+          }
+        }
+      }
+    },
+    "The AI request failed. No result was accepted." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 请求失败，未接受任何结果。"
+          }
+        }
+      }
+    },
+    "Dogear reached its internal step limit before the AI finished. This is not an API account quota error." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 尚未完成时已达到 Dogear 内部轮次上限。这不是 API 账户额度问题。"
+          }
+        }
+      }
+    },
+    "Dogear reached its internal tool-call limit before the AI finished. This is not an API account quota error." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 尚未完成时已达到 Dogear 内部工具调用上限。这不是 API 账户额度问题。"
+          }
+        }
+      }
+    },
+    "Dogear reached its internal source-reading limit before the AI finished. This is not an API account quota error." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 尚未完成时已达到 Dogear 内部正文读取上限。这不是 API 账户额度问题。"
+          }
+        }
+      }
+    },
+    "Dogear reached its internal input limit before the AI finished. This is not an API account quota error." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 尚未完成时已达到 Dogear 内部输入 Token 上限。这不是 API 账户额度问题。"
+          }
+        }
+      }
+    },
+    "Dogear reached its internal time limit before the AI finished. This is not an API account quota error." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 尚未完成时已达到 Dogear 内部时限。这不是 API 账户额度问题。"
+          }
+        }
+      }
+    },
+    "The AI repeated the same request without making progress, so Dogear stopped." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 重复相同请求且没有取得进展，Dogear 已停止工作流。"
+          }
+        }
+      }
+    },
+    "The AI provider repeated a tool-call identifier. No result was accepted." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商重复使用了工具调用标识，未接受任何结果。"
+          }
+        }
+      }
+    },
+    "The configured AI provider does not support the required function tools." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 AI 供应商不支持所需的函数工具调用。"
+          }
+        }
+      }
+    },
+    "The AI provider rejected the configured credentials (HTTP %lld)." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商拒绝了当前凭据（HTTP %lld）。"
+          }
+        }
+      }
+    },
+    "The AI provider is rate limiting requests (HTTP 429). Try again shortly." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商正在限制请求频率（HTTP 429），请稍后重试。"
+          }
+        }
+      }
+    },
+    "The AI provider is temporarily unavailable (HTTP %lld)." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商暂时不可用（HTTP %lld）。"
+          }
+        }
+      }
+    },
+    "The AI provider returned an error (HTTP %lld)." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商返回错误（HTTP %lld）。"
+          }
+        }
+      }
+    },
+    "The API Base URL is invalid." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 基础 URL 无效。"
+          }
+        }
+      }
+    },
+    "No API key is configured." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未配置 API 密钥。"
+          }
+        }
+      }
+    },
+    "Choose an AI model first." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先选择 AI 模型。"
+          }
+        }
+      }
+    },
+    "The AI provider returned an unexpected response. No result was accepted." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 供应商返回了异常响应，未接受任何结果。"
+          }
+        }
+      }
+    },
+    "AI request canceled. No new annotations were applied." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AI 请求已取消，未应用任何新批注。"
+          }
+        }
+      }
+    },
+    "Configure and enable a cloud AI provider in Settings first." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先在设置中配置并启用云端 AI 供应商。"
+          }
+        }
+      }
+    },
+    "Preparing a local structural outline…" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在生成本地结构提纲…"
+          }
+        }
+      }
+    },
+    "On-device only · No provider requests" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅在本机处理 · 不请求供应商"
+          }
+        }
+      }
+    },
+    "Local structural outline ready. No AI provider was contacted and no annotations were created." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地结构提纲已生成，未请求 AI 供应商，也未创建批注。"
+          }
+        }
+      }
+    },
+    "Local outline canceled. No changes were made." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地提纲已取消，未做任何更改。"
+          }
+        }
+      }
+    },
+    "Local structural outline" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地结构提纲"
+          }
+        }
+      }
+    },
+    "Generated on this device from PDF bookmarks or detected headings. This is not an AI summary; no document content was sent to a provider." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "根据 PDF 书签或识别到的标题在本机生成。这不是 AI 总结，未向供应商发送任何文档内容。"
+          }
+        }
+      }
+    },
+    "Pages: %lld" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "页数：%lld"
+          }
+        }
+      }
+    },
+    "Selectable-text pages: %lld" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "含可选文本的页数：%lld"
+          }
+        }
+      }
+    },
+    "Native-text characters: %lld" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "原生文本字数：%lld"
+          }
+        }
+      }
+    },
+    "No PDF bookmarks or local headings were found." : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到 PDF 书签或本地标题。"
+          }
+        }
+      }
+    },
+    "Document structure" : {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文档结构"
+          }
+        }
+      }
+    },
     "/ %lld" : {
       "localizations" : {
         "zh-Hans" : {

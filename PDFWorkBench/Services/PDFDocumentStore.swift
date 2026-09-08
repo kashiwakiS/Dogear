@@ -432,7 +432,8 @@ final class PDFDocumentStore: ObservableObject {
     ) throws -> Int {
         guard let document else { return 0 }
         let anchorsByCandidateID = Dictionary(
-            uniqueKeysWithValues: anchors.map { ($0.candidateID, $0) }
+            anchors.map { ($0.candidateID, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
         guard anchorsByCandidateID.count == anchors.count,
               stagedHighlights.count == anchors.count
@@ -455,7 +456,11 @@ final class PDFDocumentStore: ObservableObject {
             guard let page = document.page(at: anchor.pageNumber - 1) else {
                 throw AIHighlightCommitError.missingPage(anchor.pageNumber)
             }
-            if hasDuplicateAIHighlight(anchor, on: page) {
+            if hasDuplicateAIHighlight(
+                anchor,
+                groupID: effectiveGroup.id,
+                on: page
+            ) {
                 continue
             }
             let annotation = try factory.makeAnnotation(
@@ -1373,12 +1378,14 @@ final class PDFDocumentStore: ObservableObject {
 
     private func hasDuplicateAIHighlight(
         _ anchor: ResolvedAIHighlightAnchor,
+        groupID: UUID,
         on page: PDFPage
     ) -> Bool {
         let expectedBounds = anchor.annotationBounds.cgRect
         let expectedPoints = anchor.quadrilateralPoints.map(\.cgPoint)
         return page.annotations.contains { annotation in
             guard AIAnnotationProvenance.classify(annotation).isAI,
+                  AIAnnotationProvenance.groupID(of: annotation) == groupID,
                   annotation.type == "Highlight",
                   approximatelyEqual(annotation.bounds, expectedBounds),
                   let points = annotation.quadrilateralPoints?.map(\.pointValue),

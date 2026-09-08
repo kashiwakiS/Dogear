@@ -173,22 +173,26 @@ enum AIHighlightNativeAnnotationDiagnostics {
                 "Selective export mutated the live document or leaked display state."
             )
 
-            let noteDocument = try makeBlankPDF()
+            let noteDocument = try makeLinkedNotePDF()
             let notePage = try require(noteDocument.page(at: 0))
-            let textNote = PDFAnnotation(
-                bounds: CGRect(x: 72, y: 620, width: 24, height: 24),
-                forType: .text,
-                withProperties: nil
+            let textNote = try require(notePage.annotations.first { $0.type == "Text" })
+            let popup = try require(notePage.annotations.first { $0.type == "Popup" })
+            check(
+                notePage.annotations.count == 2 && textNote.popup === popup,
+                "The note fixture did not load its linked Text and Popup annotations."
             )
-            textNote.contents = "Selectable margin note"
-            let popup = PDFAnnotation(
-                bounds: CGRect(x: 112, y: 540, width: 220, height: 120),
-                forType: .popup,
-                withProperties: nil
+            let baselineNoteData = try require(noteDocument.dataRepresentation())
+            let baselineNoteDocument = try require(PDFDocument(data: baselineNoteData))
+            let baselineNotes = baselineNoteDocument.page(at: 0)?.annotations ?? []
+            let baselineText = baselineNotes.first { $0.type == "Text" }
+            let baselinePopup = baselineNotes.first { $0.type == "Popup" }
+            check(
+                baselineNotes.count == 2
+                    && baselineText?.shouldDisplay == true
+                    && baselinePopup?.shouldDisplay == true
+                    && baselineText?.popup === baselinePopup,
+                "The untreated Text/Popup fixture failed its control round trip."
             )
-            textNote.popup = popup
-            notePage.addAnnotation(textNote)
-            notePage.addAnnotation(popup)
             let noteDisplayState = noteDocument.setNoteAnnotationsShouldDisplay(false)
             check(
                 noteDisplayState.count == 2
@@ -196,25 +200,40 @@ enum AIHighlightNativeAnnotationDiagnostics {
                     && !popup.shouldDisplay,
                 "The reader display state did not hide native Text and Popup note UI."
             )
+            let hiddenNoteData = try require(noteDocument.dataRepresentation())
+            let hiddenNoteDocument = try require(PDFDocument(data: hiddenNoteData))
+            let hiddenNotes = hiddenNoteDocument.page(at: 0)?.annotations ?? []
+            check(
+                hiddenNotes.count == 2 && hiddenNotes.allSatisfy { !$0.shouldDisplay },
+                "The control did not demonstrate that hidden note flags require normalization."
+            )
             let noteData = try require(
                 noteDocument.dataRepresentationWithNoteAnnotationsDisplayed()
             )
             let noteRoundTrip = try require(PDFDocument(data: noteData))
             let roundTripAnnotations = noteRoundTrip.page(at: 0)?.annotations ?? []
+            let roundTripText = roundTripAnnotations.first { $0.type == "Text" }
+            let roundTripPopup = roundTripAnnotations.first { $0.type == "Popup" }
             check(
-                roundTripAnnotations.contains(where: {
-                    $0.type == "Text" && $0.shouldDisplay
-                })
-                    && roundTripAnnotations.contains(where: {
-                        $0.type == "Popup" && $0.shouldDisplay
-                    })
-                    && !textNote.shouldDisplay,
+                roundTripAnnotations.count == 2
+                    && roundTripText?.shouldDisplay == true
+                    && roundTripPopup?.shouldDisplay == true
+                    && roundTripText?.popup === roundTripPopup
+                    && roundTripText?.contents == textNote.contents
+                    && !textNote.shouldDisplay && !popup.shouldDisplay,
                 "Text/Popup serialization did not normalize and restore display state."
             )
             noteDocument.restoreNoteAnnotationDisplayStates(noteDisplayState)
             check(
                 textNote.shouldDisplay && popup.shouldDisplay,
                 "The live Text/Popup display state was not restored."
+            )
+            textNote.shouldDisplay = false
+            popup.shouldDisplay = true
+            _ = try require(noteDocument.dataRepresentationWithNoteAnnotationsDisplayed())
+            check(
+                !textNote.shouldDisplay && popup.shouldDisplay,
+                "Note serialization did not restore distinct live Text/Popup display states."
             )
         } catch {
             failures.append(error.localizedDescription)
@@ -301,6 +320,37 @@ enum AIHighlightNativeAnnotationDiagnostics {
         context.closePDF()
 
         guard let document = PDFDocument(data: data as Data), document.pageCount == 1 else {
+            throw AIHighlightNativeAnnotationDiagnosticError.cannotCreatePDF
+        }
+        return document
+    }
+
+    private static func makeLinkedNotePDF() throws -> PDFDocument {
+        // Construct canonical reciprocal /Popup and /Parent references. On
+        // some PDFKit versions, assigning `textNote.popup` before adding the
+        // note to a page creates a live popup but omits these references and
+        // loses it even in an untreated dataRepresentation() control. That is
+        // not a valid fixture for testing the display-normalization helper.
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Annots [4 0 R 5 0 R] >>",
+            "<< /Type /Annot /Subtype /Text /Rect [72 620 96 644] /Contents (Selectable margin note) /Popup 5 0 R /P 3 0 R /F 4 >>",
+            "<< /Type /Annot /Subtype /Popup /Rect [112 540 332 660] /Parent 4 0 R /P 3 0 R /Open false /F 4 >>"
+        ]
+        var data = Data("%PDF-1.4\n".utf8)
+        var offsets = [0]
+        for (index, object) in objects.enumerated() {
+            offsets.append(data.count)
+            data.append(Data("\(index + 1) 0 obj\n\(object)\nendobj\n".utf8))
+        }
+        let crossReferenceOffset = data.count
+        data.append(Data("xref\n0 \(offsets.count)\n0000000000 65535 f \n".utf8))
+        for offset in offsets.dropFirst() {
+            data.append(Data(String(format: "%010d 00000 n \n", offset).utf8))
+        }
+        data.append(Data("trailer\n<< /Size \(offsets.count) /Root 1 0 R >>\nstartxref\n\(crossReferenceOffset)\n%%EOF\n".utf8))
+        guard let document = PDFDocument(data: data), document.pageCount == 1 else {
             throw AIHighlightNativeAnnotationDiagnosticError.cannotCreatePDF
         }
         return document

@@ -39,19 +39,43 @@ enum AIHighlightApplicationDiagnostics {
                 in: document
             )
 
-            let defaults = UserDefaults(suiteName: "AIHighlightApplicationDiagnostics")!
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("DogearApplicationDiagnostics-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let defaultsName = "AIHighlightApplicationDiagnostics-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: defaultsName)!
+            defer { defaults.removePersistentDomain(forName: defaultsName) }
+            let saveQueue = PDFSaveQueue()
+            defer { saveQueue.waitUntilDrained() }
+            let copies = try PDFWorkingCopyStore(directoryURL: root.appendingPathComponent("copies"))
             let store = PDFDocumentStore(
-                feedbackCenter: OperationFeedbackCenter(userDefaults: defaults)
+                feedbackCenter: OperationFeedbackCenter(userDefaults: defaults),
+                metadataStore: DocumentMetadataStore(stateURL: root.appendingPathComponent("metadata.json")),
+                aiHighlightGroupStore: AIHighlightGroupStore(stateURL: root.appendingPathComponent("groups.json")),
+                workingCopyStore: copies,
+                saveQueue: saveQueue
             )
             store.document = document
+            let originalURL = root.appendingPathComponent("original.pdf")
+            let originalBytes = document.dataRepresentation()!
+            try originalBytes.write(to: originalURL)
+            store.selectedPDFURL = originalURL
             let undoManager = UndoManager()
             undoManager.groupsByEvent = false
             store.setUndoManager(undoManager)
+            let group = AIHighlightGroup(
+                requestKind: .overview,
+                providerName: "Diagnostic",
+                modelName: "diagnostic-model",
+                promptVersion: AIHighlightWorkflowService.promptVersion
+            )
 
             undoManager.beginUndoGrouping()
             let applied = try store.applyAIHighlights(
                 stagedHighlights: [staged],
-                anchors: anchors
+                anchors: anchors,
+                group: group
             )
             undoManager.endUndoGrouping()
             check(applied == 1, "The application transaction did not add one annotation.")
@@ -95,12 +119,45 @@ enum AIHighlightApplicationDiagnostics {
 
             let duplicateCount = try store.applyAIHighlights(
                 stagedHighlights: [staged],
-                anchors: anchors
+                anchors: anchors,
+                group: group
             )
             check(
                 duplicateCount == 0 && document.page(at: 0)?.annotations.count == 1,
-                "A duplicate AI geometry was added."
+                "A duplicate AI geometry was added within one result group."
             )
+
+            undoManager.beginUndoGrouping()
+            let separateGroupCount = try store.applyAIHighlights(
+                stagedHighlights: [staged],
+                anchors: anchors,
+                group: AIHighlightGroup(
+                    requestKind: .question,
+                    question: "A separate request",
+                    providerName: "Diagnostic",
+                    modelName: "diagnostic-model",
+                    promptVersion: AIHighlightWorkflowService.promptVersion
+                )
+            )
+            undoManager.endUndoGrouping()
+            check(
+                separateGroupCount == 1
+                    && document.page(at: 0)?.annotations.count == 2,
+                "A separate result group was incorrectly deduplicated."
+            )
+            do {
+                _ = try store.applyAIHighlights(stagedHighlights: [staged, staged], anchors: anchors + anchors, group: group)
+                check(false, "Duplicate anchor keys were not rejected.")
+            } catch AIHighlightCommitError.incompleteResolution {
+                check(document.page(at: 0)?.annotations.count == 2,
+                      "Invalid anchor set partially mutated the document.")
+            }
+            saveQueue.waitUntilDrained()
+            let unchangedOriginal = try Data(contentsOf: originalURL)
+            check(unchangedOriginal == originalBytes, "AI operations modified the original PDF.")
+            let savedCopy = PDFDocument(url: copies.workingCopyURL(forOriginalURL: originalURL))
+            check(savedCopy?.page(at: 0)?.annotations.count == 2,
+                  "Working copy did not persist both independent AI groups.")
         } catch {
             failures.append(error.localizedDescription)
         }

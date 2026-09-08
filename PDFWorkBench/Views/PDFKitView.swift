@@ -1335,6 +1335,22 @@ final class HighlightingPDFView: PDFView {
         goToPage(index: pageIndex)
     }
 
+    /// Gestures choose a custom scale, unlike scale changes caused by Fit layout.
+    func beginUserMagnification() {
+        endFitMode()
+        autoScales = false
+    }
+
+    override func magnify(with event: NSEvent) {
+        beginUserMagnification()
+        super.magnify(with: event)
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        beginUserMagnification()
+        super.smartMagnify(with: event)
+    }
+
     func applyZoomCommand(_ action: PDFZoomAction) {
         switch action {
         case .zoomIn:

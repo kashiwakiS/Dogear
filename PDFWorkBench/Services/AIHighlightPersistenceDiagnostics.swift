@@ -69,9 +69,9 @@ enum AIHighlightPersistenceDiagnostics {
                 "AI highlight group metadata directory did not use 0700 permissions."
             )
 
-            let defaults = UserDefaults(
-                suiteName: "AIHighlightPersistenceDiagnostics-\(UUID().uuidString)"
-            )!
+            let defaultsName = "AIHighlightPersistenceDiagnostics-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: defaultsName)!
+            defer { defaults.removePersistentDomain(forName: defaultsName) }
             defaults.set(
                 false,
                 forKey: AIHighlightTraceRecorder.detailedContentDefaultsKey
@@ -112,6 +112,33 @@ enum AIHighlightPersistenceDiagnostics {
             await recorder.record(
                 workflowID: groupID,
                 groupID: groupID,
+                event: .workflowPrepared(
+                    promptVersion: "fixture-v1", instructions: "private instructions",
+                    input: "private question", toolSchemaVersions: [:]
+                )
+            )
+            await recorder.record(
+                workflowID: groupID,
+                groupID: groupID,
+                event: .workflow(.toolFinished(
+                    callID: "answer-1", name: "publish_answer",
+                    output: Data(#"{"accepted":true,"publication":{"result_markdown":"private answer","note":"private note","query":"private query"}}"#.utf8),
+                    readCharacters: 0
+                ))
+            )
+            await recorder.record(
+                workflowID: groupID,
+                groupID: groupID,
+                event: .answerCompleted(status: .answered, evidenceCount: 2, highlightCount: 0, revision: 0)
+            )
+            await recorder.record(
+                workflowID: groupID,
+                groupID: groupID,
+                event: .workflow(.continuationDisposed)
+            )
+            await recorder.record(
+                workflowID: groupID,
+                groupID: groupID,
                 event: .failed(
                     code: "diagnostic_error",
                     message: "private provider payload"
@@ -126,9 +153,33 @@ enum AIHighlightPersistenceDiagnostics {
             check(
                 redactedTrace.contains("<redacted>")
                     && !redactedTrace.contains("private passage")
-                    && !redactedTrace.contains("private provider payload"),
+                    && !redactedTrace.contains("private provider payload")
+                    && !redactedTrace.contains("private instructions")
+                    && !redactedTrace.contains("private question")
+                    && !redactedTrace.contains("private answer")
+                    && !redactedTrace.contains("private note")
+                    && !redactedTrace.contains("private query"),
                 "Default trace did not redact source passage content."
             )
+            let records = try redactedTrace.split(separator: "\n").map {
+                try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any]
+            }
+            check(records.enumerated().allSatisfy { index, record in
+                record["sequence"] as? Int == index
+                    && record["workflow_id"] as? String == groupID.uuidString
+            }, "Workflow trace sequence or workflow identity is inconsistent.")
+            let events = records.compactMap { $0["event"] as? [String: Any] }
+            check(events.contains { $0["retrieval_mode"] as? String == "scheme1" },
+                  "Trace omitted the active lexical retrieval mode.")
+            check(events.contains {
+                $0["kind"] as? String == "answer_completed"
+                    && $0["answer_evidence_count"] as? Int == 2
+                    && $0["highlight_count"] as? Int == 0
+            }, "Trace omitted answer-only completion counts.")
+            check(events.contains {
+                $0["kind"] as? String == "continuation_disposed"
+                    && $0["local_transcript_retained"] as? Bool == false
+            }, "Trace omitted local continuation cleanup.")
 
             defaults.set(
                 true,

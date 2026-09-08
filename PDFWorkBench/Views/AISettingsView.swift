@@ -47,6 +47,8 @@ struct AISettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            AIRetrievalSettingsView()
+
             Section("OpenAI-compatible Responses API") {
                 HStack {
                     TextField("Configuration Name", text: $configurationName)
@@ -179,6 +181,11 @@ struct AISettingsView: View {
             }
 
             Section("Privacy") {
+                if configurationStore.configuration.cloudConsentVersion != AIProviderConfiguration.currentCloudConsentVersion {
+                    Text("Cloud AI conversation handling has changed. Enable it again to review and accept the updated disclosure.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 Text(privacyDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -190,11 +197,12 @@ struct AISettingsView: View {
         .alert("Enable cloud AI?", isPresented: $isShowingConsent) {
             Button("Cancel", role: .cancel) {}
             Button("Enable") {
+                configurationStore.configuration.cloudConsentVersion = AIProviderConfiguration.currentCloudConsentVersion
                 configurationStore.configuration.hasCloudConsent = true
                 configurationStore.configuration.isCloudAIEnabled = true
             }
         } message: {
-            Text("When you confirm a document summary, the complete PDF will be uploaded to the configured provider. Selection questions send the displayed selection and conversation instead.")
+            Text("Ask sends your question, selected text, and retrieved document passages to the configured provider, not the PDF file. Each question starts a new conversation. Dogear reuses provider-stored responses when available; for stateless providers, it keeps and resends the current question’s context in memory until completion, failure, or cancellation. This context is not saved as conversation history on disk or reused for later questions. Provider data retention follows the provider’s policy.")
         }
         .confirmationDialog(
             "Delete Keychain Key?",
@@ -256,9 +264,9 @@ struct AISettingsView: View {
 
     private var privacyDescription: String {
         let storageDescription = configurationStore.configuration.secretStorageMode == .keychain
-            ? "The API key is stored in macOS Keychain and cannot be displayed or exported by Dogear."
-            : "The active API key is stored as plaintext in the local configuration file, protected only by current-user file permissions (0600). Any retained Keychain key is ignored until Keychain storage is selected again."
-        return "Document summaries upload the complete PDF after you review and confirm the request. Selection questions send only the displayed selection and conversation. \(storageDescription) The app requests that compatible providers do not store Responses API results."
+            ? L10n.string("The API key is stored in macOS Keychain and cannot be displayed or exported by Dogear.")
+            : L10n.string("The active API key is stored as plaintext in the local configuration file, protected only by current-user file permissions (0600). Any retained Keychain key is ignored until Keychain storage is selected again.")
+        return L10n.string("Ask sends your question, selected text, and retrieved document passages to the configured provider, not the PDF file. Each question starts a new conversation. Dogear reuses provider-stored responses when available; for stateless providers, it keeps and resends the current question’s context in memory until completion, failure, or cancellation. This context is not saved as conversation history on disk or reused for later questions. Provider data retention follows the provider’s policy.") + "\n\n" + storageDescription
     }
 
     private func applyConfigurationName() {
