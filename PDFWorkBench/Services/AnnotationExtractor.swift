@@ -3,6 +3,8 @@ import PDFKit
 
 @MainActor
 enum AnnotationExtractor {
+    private static let dogearHighlightTextKey = PDFAnnotationKey(rawValue: "/DogearText")
+
     static func annotationItems(in document: PDFDocument) -> [PDFAnnotationItem] {
         var items: [PDFAnnotationItem] = []
 
@@ -67,6 +69,13 @@ enum AnnotationExtractor {
         }?.element
     }
 
+    @discardableResult
+    static func storeExactHighlightText(_ text: String, in annotation: PDFAnnotation) -> Bool {
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty else { return false }
+        return annotation.setValue(normalizedText, forAnnotationKey: dogearHighlightTextKey)
+    }
+
     private static func kind(for annotation: PDFAnnotation) -> PDFAnnotationItem.Kind? {
         switch annotation.type {
         case "Highlight":
@@ -82,6 +91,13 @@ enum AnnotationExtractor {
         _ annotation: PDFAnnotation,
         on page: PDFPage
     ) -> String {
+        if let storedText = annotation.value(forAnnotationKey: dogearHighlightTextKey) as? String {
+            let normalizedText = storedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalizedText.isEmpty {
+                return normalizedText
+            }
+        }
+
         let quadrilateralText = annotationQuadrilateralText(annotation, on: page)
         if !quadrilateralText.isEmpty {
             return quadrilateralText

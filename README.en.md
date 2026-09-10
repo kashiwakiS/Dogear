@@ -17,8 +17,10 @@ surface quiet, makes annotations portable, and keeps page operations reversible.
   controls, and a non-destructive night display.
 - Keep a local Library with Groups, ordering, native tabs, and per-window file
   sessions.
-- Add standard PDF highlights and FreeText notes, then navigate them and export
-  them as Markdown.
+- Create standard PDF highlights from the keyboard, toolbar, or Annotation menu.
+- Add FreeText notes, navigate annotations, and export them as Markdown. Search
+  highlighted text and comments by manual/AI source and annotation type while
+  retaining the current visible AI Highlight Group scope.
 - Use bookmarks, detected headings, and Dog-ear page markers to move through a
   document.
 - Use unified Ask for an evidence-grounded document overview or answer, with
@@ -93,12 +95,16 @@ Dogear's AI settings. Lexical retrieval remains available without this setup.
 | First / last page | `⌘⌥↑` / `⌘⌥↓` |
 | Zoom in / out | `⌘+` / `⌘−` |
 | Actual size / fit page / fit width | `⌘0` / `⌘1` / `⌘2` |
+| Focus the active document or annotation search | `⌘F` |
+| Next / previous search result | `⌘G` / `⌘⇧G` |
 | Library navigator | `⌘⌥L` |
 | Annotations and AI sidebar | `⌘⌥R` |
 | New Group… | `⌘⇧N` |
 
 When the native tab Group preview is open, press an unmodified number from `1`
-to `9` to open that file.
+to `9` to open that file. With text selected, you can also add a highlight from
+the title toolbar or Annotation menu. The Pages menu contains page organization
+and current-page deletion; deletion is disabled for a one-page document.
 
 ## Privacy and file safety
 

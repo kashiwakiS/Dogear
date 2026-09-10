@@ -1,42 +1,36 @@
-# Dogear 0.2.2
+# Dogear 0.2.3
 
-发布日期：2026-09-08
-版本：0.2.2
+发布日期：2026-09-10
+版本：0.2.3
 
 ## 中文
 
 ### 本版更新
 
-- 统一 Ask 现在会基于按需读取的文档证据给出回答，并可在同一次请求中生成来源可追溯的可选高亮。
-- 新增“允许高亮”控制。关闭时请求只生成文字回答；明确要求不标注时也会阻止写入批注。
-- 每次发送都是独立问题，并提供分阶段进度和取消操作；同时兼容有状态和无状态的 OpenAI Responses API 端点。
-- 最终回答会针对本次读取的有限证据再进行一次核验；核验有助于发现缺少支持或相互矛盾的表述，但结果仍受 PDF 原生文本、检索范围和所选模型能力限制。
-- 新增可选的实验性 BGE Small EN 本地语义检索。轻量词法检索仍为默认模式，模型需由用户手动准备和导入，应用不会自动下载。
-- 修复适应宽度阅读时 PDF 滚动条与右侧边栏宽度调节区域冲突的问题。
+- 选中 PDF 文字后，可从标题工具栏或“批注”菜单创建标准高亮；原有 `H` 快捷键继续可用。
+- `Command-F` 会聚焦最近使用的全文或批注搜索，`Command-G` 与 `Command-Shift-G` 在当前范围内前后导航。
+- 批注搜索现在覆盖高亮原文与评论，并支持手动／AI 来源和 Highlight／Note 类型筛选；搜索继续遵守当前可见或活动的 AI Highlight Group 范围。
+- 页面整理与当前页删除集中到独立的“页面”菜单。工具栏和菜单共享可用状态，单页文档不会提供删除操作。
 
-AI Highlights 继续使用标准 PDF 批注并写入应用管理的工作副本；原始 PDF 不会在正常编辑中被覆盖。
+高亮继续使用标准 PDF 批注并写入应用管理的工作副本；原始 PDF 不会在正常编辑中被覆盖。
 
 ### 使用要求
 
 - 运行要求：macOS 14.0 或更高版本。
 - 当前发行包已使用开发者账户签名。
-- 从旧版本升级且此前已启用云 AI 的用户，需要在设置中审阅更新后的数据披露并重新启用云 AI；原有提供商设置和密钥会保留。
 
 ## English
 
 ### What's new
 
-- Unified Ask now returns an answer grounded in document evidence read on demand, with optional source-linked highlights from the same request.
-- Added an Allow highlights control. Turn it off for a text-only answer; explicit no-annotation requests are also enforced.
-- Each Send starts an independent question with staged progress and cancellation across compatible stateful and stateless OpenAI Responses API endpoints.
-- A final review checks the proposed answer against the bounded evidence read for that request. It can catch unsupported or contradictory claims, but remains limited by native PDF text, retrieval coverage, and the selected model.
-- Added optional experimental local semantic retrieval with BGE Small EN. Lightweight lexical retrieval remains the default; the model is prepared and imported manually, with no automatic model download by the app.
-- Fixed a conflict between the PDF scrollbar and sidebar resizing while reading in Fit Width mode.
+- With PDF text selected, create a standard highlight from the title toolbar or Annotation menu; the existing `H` shortcut remains available.
+- `Command-F` focuses the most recently used document or annotation search, while `Command-G` and `Command-Shift-G` navigate forward and backward in that scope.
+- Annotation search now covers highlighted source text and comments, with manual/AI source and Highlight/Note type filters. Results remain within the current visible or active AI Highlight Group scope.
+- Page organization and current-page deletion now live in a dedicated Pages menu. The toolbar and menu share availability rules, and deletion is disabled for one-page documents.
 
-AI Highlights remain standard PDF annotations in the app-managed working copy; normal editing leaves the original PDF unchanged.
+Highlights remain standard PDF annotations in the app-managed working copy; normal editing leaves the original PDF unchanged.
 
 ### Requirements
 
 - Requires macOS 14.0 or later.
 - The current distribution package is signed with the developer account.
-- When upgrading with cloud AI previously enabled, review the revised data disclosure in Settings and re-enable cloud AI. Existing provider settings and keys are retained.

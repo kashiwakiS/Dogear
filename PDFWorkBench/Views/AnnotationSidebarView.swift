@@ -5,6 +5,11 @@ struct AnnotationSidebarView: View {
     let layout: ReaderSidebarLayout
     let expandedSections: Set<ReaderSidebarSection>
     let onToggleSection: (ReaderSidebarSection) -> Void
+    @Binding var activeFindScope: ReaderFindScope
+    let findFocusRequest: ReaderFindRequest?
+    let onFindFieldFocusChanged: (ReaderFindScope?) -> Void
+
+    @FocusState private var focusedFindScope: ReaderFindScope?
 
     private let maximumVisibleAIHighlightGroupRows = 5
     private let aiHighlightGroupRowHeight: CGFloat = 24
@@ -46,6 +51,16 @@ struct AnnotationSidebarView: View {
                 annotationSection
             }
         }
+        .onAppear { applyFindFocusRequest() }
+        .onChange(of: findFocusRequest?.id) { _, _ in
+            applyFindFocusRequest()
+        }
+        .onChange(of: focusedFindScope) { _, newScope in
+            if let newScope {
+                activeFindScope = newScope
+            }
+            onFindFieldFocusChanged(newScope)
+        }
     }
 
     private var annotationSection: some View {
@@ -54,6 +69,51 @@ struct AnnotationSidebarView: View {
                 aiHighlightGroupSection
 
                 Divider()
+            }
+
+            TextField("Search annotations", text: $documentStore.annotationSearchText)
+                .textFieldStyle(.roundedBorder)
+                .focused($focusedFindScope, equals: .annotations)
+                .onTapGesture { activeFindScope = .annotations }
+                .disabled(documentStore.document == nil)
+
+            HStack(spacing: 8) {
+                Picker("Source", selection: $documentStore.annotationOriginFilter) {
+                    ForEach(AnnotationOriginFilter.allCases) { filter in
+                        Text(filter.displayTitle).tag(filter)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .help("Annotation source")
+
+                Picker(L10n.string("Filter Annotation Type"), selection: $documentStore.annotationKindFilter) {
+                    ForEach(AnnotationKindFilter.allCases) { filter in
+                        Text(filter.displayTitle).tag(filter)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .help("Annotation type")
+            }
+
+            HStack(spacing: 6) {
+                Text(documentStore.annotationGroupScopeDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if documentStore.activeAIHighlightGroupID != nil {
+                    Button {
+                        documentStore.activateAIHighlightGroup(nil)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search all visible annotations")
+                }
             }
 
             HStack(spacing: 8) {
@@ -159,6 +219,7 @@ struct AnnotationSidebarView: View {
                             .toggleStyle(.checkbox)
 
                             Button {
+                                activeFindScope = .annotations
                                 documentStore.activateAIHighlightGroup(isActive ? nil : group.id)
                             } label: {
                                 HStack(spacing: 7) {
@@ -200,7 +261,14 @@ struct AnnotationSidebarView: View {
     }
 
     private var emptyAnnotationDescription: LocalizedStringKey {
-        documentStore.activeAIHighlightGroupID == nil
+        if !documentStore.annotationSearchText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+            || documentStore.annotationOriginFilter != .all
+            || documentStore.annotationKindFilter != .all {
+            return "No annotations match the current search and filters."
+        }
+        return documentStore.activeAIHighlightGroupID == nil
             ? "Highlights and notes appear here."
             : "No highlights match the current AI Highlight group."
     }
@@ -237,6 +305,9 @@ struct AnnotationSidebarView: View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search document text", text: $documentStore.documentSearchText)
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedFindScope, equals: .documentText)
+                .onTapGesture { activeFindScope = .documentText }
+                .disabled(documentStore.document == nil)
 
             if expandedSections.contains(.fullText) {
                 HStack(spacing: 8) {
@@ -280,6 +351,12 @@ struct AnnotationSidebarView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func applyFindFocusRequest() {
+        guard let findFocusRequest else { return }
+        activeFindScope = findFocusRequest.scope
+        focusedFindScope = findFocusRequest.scope
     }
 
     private func expandableSection<Content: View>(

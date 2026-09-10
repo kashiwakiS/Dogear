@@ -141,6 +141,7 @@ struct PDFWorkbenchCommandHandlers {
     let toggleAnnotationSidebar: () -> Void
     let addCurrentDocumentToSelectedGroup: () -> Void
     let removeCurrentDocumentFromSelectedGroup: () -> Void
+    let addHighlight: () -> Void
     let addFreeTextNote: () -> Void
     let showPageOrganizer: () -> Void
     let toggleDogear: () -> Void
@@ -155,6 +156,9 @@ struct PDFWorkbenchCommandHandlers {
     let fitWidth: () -> Void
     let fitPage: () -> Void
     let setDisplayStyle: (PDFReadingDisplayStyle) -> Void
+    let showFind: () -> Void
+    let findNext: () -> Void
+    let findPrevious: () -> Void
     let exportAnnotatedCopy: () -> Void
     let exportAnnotationsMarkdown: () -> Void
     let exportKeywordOutline: () -> Void
@@ -163,6 +167,7 @@ struct PDFWorkbenchCommandHandlers {
     let canUseDocumentCommands: Bool
     let canAddCurrentDocumentToSelectedGroup: Bool
     let canRemoveCurrentDocumentFromSelectedGroup: Bool
+    let canAddHighlight: Bool
     let canGoToPreviousPage: Bool
     let canGoToNextPage: Bool
     let canDeleteCurrentPage: Bool
@@ -200,6 +205,28 @@ private struct PDFWorkBenchCommands: Commands {
             }
             .keyboardShortcut("s")
             .disabled(!canUseDocumentCommands)
+        }
+
+        CommandGroup(after: .pasteboard) {
+            Divider()
+
+            Button(L10n.string("Find…")) {
+                commandHandlers?.showFind()
+            }
+            .keyboardShortcut("f")
+            .disabled(commandHandlers == nil)
+
+            Button(L10n.string("Find Next")) {
+                commandHandlers?.findNext()
+            }
+            .keyboardShortcut("g")
+            .disabled(commandHandlers == nil)
+
+            Button(L10n.string("Find Previous")) {
+                commandHandlers?.findPrevious()
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+            .disabled(commandHandlers == nil)
         }
 
         CommandMenu(L10n.string("Library")) {
@@ -329,12 +356,10 @@ private struct PDFWorkBenchCommands: Commands {
         }
 
         CommandMenu(L10n.string("Annotation")) {
-            Button(L10n.string("Organize Pages…")) {
-                commandHandlers?.showPageOrganizer()
+            Button(L10n.string("Add Highlight")) {
+                commandHandlers?.addHighlight()
             }
-            .disabled(!canUseDocumentCommands)
-
-            Divider()
+            .disabled(commandHandlers?.canAddHighlight != true)
 
             Button(L10n.string("Toggle Dog-ear")) {
                 commandHandlers?.toggleDogear()
@@ -345,6 +370,15 @@ private struct PDFWorkBenchCommands: Commands {
                 commandHandlers?.addFreeTextNote()
             }
             .disabled(!canUseDocumentCommands)
+        }
+
+        CommandMenu(L10n.string("Pages")) {
+            Button(L10n.string("Organize Pages…")) {
+                commandHandlers?.showPageOrganizer()
+            }
+            .disabled(!canUseDocumentCommands)
+
+            Divider()
 
             Button(L10n.string("Delete Current Page...")) {
                 commandHandlers?.deleteCurrentPage()

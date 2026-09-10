@@ -5,6 +5,9 @@ struct ReaderSidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
     @ObservedObject var aiStore: AIReadingStore
     @ObservedObject var aiHighlightStore: AIHighlightGenerationStore
+    @Binding var activeFindScope: ReaderFindScope
+    let findFocusRequest: ReaderFindRequest?
+    let onFindFieldFocusChanged: (ReaderFindScope?) -> Void
 
     @State private var expandedSections: Set<ReaderSidebarSection> = [
         .annotations,
@@ -30,7 +33,10 @@ struct ReaderSidebarView: View {
                     expandedSections: expandedSections,
                     onToggleSection: {
                         toggle($0, availableHeight: availableHeight)
-                    }
+                    },
+                    activeFindScope: $activeFindScope,
+                    findFocusRequest: findFocusRequest,
+                    onFindFieldFocusChanged: onFindFieldFocusChanged
                 )
 
                 AISidebarView(
@@ -46,6 +52,7 @@ struct ReaderSidebarView: View {
             }
             .onAppear {
                 enforceExpansionCapacity(availableHeight: availableHeight)
+                expandRequestedFindScope(availableHeight: availableHeight)
                 if !documentStore.documentSearchText
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .isEmpty {
@@ -66,12 +73,23 @@ struct ReaderSidebarView: View {
                     expand(.fullText, availableHeight: availableHeight)
                 }
             }
+            .onChange(of: findFocusRequest?.id) { _, _ in
+                expandRequestedFindScope(availableHeight: availableHeight)
+            }
             .onChange(of: aiStore.capturedSelection) { _, selection in
                 guard selection != nil else { return }
                 expand(.askSelection, availableHeight: availableHeight)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func expandRequestedFindScope(availableHeight: CGFloat) {
+        guard let findFocusRequest else { return }
+        let section: ReaderSidebarSection = findFocusRequest.scope == .annotations
+            ? .annotations
+            : .fullText
+        expand(section, availableHeight: availableHeight)
     }
 
     private func toggle(

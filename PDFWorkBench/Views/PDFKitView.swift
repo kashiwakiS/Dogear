@@ -19,6 +19,7 @@ struct PDFKitView: NSViewRepresentable {
     let isNightMode: Bool
     let isMarginCanvasVisible: Bool
     let freeTextRequestID: Int
+    let highlightRequest: PDFHighlightRequest?
     let shortcutSet: PDFReadingShortcutSet = .defaultReading
     let onSelectOutlineEntry: (DocumentOutlineEntry) -> Void
     let onSelectDogear: (DogearMarker) -> Void
@@ -27,7 +28,7 @@ struct PDFKitView: NSViewRepresentable {
     let onToggleDogearAtPage: (Int) -> Void
     let onSelectMarginAnnotation: (PDFAnnotationItem.ID) -> Void
     let onSelectMarginText: (String, Int) -> Void
-    let onHighlightCreated: () -> Void
+    let onHighlightCreated: (FeedbackTrigger) -> Void
     let onHighlightRemoved: (FeedbackTrigger) -> Void
     let onAnnotationChanged: () -> Void
     let onUndoableAnnotationMutation: (String) -> Void
@@ -202,6 +203,12 @@ struct PDFKitView: NSViewRepresentable {
             }
         }
 
+        if let highlightRequest,
+           context.coordinator.lastHighlightRequestID != highlightRequest.id {
+            context.coordinator.lastHighlightRequestID = highlightRequest.id
+            pdfView.addHighlightToCurrentSelection(trigger: highlightRequest.trigger)
+        }
+
         if let selectedAnnotation {
             if context.coordinator.lastSelectedAnnotationID != selectedAnnotation.id {
                 context.coordinator.lastSelectedAnnotationID = selectedAnnotation.id
@@ -231,6 +238,7 @@ struct PDFKitView: NSViewRepresentable {
         var onScaleChanged: (CGFloat, PDFZoomState) -> Void
         var onSelectionChanged: (PDFTextSelectionSnapshot?) -> Void
         var lastFreeTextRequestID = 0
+        var lastHighlightRequestID = 0
         var lastTargetPageIndex: Int
         var lastSelectedAnnotationID: PDFAnnotationItem.ID?
         var lastSelectedSearchResultID: PDFSearchResult.ID?
@@ -1028,7 +1036,7 @@ final class PDFReaderContainerView: NSView {
 
 final class HighlightingPDFView: PDFView {
     var shortcutSet: PDFReadingShortcutSet = .defaultReading
-    var onHighlightCreated: (() -> Void)?
+    var onHighlightCreated: ((FeedbackTrigger) -> Void)?
     var onHighlightRemoved: ((FeedbackTrigger) -> Void)?
     var onAnnotationChanged: (() -> Void)?
     var onUndoableAnnotationMutation: ((String) -> Void)?
@@ -1259,17 +1267,7 @@ final class HighlightingPDFView: PDFView {
 
         switch action {
         case .highlight:
-            let records = addHighlightToCurrentSelection()
-            if records.isEmpty {
-                NSSound.beep()
-            } else {
-                registerAnnotationPresenceUndo(
-                    records,
-                    restoringPresence: false,
-                    actionName: "Add Highlight"
-                )
-                onHighlightCreated?()
-            }
+            addHighlightToCurrentSelection(trigger: .keyboard(shortcut: "H"))
         case .note:
             onFreeTextShortcut?()
         case .dogear:
@@ -1559,11 +1557,13 @@ final class HighlightingPDFView: PDFView {
         textField.selectText(nil)
     }
 
-    private func addHighlightToCurrentSelection() -> [AnnotationUndoRecord] {
+    @discardableResult
+    func addHighlightToCurrentSelection(trigger: FeedbackTrigger) -> Bool {
         guard let selection = currentSelection,
               selection.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
-            return []
+            NSSound.beep()
+            return false
         }
 
         var pageGeometries: [PageHighlightGeometry] = []
@@ -1577,11 +1577,20 @@ final class HighlightingPDFView: PDFView {
                 }
 
                 let highlightBounds = bounds.insetBy(dx: -1, dy: -1)
+                let selectedText = lineSelection.string?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if let geometryIndex = pageGeometries.firstIndex(where: { $0.page === page }) {
                     pageGeometries[geometryIndex].lineBounds.append(highlightBounds)
+                    if !selectedText.isEmpty {
+                        pageGeometries[geometryIndex].textFragments.append(selectedText)
+                    }
                 } else {
                     pageGeometries.append(
-                        PageHighlightGeometry(page: page, lineBounds: [highlightBounds])
+                        PageHighlightGeometry(
+                            page: page,
+                            lineBounds: [highlightBounds],
+                            textFragments: selectedText.isEmpty ? [] : [selectedText]
+                        )
                     )
                 }
             }
@@ -1604,6 +1613,10 @@ final class HighlightingPDFView: PDFView {
             highlight.quadrilateralPoints = geometry.lineBounds.flatMap {
                 quadrilateralPoints(for: $0, relativeTo: annotationBounds.origin)
             }
+            AnnotationExtractor.storeExactHighlightText(
+                geometry.textFragments.joined(separator: "\n"),
+                in: highlight
+            )
             // Keep contents empty so PDFKit does not show highlight note popovers.
             geometry.page.addAnnotation(highlight)
             records.append(AnnotationUndoRecord(page: geometry.page, annotation: highlight))
@@ -1611,7 +1624,18 @@ final class HighlightingPDFView: PDFView {
 
         clearSelection()
         setNeedsDisplay(bounds)
-        return records
+        guard !records.isEmpty else {
+            NSSound.beep()
+            return false
+        }
+
+        registerAnnotationPresenceUndo(
+            records,
+            restoringPresence: false,
+            actionName: "Add Highlight"
+        )
+        onHighlightCreated?(trigger)
+        return true
     }
 
     private func quadrilateralPoints(for bounds: NSRect, relativeTo origin: NSPoint) -> [NSValue] {
@@ -2350,6 +2374,7 @@ final class HighlightingPDFView: PDFView {
     private struct PageHighlightGeometry {
         let page: PDFPage
         var lineBounds: [NSRect]
+        var textFragments: [String]
     }
 
     private enum QuietLinkKind {

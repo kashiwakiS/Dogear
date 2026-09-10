@@ -49,6 +49,10 @@ struct ContentView: View {
     @State private var zoomScalePercent = 100
     @State private var pendingZoomPersistence: PendingPDFZoomPersistence?
     @State private var zoomPersistenceTask: Task<Void, Never>?
+    @State private var activeFindScope: ReaderFindScope = .documentText
+    @State private var findFocusRequest: ReaderFindRequest?
+    @State private var findFocusRequestID = 0
+    @State private var focusedReaderFindScope: ReaderFindScope?
 
     private let librarySidebarRange: ClosedRange<CGFloat> = 240...440
     // Includes the reserved 16-point resize target. The ReaderSidebarView
@@ -188,7 +192,7 @@ struct ContentView: View {
         .sheet(isPresented: $isShowingPageOrganizer) {
             PageOrganizerView(documentStore: documentStore)
         }
-        .focusedValue(\.pdfWorkbenchCommandHandlers, commandHandlers)
+        .focusedSceneValue(\.pdfWorkbenchCommandHandlers, commandHandlers)
         .onAppear {
             applyInitialGroupIfNeeded()
             openLaunchArgumentIfNeeded()
@@ -292,7 +296,15 @@ struct ContentView: View {
                     ReaderSidebarView(
                         documentStore: documentStore,
                         aiStore: aiReadingStore,
-                        aiHighlightStore: aiHighlightStore
+                        aiHighlightStore: aiHighlightStore,
+                        activeFindScope: $activeFindScope,
+                        findFocusRequest: findFocusRequest,
+                        onFindFieldFocusChanged: { scope in
+                            focusedReaderFindScope = scope
+                            if scope != nil {
+                                findFocusRequest = nil
+                            }
+                        }
                     )
                     .clipped()
                 }
@@ -369,6 +381,15 @@ struct ContentView: View {
             .help("Open PDF")
 
             FlatToolbarIconControl(
+                title: "Highlight",
+                systemImage: "highlighter",
+                isEnabled: documentStore.canAddHighlightToCurrentSelection
+            ) {
+                documentStore.requestHighlightFromCurrentSelection(trigger: .toolbar)
+            }
+            .help("Add Highlight")
+
+            FlatToolbarIconControl(
                 title: "Free Text",
                 systemImage: "text.bubble",
                 isEnabled: documentStore.document != nil
@@ -389,7 +410,7 @@ struct ContentView: View {
             FlatToolbarIconControl(
                 title: "Delete Page",
                 systemImage: "trash",
-                isEnabled: documentStore.document != nil
+                isEnabled: documentStore.canDeleteCurrentPage
             ) {
                 documentStore.deleteCurrentPageFromWorkingCopy(trigger: .toolbar)
             }
@@ -433,6 +454,11 @@ struct ContentView: View {
             },
             addCurrentDocumentToSelectedGroup: addCurrentDocumentToSelectedGroup,
             removeCurrentDocumentFromSelectedGroup: removeCurrentDocumentFromSelectedGroup,
+            addHighlight: {
+                documentStore.requestHighlightFromCurrentSelection(
+                    trigger: .command(shortcut: nil)
+                )
+            },
             addFreeTextNote: {
                 documentStore.requestFreeTextNote(trigger: .command(shortcut: nil))
             },
@@ -504,6 +530,15 @@ struct ContentView: View {
             setDisplayStyle: { style in
                 setReadingDisplayStyle(style, trigger: .command(shortcut: nil))
             },
+            showFind: {
+                performFindAction(.showFindPanel)
+            },
+            findNext: {
+                performFindAction(.next)
+            },
+            findPrevious: {
+                performFindAction(.previous)
+            },
             exportAnnotatedCopy: {
                 documentStore.exportAnnotatedCopy(trigger: .command(shortcut: nil))
             },
@@ -518,6 +553,7 @@ struct ContentView: View {
             canUseDocumentCommands: documentStore.document != nil,
             canAddCurrentDocumentToSelectedGroup: canAddCurrentDocumentToSelectedGroup,
             canRemoveCurrentDocumentFromSelectedGroup: canRemoveCurrentDocumentFromSelectedGroup,
+            canAddHighlight: documentStore.canAddHighlightToCurrentSelection,
             canGoToPreviousPage: canGoToPreviousPage,
             canGoToNextPage: canGoToNextPage,
             canDeleteCurrentPage: documentStore.canDeleteCurrentPage
@@ -545,6 +581,7 @@ struct ContentView: View {
                     isNightMode: isNightMode,
                     isMarginCanvasVisible: isMarginCanvasVisible,
                     freeTextRequestID: documentStore.freeTextRequestID,
+                    highlightRequest: documentStore.highlightRequest,
                     onSelectOutlineEntry: documentStore.navigate,
                     onSelectDogear: documentStore.navigate,
                     onSelectAIHighlight: { marker in
@@ -578,11 +615,11 @@ struct ContentView: View {
                             pageNumber: pageNumber
                         )
                     },
-                    onHighlightCreated: {
+                    onHighlightCreated: { trigger in
                         documentStore.markAnnotationsChanged(
                             message: "Highlight added. Saving working copy.",
                             action: "Add Highlight",
-                            trigger: .keyboard(shortcut: "H")
+                            trigger: trigger
                         )
                     },
                     onHighlightRemoved: { trigger in
@@ -1091,6 +1128,53 @@ struct ContentView: View {
             trigger: .keyboard(shortcut: "Return")
         )
         syncPageJumpText()
+    }
+
+    private func performFindAction(_ action: NSFindPanelAction) {
+        if forwardFindActionToFocusedTextEditor(action) {
+            return
+        }
+
+        switch action {
+        case .showFindPanel:
+            if !isAnnotationSidebarVisible {
+                toggleAnnotationSidebar(trigger: .command(shortcut: "Command-F"))
+            }
+            findFocusRequestID += 1
+            findFocusRequest = ReaderFindRequest(
+                id: findFocusRequestID,
+                scope: activeFindScope
+            )
+        case .next:
+            if activeFindScope == .annotations {
+                documentStore.selectNextFilteredAnnotation()
+            } else {
+                documentStore.selectNextDocumentSearchResult()
+            }
+        case .previous:
+            if activeFindScope == .annotations {
+                documentStore.selectPreviousFilteredAnnotation()
+            } else {
+                documentStore.selectPreviousDocumentSearchResult()
+            }
+        default:
+            break
+        }
+    }
+
+    private func forwardFindActionToFocusedTextEditor(_ action: NSFindPanelAction) -> Bool {
+        guard focusedReaderFindScope == nil,
+              let textView = NSApp.keyWindow?.firstResponder as? NSTextView
+        else {
+            return false
+        }
+
+        let sender = NSMenuItem()
+        sender.tag = Int(action.rawValue)
+        return textView.tryToPerform(
+            #selector(NSResponder.performTextFinderAction(_:)),
+            with: sender
+        )
     }
 
     private func syncPageJumpText() {
