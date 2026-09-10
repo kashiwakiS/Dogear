@@ -171,6 +171,7 @@ private enum MenuBarLocalizer {
         Pair(english: "Library", chinese: "资料库"),
         Pair(english: "Export", chinese: "导出"),
         Pair(english: "Annotation", chinese: "批注"),
+        Pair(english: "Pages", chinese: "页面"),
         Pair(english: "Window", chinese: "窗口"),
         Pair(english: "Help", chinese: "帮助")
     ]

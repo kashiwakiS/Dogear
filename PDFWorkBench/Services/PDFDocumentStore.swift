@@ -35,8 +35,18 @@ final class PDFDocumentStore: ObservableObject {
     }
     @Published var documentSearchResults: [PDFSearchResult] = []
     @Published var selectedDocumentSearchResultID: PDFSearchResult.ID?
+    @Published var annotationSearchText = "" {
+        didSet { clearAnnotationSelectionIfFilteredOut() }
+    }
+    @Published var annotationOriginFilter: AnnotationOriginFilter = .all {
+        didSet { clearAnnotationSelectionIfFilteredOut() }
+    }
+    @Published var annotationKindFilter: AnnotationKindFilter = .all {
+        didSet { clearAnnotationSelectionIfFilteredOut() }
+    }
     @Published var currentPageIndex = 0
     @Published var freeTextRequestID = 0
+    @Published private(set) var highlightRequest: PDFHighlightRequest?
     @Published private(set) var currentWorkingCopyURL: URL?
     @Published private(set) var outlineEntries: [DocumentOutlineEntry] = []
     @Published private(set) var isLoadingOutline = false
@@ -69,6 +79,7 @@ final class PDFDocumentStore: ObservableObject {
     private weak var undoManager: UndoManager?
     private var currentLibraryFileID: UUID?
     private var isSynchronizingAIMasterVisibility = false
+    private var highlightRequestID = 0
 
     init(
         feedbackCenter: OperationFeedbackCenter,
@@ -109,7 +120,48 @@ final class PDFDocumentStore: ObservableObject {
             }
         }
 
+        switch annotationOriginFilter {
+        case .all:
+            break
+        case .manual:
+            visibleAnnotations = visibleAnnotations.filter { !$0.isAIGenerated }
+        case .ai:
+            visibleAnnotations = visibleAnnotations.filter(\.isAIGenerated)
+        }
+
+        switch annotationKindFilter {
+        case .all:
+            break
+        case .highlights:
+            visibleAnnotations = visibleAnnotations.filter { $0.kind == .highlight }
+        case .notes:
+            visibleAnnotations = visibleAnnotations.filter { $0.kind == .note }
+        }
+
+        let query = annotationSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty {
+            visibleAnnotations = visibleAnnotations.filter {
+                $0.searchableText.range(
+                    of: query,
+                    options: [.caseInsensitive, .diacriticInsensitive]
+                ) != nil
+            }
+        }
+
         return visibleAnnotations
+    }
+
+    var canAddHighlightToCurrentSelection: Bool {
+        document != nil && currentTextSelection?.isEmpty == false
+    }
+
+    var annotationGroupScopeDescription: String {
+        guard let activeAIHighlightGroupID,
+              let group = aiHighlightGroups.first(where: { $0.id == activeAIHighlightGroupID })
+        else {
+            return L10n.string("Manual + visible AI groups")
+        }
+        return L10n.string("AI group: \(group.displayTitle)")
     }
 
     var selectedAnnotation: PDFAnnotationItem? {
@@ -413,6 +465,21 @@ final class PDFDocumentStore: ObservableObject {
         currentTextSelection = selection?.isEmpty == false ? selection : nil
     }
 
+    func requestHighlightFromCurrentSelection(trigger: FeedbackTrigger) {
+        guard canAddHighlightToCurrentSelection else {
+            postFeedback(
+                "Select PDF text before adding a highlight.",
+                kind: .warning,
+                action: "Add Highlight",
+                trigger: trigger
+            )
+            return
+        }
+
+        highlightRequestID += 1
+        highlightRequest = PDFHighlightRequest(id: highlightRequestID, trigger: trigger)
+    }
+
     func markAnnotationsChanged(
         message: String = "Annotation updated. Saving working copy.",
         action: String = "Update Annotation",
@@ -520,6 +587,7 @@ final class PDFDocumentStore: ObservableObject {
     func activateAIHighlightGroup(_ groupID: UUID?) {
         guard let groupID else {
             activeAIHighlightGroupID = nil
+            clearAnnotationSelectionIfFilteredOut()
             return
         }
         guard aiHighlightGroups.contains(where: { $0.id == groupID }) else {
@@ -542,6 +610,7 @@ final class PDFDocumentStore: ObservableObject {
            selectedAnnotationID == nil {
             selectAnnotation(firstAnnotation)
         }
+        clearAnnotationSelectionIfFilteredOut()
     }
 
     func isAIHighlightGroupVisible(_ groupID: UUID) -> Bool {
@@ -989,7 +1058,7 @@ final class PDFDocumentStore: ObservableObject {
         annotations = AnnotationExtractor.annotationItems(in: document)
 
         if let selectedAnnotationID,
-           !annotations.contains(where: { $0.id == selectedAnnotationID }) {
+           !filteredAnnotations.contains(where: { $0.id == selectedAnnotationID }) {
             self.selectedAnnotationID = nil
         }
     }
@@ -1940,6 +2009,15 @@ final class PDFDocumentStore: ObservableObject {
         }
 
         selectAnnotation(visibleAnnotations[nextIndex])
+    }
+
+    private func clearAnnotationSelectionIfFilteredOut() {
+        guard let selectedAnnotationID,
+              !filteredAnnotations.contains(where: { $0.id == selectedAnnotationID })
+        else {
+            return
+        }
+        self.selectedAnnotationID = nil
     }
 
     private func selectRelativeDocumentSearchResult(offset: Int) {

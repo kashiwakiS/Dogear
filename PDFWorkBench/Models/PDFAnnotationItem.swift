@@ -1,6 +1,70 @@
 import Foundation
 import PDFKit
 
+enum ReaderFindScope: String, CaseIterable, Identifiable {
+    case documentText
+    case annotations
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .documentText:
+            return L10n.string("Document Text")
+        case .annotations:
+            return L10n.string("Annotations")
+        }
+    }
+}
+
+struct ReaderFindRequest: Equatable {
+    let id: Int
+    let scope: ReaderFindScope
+}
+
+enum AnnotationOriginFilter: String, CaseIterable, Identifiable {
+    case all
+    case manual
+    case ai
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .all:
+            return L10n.string("All Sources")
+        case .manual:
+            return L10n.string("Manual")
+        case .ai:
+            return L10n.string("AI")
+        }
+    }
+}
+
+enum AnnotationKindFilter: String, CaseIterable, Identifiable {
+    case all
+    case highlights
+    case notes
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .all:
+            return L10n.string("All Types")
+        case .highlights:
+            return L10n.string("Highlights")
+        case .notes:
+            return L10n.string("Notes")
+        }
+    }
+}
+
+struct PDFHighlightRequest: Equatable {
+    let id: Int
+    let trigger: FeedbackTrigger
+}
+
 struct PDFAnnotationItem: Identifiable, Equatable {
     enum Kind: String {
         case highlight = "Highlight"
