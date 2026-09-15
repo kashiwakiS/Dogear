@@ -54,7 +54,8 @@ enum OpenAICompatibleToolProviderDiagnostics {
                     workflowID: workflowID,
                     instructions: "Diagnostic instructions",
                     input: "Diagnostic input",
-                    tools: AIHighlightToolCodec.definitions
+                    tools: AIHighlightToolCodec.definitions,
+                    requiresToolCall: true
                 )
             )
             check(
@@ -94,6 +95,9 @@ enum OpenAICompatibleToolProviderDiagnostics {
                         && tools?.allSatisfy({ $0["strict"] as? Bool == true }) == true,
                     "The initial request did not enable provider continuation and strict tools."
                 )
+                check(firstBody["tool_choice"] as? String == "required"
+                    && secondBody["tool_choice"] as? String == "required",
+                    "A terminal-tool workflow allowed an unverified plain-text ending.")
                 let input = secondBody["input"] as? [[String: Any]] ?? []
                 check((secondBody["instructions"] as? String)?.contains("Budget finalization fixture") == true,
                       "Dynamic host budget instructions did not reach the provider.")

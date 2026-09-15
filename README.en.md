@@ -23,9 +23,12 @@ surface quiet, makes annotations portable, and keeps page operations reversible.
   retaining the current visible AI Highlight Group scope.
 - Use bookmarks, detected headings, and Dog-ear page markers to move through a
   document.
-- Use unified Ask for an evidence-grounded document overview or answer, with
-  optional source-linked AI Highlights. Organize generated highlights by named
-  request group, show any subset, and navigate to supporting passages.
+- Continue persistent research conversations across selected PDFs, text excerpts
+  and explicitly added images, with clickable references to saved evidence.
+- Save research as independent editable notes and export Markdown with image
+  attachments. Read PDF, AI and annotations in adjacent panes.
+- Create optional source-linked AI Highlights, organize them by named request
+  group, show any subset, and navigate to supporting passages.
 - Read annotation explanations in the page-side Margin Canvas, select their
   text for follow-up questions, and export a PDF containing exactly the AI
   groups you choose.
@@ -98,7 +101,7 @@ Dogear's AI settings. Lexical retrieval remains available without this setup.
 | Focus the active document or annotation search | `⌘F` |
 | Next / previous search result | `⌘G` / `⌘⇧G` |
 | Library navigator | `⌘⌥L` |
-| Annotations and AI sidebar | `⌘⌥R` |
+| Annotations sidebar | `⌘⌥R` |
 | New Group… | `⌘⇧N` |
 
 When the native tab Group preview is open, press an unmodified number from `1`
@@ -109,10 +112,10 @@ and current-page deletion; deletion is disabled for a one-page document.
 ## Privacy and file safety
 
 Dogear has no telemetry and no account requirement. Library data stays on the
-Mac. Cloud AI is optional and off by default. Ask sends the configured provider
-only the question, selected text, and native-text passages read through its
-targeted tools; it does not attach the PDF. Each Send starts an independent
-question, and Dogear does not save conversation history to disk. See
+Mac. Cloud AI is optional and off by default. Research conversations, drafts, evidence and notes are stored locally. When
+enabled, AI sends the configured provider the current question, bounded
+conversation background, passages from selected sources and images you
+explicitly add; it does not attach entire PDF files. See
 [PRIVACY.md](PRIVACY.md).
 
 Dogear never overwrites the original PDF during normal editing. Page changes

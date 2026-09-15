@@ -62,6 +62,24 @@ enum AIRAGBugfixDiagnostics {
                 check(!result.accepted && result.error == .evidenceReviewRequired,
                       "Direct terminal execution bypassed required review.")
             }
+            let sourceSnapshot = AIHighlightTextSnapshot(fingerprint: "review-source", pages: [
+                AITextPageSnapshot(pageNumber: 1, text: "The network uses two layers.", fingerprint: "review-page-1"),
+                AITextPageSnapshot(pageNumber: 2, text: "", fingerprint: "review-blank-page")
+            ])
+            let sourceRegistry = try AISegmentRegistry(sources: [AIWorkflowSourceSnapshot(fileID: UUID(),
+                displayName: "Review source", snapshot: sourceSnapshot)], mainDocumentNumber: 1)
+            let sourceExecutor = AIHighlightToolExecutor(registry: sourceRegistry, intent: .question("network"),
+                verifiesAnswerEvidence: true)
+            _ = await sourceExecutor.execute(.readSegments(.init(ids: [id])))
+            let sourceReview = try await sourceExecutor.reviewRequest(for: publication(id: id, callID: "source-review").toolCalls[0])
+            let reviewObject = try JSONSerialization.jsonObject(with: Data((sourceReview?.input ?? "").utf8)) as? [String: Any]
+            let sourceMetadata = reviewObject?["source_metadata"] as? [[String: Int]]
+            check(sourceMetadata == [["document_number": 1, "page_count": 2]],
+                  "Review lost source extent or inferred it from readable passages instead of source metadata.")
+            let reviewEvidence = reviewObject?["evidence"] as? [[String: Any]] ?? []
+            check(reviewEvidence.count == 1 && reviewEvidence.first?["id"] as? String == id.description,
+                  "Source metadata introduced unread passages as factual evidence.")
+
             let mismatch = try JSONSerialization.data(withJSONObject: ["completion_status": "notFound", "claims": [
                 ["claim": "No requested result established.", "status": "supported", "evidence_ids": [id.description], "reason": "Question unsupported."]]])
             check(try !AIAnswerEvidenceReview.issues(in: mismatch, proposal: proposal, allowedIDs: [id.description]).isEmpty,
@@ -70,10 +88,50 @@ enum AIRAGBugfixDiagnostics {
                   "Supported review rejected.")
             check(try !AIAnswerEvidenceReview.issues(in: contradicted, proposal: proposal, allowedIDs: [id.description]).isEmpty,
                   "Contradicted claim accepted.")
+            check(try !AIAnswerEvidenceReview.issues(in: contradicted, proposal: proposal,
+                allowedIDs: [id.description], checksCompletionStatus: false).isEmpty,
+                "Status normalization bypassed contradictory evidence.")
+            for (proposed, reviewed) in [("partial", "answered"), ("answered", "partial"), ("answered", "notFound"), ("notFound", "answered")] {
+                let final = try call("status-publication", name: AIHighlightToolName.publishAnswer, arguments: [
+                    "completion_status": proposed, "title": "Weights", "result_markdown": "Weights differ between layers.",
+                    "evidence_segment_ids": [id.description], "final_draft_revision": 0, "terminate": true])
+                let review = try JSONSerialization.data(withJSONObject: ["completion_status": reviewed, "claims": [
+                    ["claim": "Weights differ between layers.", "status": "supported", "evidence_ids": [id.description],
+                     "reason": "Supported by the supplied passage."]]])
+                let provider = Provider([try call("status-read", name: AIHighlightToolName.readSegments,
+                    arguments: ["ids": [id.description], "context_before": 0, "context_after": 0]), final,
+                    reviewTurn(review, id: "status-review")])
+                let statusExecutor = AIHighlightToolExecutor(registry: registry, intent: .overview, verifiesAnswerEvidence: true)
+                let outcome = try await AIToolWorkflowRunner().run(request: request(), provider: provider,
+                    executor: statusExecutor, budget: .highlightDefault, terminalToolName: AIHighlightToolName.publishAnswer)
+                check(await statusExecutor.completedAnswer()?.completionStatus.rawValue == (proposed == "notFound" ? "notFound" : reviewed),
+                    "Accepted publication ignored the independent completion status.")
+                check(outcome.usage.providerTurns == 3 && outcome.usage.toolCalls == 3,
+                    "A status-only difference consumed another paid correction or review.")
+                let changed = AIPublishAnswerRequest(completionStatus: .answered, title: "Weights",
+                    resultMarkdown: "Changed and unreviewed.", evidenceSegmentIDs: [id], finalDraftRevision: 0, terminate: true)
+                if case .answerPublished(let result) = await statusExecutor.execute(.publishAnswer(changed)) {
+                    check(!result.accepted && result.error == .evidenceReviewRequired,
+                        "Status normalization approved changed answer content.")
+                } else { check(false, "Unexpected publication output.") }
+            }
             for status in ["partiallySupported", "insufficient"] {
                 check(try !AIAnswerEvidenceReview.issues(in: reviewData(id: id, status: status), proposal: proposal,
                     allowedIDs: [id.description]).isEmpty, "Incomplete support was accepted.")
             }
+            let emptyPublication = try call("empty-status", name: AIHighlightToolName.publishAnswer, arguments: [
+                "completion_status": "notFound", "title": "No result", "result_markdown": "Evidence is insufficient.",
+                "evidence_segment_ids": [String](), "final_draft_revision": 0, "terminate": true]).toolCalls[0]
+            let emptyExecutor = AIHighlightToolExecutor(registry: registry, intent: .overview, verifiesAnswerEvidence: true)
+            _ = try await emptyExecutor.reviewRequest(for: emptyPublication)
+            let emptyReview = try JSONSerialization.data(withJSONObject: ["completion_status": "answered", "claims": [
+                ["claim": "Evidence is insufficient.", "status": "supported", "evidence_ids": [String](), "reason": "No evidence."]]])
+            _ = try await emptyExecutor.reviewRejection(reviewTurn(emptyReview, id: "empty-review"), for: emptyPublication)
+            if case .publishAnswer(let request) = try AIHighlightToolCodec().decode(emptyPublication),
+               case .answerPublished(let result) = await emptyExecutor.execute(.publishAnswer(request)) {
+                check(result.accepted && result.publication?.completionStatus == .notFound,
+                    "Review status normalization promoted an uncited abstention into a factual answer.")
+            } else { check(false, "Unexpected uncited publication output.") }
             do {
                 _ = try AIAnswerEvidenceReview.issues(in: supported, proposal: proposal, allowedIDs: [])
                 check(false, "Reviewer invented an unseen evidence ID.")

@@ -8,6 +8,8 @@ struct ReaderSidebarView: View {
     @Binding var activeFindScope: ReaderFindScope
     let findFocusRequest: ReaderFindRequest?
     let onFindFieldFocusChanged: (ReaderFindScope?) -> Void
+    var researchContent: AnyView? = nil
+    var showsAsk = true
 
     @State private var expandedSections: Set<ReaderSidebarSection> = [
         .annotations,
@@ -18,12 +20,16 @@ struct ReaderSidebarView: View {
         .askSelection
     ]
 
+    private var visibleSections: Set<ReaderSidebarSection> {
+        Set(ReaderSidebarSection.allCases).subtracting(showsAsk ? [] : [.askSelection])
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let availableHeight = max(1, geometry.size.height)
             let layout = ReaderSidebarLayout(
                 availableHeight: availableHeight,
-                expandedSections: expandedSections
+                expandedSections: expandedSections, visibleSections: visibleSections
             )
 
             VStack(spacing: 0) {
@@ -39,7 +45,17 @@ struct ReaderSidebarView: View {
                     onFindFieldFocusChanged: onFindFieldFocusChanged
                 )
 
-                AISidebarView(
+                if showsAsk, let researchContent {
+                    ExpandableSidebarSection(
+                        section: .askSelection,
+                        isExpanded: expandedSections.contains(.askSelection),
+                        height: layout.height(for: .askSelection),
+                        onToggle: { toggle(.askSelection, availableHeight: availableHeight) },
+                        accessory: { EmptyView() },
+                        content: { researchContent }
+                    )
+                } else if showsAsk {
+                    AISidebarView(
                     documentStore: documentStore,
                     aiStore: aiStore,
                     aiHighlightStore: aiHighlightStore,
@@ -48,9 +64,14 @@ struct ReaderSidebarView: View {
                     onToggleSection: {
                         toggle($0, availableHeight: availableHeight)
                     }
-                )
+                    )
+                }
             }
             .onAppear {
+                if !showsAsk {
+                    expandedSections.remove(.askSelection)
+                    expansionOrder.removeAll { $0 == .askSelection }
+                }
                 enforceExpansionCapacity(availableHeight: availableHeight)
                 expandRequestedFindScope(availableHeight: availableHeight)
                 if !documentStore.documentSearchText
@@ -77,7 +98,7 @@ struct ReaderSidebarView: View {
                 expandRequestedFindScope(availableHeight: availableHeight)
             }
             .onChange(of: aiStore.capturedSelection) { _, selection in
-                guard selection != nil else { return }
+                guard showsAsk, selection != nil else { return }
                 expand(.askSelection, availableHeight: availableHeight)
             }
         }
@@ -107,7 +128,7 @@ struct ReaderSidebarView: View {
             expansionOrder.append(section)
             trimExpandedSections(
                 to: ReaderSidebarLayout.maximumExpandedSectionCount(
-                    for: availableHeight
+                    for: availableHeight, sectionCount: visibleSections.count
                 ),
                 preserving: section
             )
@@ -118,7 +139,7 @@ struct ReaderSidebarView: View {
         withAnimation(.easeInOut(duration: 0.22)) {
             trimExpandedSections(
                 to: ReaderSidebarLayout.maximumExpandedSectionCount(
-                    for: availableHeight
+                    for: availableHeight, sectionCount: visibleSections.count
                 ),
                 preserving: expansionOrder.last
             )
@@ -135,7 +156,7 @@ struct ReaderSidebarView: View {
             expansionOrder.append(section)
             trimExpandedSections(
                 to: ReaderSidebarLayout.maximumExpandedSectionCount(
-                    for: availableHeight
+                    for: availableHeight, sectionCount: visibleSections.count
                 ),
                 preserving: section
             )

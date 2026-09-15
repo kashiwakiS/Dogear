@@ -3,10 +3,17 @@ import Foundation
 struct PDFTextSelectionSnapshot: Equatable {
     let text: String
     let pageNumbers: [Int]
+    var passages: [PDFSelectedPassage] = []
 
     var isEmpty: Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+}
+
+struct PDFSelectedPassage: Equatable {
+    let pageNumber: Int
+    let text: String
+    let bounds: CGRect
 }
 
 enum AISecretStorageMode: String, Codable, CaseIterable, Identifiable {
@@ -25,9 +32,20 @@ enum AISecretStorageMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+nonisolated enum AIImageCapability: String, Codable, CaseIterable, Sendable {
+    case unknown, supported, unsupported
+    var title: String {
+        switch self {
+        case .unknown: "Not confirmed"
+        case .supported: "Supports images"
+        case .unsupported: "Text only"
+        }
+    }
+}
+
 struct AIProviderConfiguration: Codable, Equatable {
-    /// Version 3 also discloses question-scoped memory replay for stateless providers.
-    static let currentCloudConsentVersion = 3
+    /// Version 4 discloses persistent research, bounded history, multiple sources and images.
+    static let currentCloudConsentVersion = 4
     var id: UUID
     var name: String
     var baseURL: String
@@ -36,6 +54,16 @@ struct AIProviderConfiguration: Codable, Equatable {
     var hasCloudConsent: Bool
     var cloudConsentVersion: Int
     var secretStorageMode: AISecretStorageMode
+    var imageCapabilities: [String: AIImageCapability] = [:]
+
+    nonisolated private var imageCapabilityKey: String {
+        baseURL.trimmingCharacters(in: .whitespacesAndNewlines) + "\n" + model
+    }
+
+    nonisolated var imageCapability: AIImageCapability {
+        get { imageCapabilities[imageCapabilityKey] ?? .unknown }
+        set { imageCapabilities[imageCapabilityKey] = newValue }
+    }
 
     static let `default` = AIProviderConfiguration(
         id: UUID(),
@@ -56,6 +84,7 @@ struct AIProviderConfiguration: Codable, Equatable {
         case hasCloudConsent
         case cloudConsentVersion
         case secretStorageMode
+        case imageCapabilities
     }
 
     init(
@@ -97,6 +126,9 @@ struct AIProviderConfiguration: Codable, Equatable {
             AISecretStorageMode.self,
             forKey: .secretStorageMode
         ) ?? .plaintextFile
+        imageCapabilities = try container.decodeIfPresent(
+            [String: AIImageCapability].self, forKey: .imageCapabilities
+        ) ?? [:]
     }
 }
 

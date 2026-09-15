@@ -2,6 +2,7 @@
 //  PDFWorkBenchApp.swift
 //  PDFWorkBench
 //
+//  Created by kashiwakiS on 12/6/2026.
 //
 
 import SwiftUI
@@ -52,6 +53,30 @@ struct PDFWorkBenchApp: App {
             )
             .environment(\.locale, languageStore.locale)
         }
+
+        Window(L10n.string("Research"), id: "research-library") {
+            ResearchLibraryWindow(library: libraryStore)
+                .environment(\.locale, languageStore.locale)
+        }
+        .defaultSize(width: 920, height: 760)
+
+        WindowGroup(L10n.string("Research Session"), id: "research-session", for: UUID.self) { value in
+            // Scene restoration can supply the UUID after the first evaluation.
+            // Do not create a new session while that restored value is pending.
+            if value.wrappedValue != nil {
+                StandaloneResearchSessionView(library: libraryStore, sessionID: value)
+                    .environment(\.locale, languageStore.locale)
+            }
+        }
+        .defaultSize(width: 640, height: 760)
+
+        WindowGroup(L10n.string("Research Note"), id: "research-note", for: UUID.self) { value in
+            if let noteID = value.wrappedValue {
+                ResearchNoteWindow(noteID: noteID, library: libraryStore)
+                    .environment(\.locale, languageStore.locale)
+            }
+        }
+        .defaultSize(width: 720, height: 760)
     }
 }
 
@@ -79,6 +104,19 @@ final class PDFWorkBenchAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         PDFSaveQueue.shared.waitUntilDrained()
+        ResearchRuntime.shared.shutdown()
+        if DocumentAccessCoordinator.shared.hasUnrecoverableChanges || !ResearchStore.shared.saveFailures.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = L10n.string("Some changes could not be saved")
+            alert.informativeText = L10n.string("Dogear will stay open to protect your changes. Retry saving or export your work before quitting.")
+            alert.addButton(withTitle: L10n.string("Retry Saving"))
+            alert.addButton(withTitle: L10n.string("Cancel"))
+            if alert.runModal() == .alertFirstButtonReturn {
+                DocumentAccessCoordinator.shared.retryPendingSaves()
+                ResearchStore.shared.retryFailedSaves()
+            }
+            return .terminateCancel
+        }
         return .terminateNow
     }
 
@@ -185,6 +223,7 @@ extension FocusedValues {
 }
 
 private struct PDFWorkBenchCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.pdfWorkbenchCommandHandlers) private var commandHandlers
     @ObservedObject var languageStore: AppLanguageStore
 
@@ -227,6 +266,11 @@ private struct PDFWorkBenchCommands: Commands {
             }
             .keyboardShortcut("g", modifiers: [.command, .shift])
             .disabled(commandHandlers == nil)
+        }
+
+        CommandMenu(L10n.string("Research")) {
+            Button(L10n.string("Research sessions and notes")) { openWindow(id: "research-library") }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
         }
 
         CommandMenu(L10n.string("Library")) {

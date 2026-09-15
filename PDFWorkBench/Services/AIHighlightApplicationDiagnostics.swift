@@ -15,8 +15,8 @@ enum AIHighlightApplicationDiagnostics {
         }
 
         do {
-            let document = try makeTextPDF("First evidence sentence. Second sentence.")
-            let snapshot = try NativePDFTextSnapshotBuilder(document: document)
+            let fixture = try makeTextPDF("First evidence sentence. Second sentence.")
+            let snapshot = try NativePDFTextSnapshotBuilder(document: fixture)
                 .makeTextSnapshot()
             let registry = try AISegmentRegistry(snapshot: snapshot)
             guard let record = registry.records.first else {
@@ -36,7 +36,7 @@ enum AIHighlightApplicationDiagnostics {
             let anchors = try AIHighlightNativeAnchorResolver().resolve(
                 [staged],
                 registry: registry,
-                in: document
+                in: fixture
             )
 
             let root = FileManager.default.temporaryDirectory
@@ -46,7 +46,8 @@ enum AIHighlightApplicationDiagnostics {
             let defaultsName = "AIHighlightApplicationDiagnostics-\(UUID().uuidString)"
             let defaults = UserDefaults(suiteName: defaultsName)!
             defer { defaults.removePersistentDomain(forName: defaultsName) }
-            let saveQueue = PDFSaveQueue()
+            let saveQueue = PDFSaveQueue(recoveryDirectoryURL: root.appendingPathComponent("recovery"))
+            let accessCoordinator = DocumentAccessCoordinator(saveQueue: saveQueue)
             defer { saveQueue.waitUntilDrained() }
             let copies = try PDFWorkingCopyStore(directoryURL: root.appendingPathComponent("copies"))
             let store = PDFDocumentStore(
@@ -54,13 +55,25 @@ enum AIHighlightApplicationDiagnostics {
                 metadataStore: DocumentMetadataStore(stateURL: root.appendingPathComponent("metadata.json")),
                 aiHighlightGroupStore: AIHighlightGroupStore(stateURL: root.appendingPathComponent("groups.json")),
                 workingCopyStore: copies,
-                saveQueue: saveQueue
+                saveQueue: saveQueue,
+                accessCoordinator: accessCoordinator
             )
-            store.document = document
             let originalURL = root.appendingPathComponent("original.pdf")
-            let originalBytes = document.dataRepresentation()!
+            let originalBytes = fixture.dataRepresentation()!
             try originalBytes.write(to: originalURL)
-            store.selectedPDFURL = originalURL
+            guard store.openPDF(from: originalURL), let document = store.document else {
+                throw AIHighlightApplicationDiagnosticError.cannotCreatePDF
+            }
+            store.bindLibraryFile(UUID())
+            defer { store.releaseEditorAccess() }
+            func freshPermit() throws -> PDFDocumentWritePermit {
+                guard let permit = store.captureWritePermit(requestID: UUID()) else {
+                    throw DocumentAccessError.editorUnavailable
+                }
+                return permit
+            }
+            let initialPermit = try freshPermit()
+            check(store.canEditDocument, "The diagnostic did not acquire a real document editing session.")
             let undoManager = UndoManager()
             undoManager.groupsByEvent = false
             store.setUndoManager(undoManager)
@@ -75,11 +88,18 @@ enum AIHighlightApplicationDiagnostics {
             let applied = try store.applyAIHighlights(
                 stagedHighlights: [staged],
                 anchors: anchors,
-                group: group
+                group: group,
+                writePermit: initialPermit
             )
             undoManager.endUndoGrouping()
             check(applied == 1, "The application transaction did not add one annotation.")
             check(document.page(at: 0)?.annotations.count == 1, "The PDF page did not receive the annotation.")
+            do {
+                _ = try store.applyAIHighlights(stagedHighlights: [staged], anchors: anchors, group: group, writePermit: initialPermit)
+                check(false, "An AI batch reused a permit from before the document changed.")
+            } catch DocumentAccessError.sourceChanged {
+                check(document.page(at: 0)?.annotations.count == 1, "A stale permitted batch partially changed the document.")
+            }
             check(
                 store.annotations.first?.text.contains("First evidence sentence") == true
                     && store.annotations.first?.note == "Verified evidence note",
@@ -120,7 +140,8 @@ enum AIHighlightApplicationDiagnostics {
             let duplicateCount = try store.applyAIHighlights(
                 stagedHighlights: [staged],
                 anchors: anchors,
-                group: group
+                group: group,
+                writePermit: try freshPermit()
             )
             check(
                 duplicateCount == 0 && document.page(at: 0)?.annotations.count == 1,
@@ -137,7 +158,8 @@ enum AIHighlightApplicationDiagnostics {
                     providerName: "Diagnostic",
                     modelName: "diagnostic-model",
                     promptVersion: AIHighlightWorkflowService.promptVersion
-                )
+                ),
+                writePermit: try freshPermit()
             )
             undoManager.endUndoGrouping()
             check(
@@ -146,7 +168,8 @@ enum AIHighlightApplicationDiagnostics {
                 "A separate result group was incorrectly deduplicated."
             )
             do {
-                _ = try store.applyAIHighlights(stagedHighlights: [staged, staged], anchors: anchors + anchors, group: group)
+                _ = try store.applyAIHighlights(stagedHighlights: [staged, staged], anchors: anchors + anchors, group: group,
+                    writePermit: try freshPermit())
                 check(false, "Duplicate anchor keys were not rejected.")
             } catch AIHighlightCommitError.incompleteResolution {
                 check(document.page(at: 0)?.annotations.count == 2,

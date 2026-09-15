@@ -161,6 +161,18 @@ struct AISettingsView: View {
                     }
                 }
 
+                Picker("Image support for this model", selection: Binding(
+                    get: { configurationStore.configuration.imageCapability },
+                    set: { configurationStore.configuration.imageCapability = $0 }
+                )) {
+                    ForEach(AIImageCapability.allCases, id: \.self) { capability in
+                        Text(L10n.string(String.LocalizationValue(capability.title))).tag(capability)
+                    }
+                }
+                Text("Confirm image support from your provider. This choice applies only to the current endpoint and model; changing either requires a separate declaration.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Button(configurationStore.isTestingConnection ? "Testing..." : "Test Connection") {
                     configurationStore.testConnection()
                 }
@@ -202,7 +214,7 @@ struct AISettingsView: View {
                 configurationStore.configuration.isCloudAIEnabled = true
             }
         } message: {
-            Text("Ask sends your question, selected text, and retrieved document passages to the configured provider, not the PDF file. Each question starts a new conversation. Dogear reuses provider-stored responses when available; for stateless providers, it keeps and resends the current question’s context in memory until completion, failure, or cancellation. This context is not saved as conversation history on disk or reused for later questions. Provider data retention follows the provider’s policy.")
+            Text("Research conversations and notes are saved locally. Send shares your question, bounded selected history, source excerpts from the files or Group you choose, and images you explicitly attach with the configured provider. It does not upload complete PDFs. Each request starts a new provider workflow; within that request, provider-stored responses or temporary memory replay may be used. Restoring local history never sends a request automatically. Deleting local history does not delete data retained by the provider under its own policy.")
         }
         .confirmationDialog(
             "Delete Keychain Key?",
@@ -266,7 +278,7 @@ struct AISettingsView: View {
         let storageDescription = configurationStore.configuration.secretStorageMode == .keychain
             ? L10n.string("The API key is stored in macOS Keychain and cannot be displayed or exported by Dogear.")
             : L10n.string("The active API key is stored as plaintext in the local configuration file, protected only by current-user file permissions (0600). Any retained Keychain key is ignored until Keychain storage is selected again.")
-        return L10n.string("Ask sends your question, selected text, and retrieved document passages to the configured provider, not the PDF file. Each question starts a new conversation. Dogear reuses provider-stored responses when available; for stateless providers, it keeps and resends the current question’s context in memory until completion, failure, or cancellation. This context is not saved as conversation history on disk or reused for later questions. Provider data retention follows the provider’s policy.") + "\n\n" + storageDescription
+        return L10n.string("Research conversations and notes are saved locally. Send shares your question, bounded selected history, source excerpts from the files or Group you choose, and images you explicitly attach with the configured provider. It does not upload complete PDFs. Each request starts a new provider workflow; within that request, provider-stored responses or temporary memory replay may be used. Restoring local history never sends a request automatically. Deleting local history does not delete data retained by the provider under its own policy.") + "\n\n" + storageDescription
     }
 
     private func applyConfigurationName() {

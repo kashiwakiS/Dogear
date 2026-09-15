@@ -18,6 +18,15 @@ nonisolated enum AIHighlightCodecDiagnostics {
             checks += 1
             if !condition() { failures.append(message) }
         }
+        // The live Responses endpoint rejects this valid-JSON-Schema keyword,
+        // including when it occurs inside nested array properties.
+        func containsUnsupportedArrayConstraint(_ node: Any) -> Bool {
+            if let object = node as? [String: Any] {
+                return object["uniqueItems"] != nil
+                    || object.values.contains(where: containsUnsupportedArrayConstraint)
+            }
+            return (node as? [Any])?.contains(where: containsUnsupportedArrayConstraint) ?? false
+        }
         let codec = AIHighlightToolCodec()
         let id = AISegmentID(document: 1, page: 1, block: 1, sentence: 1)
 
@@ -142,6 +151,8 @@ nonisolated enum AIHighlightCodecDiagnostics {
             do {
                 for definition in definitions {
                     let root = try object(definition.strictInputSchema)
+                    check(!containsUnsupportedArrayConstraint(root),
+                          "\(definition.name) uses uniqueItems, rejected by the live Responses API.")
                     let properties = root["properties"] as? [String: Any] ?? [:]
                     check(
                         root["additionalProperties"] as? Bool == false

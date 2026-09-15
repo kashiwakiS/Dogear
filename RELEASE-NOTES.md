@@ -1,36 +1,21 @@
-# Dogear 0.2.3
+# Dogear 0.3.0
 
-发布日期：2026-09-10
-版本：0.2.3
+发布日期 / Release date: 2026-09-15
 
 ## 中文
 
-### 本版更新
+- 研究会话现在保留对话、草稿与来源，可围绕选定的多个 PDF 或一个 Group 持续提问。
+- 将选中文字、页面区域或图片加入问题，通过回答中的可点击引用回看原文与图像证据。
+- 把研究结果保存为独立笔记，继续编辑，并导出 Markdown 与图片附件。
+- PDF、AI 和批注并列显示，分别开关面板；窗口较窄时可在阅读与研究之间切换。
 
-- 选中 PDF 文字后，可从标题工具栏或“批注”菜单创建标准高亮；原有 `H` 快捷键继续可用。
-- `Command-F` 会聚焦最近使用的全文或批注搜索，`Command-G` 与 `Command-Shift-G` 在当前范围内前后导航。
-- 批注搜索现在覆盖高亮原文与评论，并支持手动／AI 来源和 Highlight／Note 类型筛选；搜索继续遵守当前可见或活动的 AI Highlight Group 范围。
-- 页面整理与当前页删除集中到独立的“页面”菜单。工具栏和菜单共享可用状态，单页文档不会提供删除操作。
-
-高亮继续使用标准 PDF 批注并写入应用管理的工作副本；原始 PDF 不会在正常编辑中被覆盖。
-
-### 使用要求
-
-- 运行要求：macOS 14.0 或更高版本。
-- 当前发行包已使用开发者账户签名。
+需要 macOS 14.0 或更高版本。云 AI 为可选功能，需自行配置兼容服务；当前发行包已使用开发者账户签名。
 
 ## English
 
-### What's new
+- Research conversations now retain history, drafts and sources, with follow-up questions across selected PDFs or a Group.
+- Add selected text, a page region or an image to a question, then revisit text and visual evidence through clickable answer references.
+- Save research as independent notes, continue editing and export Markdown with image attachments.
+- Read PDF, AI and annotations in adjacent panes with separate controls; switch between reading and research in narrower windows.
 
-- With PDF text selected, create a standard highlight from the title toolbar or Annotation menu; the existing `H` shortcut remains available.
-- `Command-F` focuses the most recently used document or annotation search, while `Command-G` and `Command-Shift-G` navigate forward and backward in that scope.
-- Annotation search now covers highlighted source text and comments, with manual/AI source and Highlight/Note type filters. Results remain within the current visible or active AI Highlight Group scope.
-- Page organization and current-page deletion now live in a dedicated Pages menu. The toolbar and menu share availability rules, and deletion is disabled for one-page documents.
-
-Highlights remain standard PDF annotations in the app-managed working copy; normal editing leaves the original PDF unchanged.
-
-### Requirements
-
-- Requires macOS 14.0 or later.
-- The current distribution package is signed with the developer account.
+Requires macOS 14.0 or later. Cloud AI is optional and requires a compatible service configuration. The current distribution package is signed with the developer account.
