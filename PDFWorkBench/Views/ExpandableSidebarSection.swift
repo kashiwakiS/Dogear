@@ -26,9 +26,9 @@ struct ReaderSidebarLayout {
 
     let availableHeight: CGFloat
     let expandedSections: Set<ReaderSidebarSection>
+    var visibleSections: Set<ReaderSidebarSection> = Set(ReaderSidebarSection.allCases)
 
-    static func maximumExpandedSectionCount(for availableHeight: CGFloat) -> Int {
-        let sectionCount = ReaderSidebarSection.allCases.count
+    static func maximumExpandedSectionCount(for availableHeight: CGFloat, sectionCount: Int = ReaderSidebarSection.allCases.count) -> Int {
         for expandedCount in stride(from: sectionCount, through: 1, by: -1) {
             let collapsedCount = sectionCount - expandedCount
             let occupiedHeight = CGFloat(expandedCount) * minimumExpandedSectionHeight
@@ -42,12 +42,13 @@ struct ReaderSidebarLayout {
     }
 
     func height(for section: ReaderSidebarSection) -> CGFloat {
+        guard visibleSections.contains(section) else { return 0 }
         guard expandedSections.contains(section) else {
             return Self.collapsedSectionHeight
         }
 
-        let expandedCount = max(1, expandedSections.count)
-        let collapsedCount = ReaderSidebarSection.allCases.count - expandedCount
+        let expandedCount = max(1, expandedSections.intersection(visibleSections).count)
+        let collapsedCount = visibleSections.count - expandedCount
         let availableExpandedHeight = max(
             Self.collapsedSectionHeight,
             availableHeight - CGFloat(collapsedCount) * Self.collapsedSectionHeight

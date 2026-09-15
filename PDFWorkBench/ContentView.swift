@@ -9,6 +9,17 @@ struct ContentView: View {
     @StateObject private var feedbackCenter: OperationFeedbackCenter
     @StateObject private var aiReadingStore: AIReadingStore
     @StateObject private var aiHighlightStore: AIHighlightGenerationStore
+    @StateObject private var researchWorkspace: ResearchWorkspaceState
+    @ObservedObject private var researchStore = ResearchStore.shared
+    @ObservedObject private var researchRuntime = ResearchRuntime.shared
+    @State private var researchEvidencePreview: ResearchEvidence?
+    @State private var researchRegionCapture: ResearchRegionCapture?
+    @State private var pendingResearchSelection: ResearchInputBlock?
+    @State private var researchSplitStart = 0.5
+    @State private var researchReadingPosition: PDFNavigationTarget?
+    @State private var researchZoomMode = "fitWidth"
+    @State private var researchViewGeneration = 0
+    @State private var researchWindowObserver: NSObjectProtocol?
     @State private var windowFrameController = WindowFrameController()
     @State private var nativeTabPreviewController = NativeTabGroupPreviewController()
     @ObservedObject private var externalPDFOpenCoordinator = ExternalPDFOpenCoordinator.shared
@@ -38,8 +49,7 @@ struct ContentView: View {
     @State private var latestContentWidth: CGFloat = 984
     @State private var lockedWorkspaceWidth: CGFloat?
     @State private var workspaceLockID = UUID()
-    @State private var lockedReaderWorkspaceWidth: CGFloat?
-    @State private var readerWorkspaceLockID = UUID()
+    @State private var annotationTransition: AnnotationSidebarTransition?
     @State private var pageJumpText = "1"
     @State private var readingDisplayStyle: PDFReadingDisplayStyle = .continuous
     @State private var isNightMode = false
@@ -84,11 +94,13 @@ struct ContentView: View {
         )
         _aiReadingStore = StateObject(wrappedValue: AIReadingStore())
         _aiHighlightStore = StateObject(wrappedValue: AIHighlightGenerationStore())
+        let resolvedSessionID = initialSessionID ?? UUID()
+        _researchWorkspace = StateObject(wrappedValue: ResearchWorkspaceState(windowSessionID: resolvedSessionID))
         self.libraryStore = libraryStore
         self.initialGroupID = initialGroupID
         self.initialSessionID = initialSessionID
         _activeGroupID = State(initialValue: initialGroupID ?? libraryStore.initialWindowGroupID)
-        _windowSessionID = State(initialValue: initialSessionID ?? UUID())
+        _windowSessionID = State(initialValue: resolvedSessionID)
     }
 
     var body: some View {
@@ -131,6 +143,7 @@ struct ContentView: View {
             HostingWindowAccessor { window in
                 windowFrameController.setWindow(window)
                 documentStore.setUndoManager(window?.undoManager)
+                bindResearchWindow(window)
                 nativeTabPreviewController.update(
                     window: window,
                     context: nativeTabPreviewContext,
@@ -192,6 +205,16 @@ struct ContentView: View {
         .sheet(isPresented: $isShowingPageOrganizer) {
             PageOrganizerView(documentStore: documentStore)
         }
+        .sheet(item: $researchEvidencePreview) { evidence in
+            ResearchEvidencePreview(evidence: evidence, library: libraryStore)
+        }
+        .sheet(item: $researchRegionCapture) { capture in
+            ResearchRegionCaptureSheet(document: capture.document, pageIndex: capture.pageIndex,
+                source: capture.source, sessionID: capture.sessionID)
+        }
+        .simultaneousGesture(TapGesture().onEnded {
+            ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
+        })
         .focusedSceneValue(\.pdfWorkbenchCommandHandlers, commandHandlers)
         .onAppear {
             applyInitialGroupIfNeeded()
@@ -222,6 +245,12 @@ struct ContentView: View {
                 to: documentStore.selectedPDFURL?.libraryComparablePath
             )
             aiHighlightStore.documentDidChange(to: documentStore.document)
+            pendingResearchSelection = nil
+            ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
+        }
+        .onChange(of: researchWorkspace.wide) { _, _ in
+            lockedWorkspaceWidth = nil
+            annotationTransition = nil
         }
         .onDisappear {
             flushPendingZoomPersistence()
@@ -279,42 +308,238 @@ struct ContentView: View {
         )
     }
 
-    private func workspace(availableWidth: CGFloat) -> some View {
-        let readerWidth = readerWorkspaceWidth(for: availableWidth)
+    private var researchCurrentFileID: UUID? { libraryStore.file(for: documentStore.selectedPDFURL)?.id }
 
-        return ZStack(alignment: .leading) {
-            readerWorkspace
-                .frame(width: readerWidth)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    private func researchPanel(compact: Bool) -> some View {
+        ResearchPanelView(library: libraryStore, sessionID: $researchWorkspace.sessionID,
+            currentFileID: researchCurrentFileID, mainStore: documentStore, viewID: windowSessionID,
+            compact: compact, onAddSelection: addResearchSelection, onCaptureRegion: captureResearchRegion,
+            onViewEvidence: showResearchEvidence, onShowLibrary: { openWindow(id: "research-library") },
+            onToggleWide: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
+                if !researchWorkspace.wide { researchWorkspace.focusesResearch = true }
+                researchWorkspace.wide.toggle()
+            })
+    }
 
-            if isAnnotationSidebarVisible {
-                // Reserve the resize target inside the sidebar, away from both
-                // PDFKit's scrollbar and the sidebar's interactive content.
-                HStack(spacing: 0) {
-                    annotationResizeHandle(availableWidth: availableWidth)
+    private func ensureResearchSession() -> UUID {
+        if let id = researchWorkspace.sessionID, researchStore.session(id: id) != nil { return id }
+        let id = researchStore.createSession(title: L10n.string("New research session"),
+            sourceSelection: ResearchSourceSelection(fileIDs: researchCurrentFileID.map { [$0] } ?? []))
+        researchWorkspace.sessionID = id
+        return id
+    }
 
-                    ReaderSidebarView(
-                        documentStore: documentStore,
-                        aiStore: aiReadingStore,
-                        aiHighlightStore: aiHighlightStore,
-                        activeFindScope: $activeFindScope,
-                        findFocusRequest: findFocusRequest,
-                        onFindFieldFocusChanged: { scope in
-                            focusedReaderFindScope = scope
-                            if scope != nil {
-                                findFocusRequest = nil
-                            }
-                        }
-                    )
-                    .clipped()
-                }
-                .frame(width: annotationSidebarWidth)
-                .background(Color(nsColor: .controlBackgroundColor))
-                // The reader can remain wider while the window expansion settles.
-                // Keep the entire sidebar beyond its actual edge in that interval.
-                .offset(x: max(readerWidth, availableWidth - annotationSidebarWidth))
+    private func currentResearchSource() -> ResearchSourceSnapshot? {
+        guard let file = libraryStore.file(for: documentStore.selectedPDFURL),
+              let read = try? DocumentAccessCoordinator.shared.readSnapshot(fileID: file.id,
+                originalURL: libraryStore.resolvedURL(for: file), workingCopyURL: file.workingCopyURL) else { return nil }
+        return ResearchSourceSnapshot(fileID: file.id, displayName: file.displayName, fingerprint: read.contentVersion)
+    }
+
+    private func addResearchSelection() {
+        let id = ensureResearchSession()
+        guard var session = researchStore.session(id: id) else { return }
+        if let pendingResearchSelection { session.draft.blocks.append(pendingResearchSelection) }
+        else if let selection = documentStore.currentTextSelection, !selection.isEmpty, let source = currentResearchSource() {
+            for passage in selection.passages {
+                let bounds = passage.bounds
+                let evidence = ResearchEvidence(source: source, kind: .pdfText,
+                    anchor: ResearchPageAnchor(pageIndex: passage.pageNumber - 1, x: bounds.minX, y: bounds.minY,
+                        width: bounds.width, height: bounds.height), excerpt: passage.text)
+                session.draft.blocks.append(ResearchInputBlock(kind: .pdfText, text: passage.text, evidence: evidence))
+            }
+            if selection.passages.isEmpty {
+                session.draft.blocks.append(ResearchInputBlock(kind: .discussion, text: selection.text))
+            }
+        } else if let annotation = documentStore.selectedAnnotation, let source = currentResearchSource() {
+            let text = [annotation.text, annotation.note].filter { !$0.isEmpty }.joined(separator: "\n")
+            let kind: ResearchSourceKind = annotation.isAIGenerated ? .discussion : .annotation
+            let evidence = ResearchEvidence(source: source, kind: kind,
+                anchor: ResearchPageAnchor(pageIndex: annotation.pageIndex), excerpt: text, annotationID: annotation.id)
+            session.draft.blocks.append(ResearchInputBlock(kind: kind, text: text, evidence: evidence))
+        } else {
+            researchRuntime.setError(L10n.string("Select PDF text or a margin note first."), sessionID: id)
+            return
+        }
+        _ = researchStore.saveDraft(session.draft, sessionID: id)
+    }
+
+    private func captureResearchRegion() {
+        let id = ensureResearchSession()
+        guard let file = libraryStore.file(for: documentStore.selectedPDFURL) else { return }
+        do {
+            let read = try DocumentAccessCoordinator.shared.readSnapshot(fileID: file.id,
+                originalURL: libraryStore.resolvedURL(for: file), workingCopyURL: file.workingCopyURL)
+            researchRegionCapture = ResearchRegionCapture(document: read.document, pageIndex: documentStore.currentPageIndex,
+                source: ResearchSourceSnapshot(fileID: file.id, displayName: file.displayName, fingerprint: read.contentVersion), sessionID: id)
+        } catch { reportResearchError(error) }
+    }
+
+    private func showResearchEvidence(_ evidence: ResearchEvidence) {
+        ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
+        guard evidence.source?.fileID == researchCurrentFileID, evidence.kind != .image else {
+            researchEvidencePreview = evidence
+            return
+        }
+        Task { @MainActor in
+            do {
+                let resolved = try await ResearchEvidenceResolver.resolve(evidence, library: libraryStore)
+                guard evidence.source?.fileID == researchCurrentFileID else { researchEvidencePreview = evidence; return }
+                navigateResearch(to: PDFNavigationTarget(pageIndex: resolved.pageIndex,
+                    point: resolved.rect.map { CGPoint(x: $0.minX, y: $0.maxY) }, relativePagePosition: nil))
+            } catch { researchEvidencePreview = evidence }
+        }
+    }
+
+    private func navigateResearch(to target: PDFNavigationTarget) {
+        documentStore.navigate(to: DocumentOutlineEntry(id: UUID().uuidString, title: "Research", level: 0,
+            target: target, source: .detectedHeading))
+    }
+
+    private func reportResearchError(_ error: Error) {
+        researchRuntime.setError(error.localizedDescription, sessionID: ensureResearchSession())
+    }
+
+    private func bindResearchWindow(_ window: NSWindow?) {
+        guard let window else { return }
+        documentStore.setEditorActivationHandler { [weak window] in
+            window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if researchWindowObserver == nil {
+            let viewID = windowSessionID
+            researchWindowObserver = DocumentEditorWindowCloseObserver(window: window) { [weak documentStore] in
+                documentStore?.releaseEditorAccess()
+                ResearchCommandService.shared.unregister(viewID: viewID)
             }
         }
+        ResearchCommandService.shared.register(viewID: windowSessionID, handlers: ResearchCommandHandlers(
+            snapshot: {
+                ResearchWorkspaceViewState(mainFileID: researchCurrentFileID, pageIndex: documentStore.currentPageIndex,
+                    zoomPercent: Double(zoomScalePercent), wideAI: researchWorkspace.wide,
+                    visibleGroupIDs: Array(documentStore.visibleAIHighlightGroupIDs),
+                    referenceFileID: researchEvidencePreview?.source?.fileID,
+                    referencePageIndex: researchEvidencePreview?.anchor?.pageIndex,
+                    pageOffsetX: researchReadingPosition?.point.map { Double($0.x) },
+                    pageOffsetY: researchReadingPosition?.point.map { Double($0.y) }, zoomMode: researchZoomMode,
+                    highlightGroups: documentStore.aiHighlightGroups.prefix(50).map { ResearchHighlightGroupState(id: $0.id,
+                        title: String(($0.title ?? "").prefix(160)), visible: documentStore.isAIHighlightGroupVisible($0.id)) },
+                    selectedText: documentStore.currentTextSelection.map { String($0.text.prefix(4_000)) },
+                    selectedAnnotationText: documentStore.selectedAnnotation.map { String(($0.text + "\n" + $0.note).prefix(4_000)) },
+                    selectionWasClipped: (documentStore.currentTextSelection?.text.count ?? 0) > 4_000
+                        || (documentStore.selectedAnnotation.map { $0.text.count + $0.note.count + 1 } ?? 0) > 4_000,
+                    highlightGroupsWereClipped: documentStore.aiHighlightGroups.count > 50)
+            },
+            showSource: { fileID, pageIndex in
+                guard let file = libraryStore.allFiles.first(where: { $0.id == fileID }) else { throw ResearchCommandError.outsideSources }
+                let read = try DocumentAccessCoordinator.shared.readSnapshot(fileID: file.id,
+                    originalURL: libraryStore.resolvedURL(for: file), workingCopyURL: file.workingCopyURL)
+                guard pageIndex >= 0, pageIndex < read.document.pageCount else { throw ResearchCommandError.invalidArguments }
+                if fileID == researchCurrentFileID {
+                    navigateResearch(to: PDFNavigationTarget(pageIndex: pageIndex, point: nil, relativePagePosition: nil))
+                } else {
+                    researchEvidencePreview = ResearchEvidence(source: ResearchSourceSnapshot(fileID: file.id,
+                        displayName: file.displayName, fingerprint: read.contentVersion), kind: .file,
+                        anchor: ResearchPageAnchor(pageIndex: pageIndex), excerpt: "")
+                }
+                researchViewGeneration += 1
+            },
+            setZoom: { command in
+                switch command {
+                case .fit: runZoomCommand(.fitWidth, trigger: .pointer)
+                case .percent(let value): runZoomCommand(.custom(value), trigger: .pointer)
+                }
+            },
+            setWideAI: { researchWorkspace.wide = $0 },
+            setGroupVisible: { fileID, groupID, visible in
+                guard fileID == researchCurrentFileID,
+                      documentStore.aiHighlightGroups.contains(where: { $0.id == groupID }) else { throw ResearchCommandError.invalidArguments }
+                documentStore.setAIHighlightGroupVisible(groupID, isVisible: visible)
+            },
+            restore: { previous in
+                guard previous.mainFileID == researchCurrentFileID else { throw ResearchCommandError.viewUnavailable }
+                researchWorkspace.wide = previous.wideAI
+                runZoomCommand(previous.zoomMode == "fitWidth" ? .fitWidth : previous.zoomMode == "fitPage" ? .fitPage : .custom(previous.zoomPercent), trigger: .pointer)
+                for group in documentStore.aiHighlightGroups {
+                    documentStore.setAIHighlightGroupVisible(group.id, isVisible: previous.visibleGroupIDs.contains(group.id))
+                }
+                let point = previous.pageOffsetX.flatMap { x in previous.pageOffsetY.map { CGPoint(x: x, y: $0) } }
+                navigateResearch(to: PDFNavigationTarget(pageIndex: previous.pageIndex, point: point, relativePagePosition: nil))
+                researchEvidencePreview = nil
+            }, validateSource: { source in
+                guard let file = libraryStore.allFiles.first(where: { $0.id == source.fileID }) else { throw ResearchCommandError.outsideSources }
+                let read = try DocumentAccessCoordinator.shared.readSnapshot(fileID: file.id,
+                    originalURL: libraryStore.resolvedURL(for: file), workingCopyURL: file.workingCopyURL)
+                guard read.contentVersion == source.fingerprint else { throw DocumentAccessError.sourceChanged }
+            }))
+    }
+
+    private func workspaceLayout(availableWidth: CGFloat) -> ResearchWorkspaceLayout {
+        ResearchWorkspaceLayout(availableWidth: availableWidth,
+            annotationWidth: annotationTransition?.annotationWidth ?? visibleAnnotationSidebarWidth,
+            showsResearch: researchWorkspace.wide, readerFraction: researchWorkspace.fraction,
+            focusesResearch: researchWorkspace.focusesResearch,
+            fixedReadingAreaWidth: annotationTransition?.readingAreaWidth)
+    }
+
+    private func workspace(availableWidth: CGFloat) -> some View {
+        let layout = workspaceLayout(availableWidth: availableWidth)
+        return HStack(spacing: 0) {
+            HStack(spacing: 0) {
+                // Keep the native PDF view at one structural identity, including
+                // the narrow-window focus switch. Clip only its allocated pane.
+                readerWorkspace
+                    .frame(width: max(centerMinimumWidth, layout.readerWidth))
+                    .frame(width: layout.readerWidth, alignment: .leading)
+                    .clipped()
+                    .opacity(layout.readerWidth > 0 ? 1 : 0)
+                    .allowsHitTesting(layout.readerWidth > 0)
+                    .accessibilityHidden(layout.readerWidth == 0)
+                if researchWorkspace.wide {
+                    HStack(spacing: 0) {
+                        if layout.canSplit {
+                            SidebarResizeHandle(width: ResearchWorkspaceLayout.dividerWidth, dividerAlignment: .leading,
+                                onBegin: { researchSplitStart = layout.readerWidth / layout.readingAreaWidth },
+                                onDrag: { translation in
+                                    researchWorkspace.fraction = min(0.75, max(0.25,
+                                        researchSplitStart + translation / layout.readingAreaWidth))
+                                    ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
+                                }, onEnd: {})
+                        }
+                        researchPanel(compact: false)
+                            .frame(width: max(ResearchWorkspaceLayout.minimumResearchWidth, layout.researchWidth))
+                            .frame(width: layout.researchWidth, alignment: .leading)
+                            .clipped()
+                    }
+                    .opacity(layout.researchWidth > 0 ? 1 : 0)
+                    .allowsHitTesting(layout.researchWidth > 0)
+                    .accessibilityHidden(layout.researchWidth == 0)
+                    .transition(.opacity)
+                }
+            }
+            .frame(width: layout.readingAreaWidth, alignment: .leading)
+            .clipped()
+            // During native window animation, reveal/clip this pane while the
+            // PDF and AI retain their pre-toggle sizes. Keep it alive on close.
+            if isAnnotationSidebarVisible || annotationTransition != nil {
+                HStack(spacing: 0) {
+                    annotationResizeHandle(availableWidth: availableWidth)
+                    ReaderSidebarView(documentStore: documentStore, aiStore: aiReadingStore,
+                        aiHighlightStore: aiHighlightStore, activeFindScope: $activeFindScope,
+                        findFocusRequest: findFocusRequest, onFindFieldFocusChanged: { scope in
+                            focusedReaderFindScope = scope
+                            if scope != nil { findFocusRequest = nil }
+                        }, showsAsk: false)
+                }
+                .frame(width: layout.annotationWidth)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipped()
+            }
+        }
+        .frame(width: availableWidth, alignment: .leading)
+        .animation(.easeInOut(duration: 0.22), value: researchWorkspace.wide)
+        .animation(.easeInOut(duration: 0.22), value: researchWorkspace.focusesResearch)
     }
 
     private var readerWorkspace: some View {
@@ -328,7 +553,6 @@ struct ContentView: View {
             dividerAlignment: .leading,
             onBegin: {
                 annotationSidebarDragStartWidth = annotationSidebarWidth
-                lockReaderWorkspaceWidth()
             },
             onDrag: { translation in
                 resizeAnnotationSidebar(
@@ -338,7 +562,6 @@ struct ContentView: View {
             },
             onEnd: {
                 annotationSidebarDragStartWidth = annotationSidebarWidth
-                releaseReaderWorkspaceWidthAfterWindowSettles()
             }
         )
     }
@@ -420,14 +643,34 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var trailingTitleBarToolbarItem: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button { openWindow(id: "research-library") } label: { Image(systemName: "books.vertical") }
+                .help("Research sessions and notes")
+            Button {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
+                if !researchWorkspace.wide { researchWorkspace.focusesResearch = true }
+                researchWorkspace.wide.toggle()
+            } label: { Image(systemName: "rectangle.split.2x1") }
+                .help(researchWorkspace.wide ? "Hide AI workspace" : "Show AI workspace")
+            if researchWorkspace.wide, !workspaceLayout(availableWidth: workspaceWidth(for: latestContentWidth)).canSplit {
+                Picker("Workspace focus", selection: $researchWorkspace.focusesResearch) {
+                    Text("PDF").tag(false)
+                    Text("AI").tag(true)
+                }.pickerStyle(.segmented).frame(width: 110)
+            }
+            Button {
+                do { try ResearchCommandService.shared.returnToPreviousView(viewID: windowSessionID) }
+                catch { reportResearchError(error) }
+                researchViewGeneration += 1
+            } label: { Image(systemName: "arrow.uturn.backward") }
+                .help("Return to previous reading position")
             FlatToolbarIconControl(
                 title: "Annotations",
                 systemImage: "sidebar.right"
             ) {
                 toggleAnnotationSidebar(trigger: .toolbar)
             }
-            .help(isAnnotationSidebarVisible ? "Hide Annotations and AI Sidebar" : "Show Annotations and AI Sidebar")
+            .help(isAnnotationSidebarVisible ? "Hide Annotations Sidebar" : "Show Annotations Sidebar")
         }
     }
 
@@ -476,67 +719,80 @@ struct ContentView: View {
                 )
             },
             goToPreviousPage: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 documentStore.goToRelativePage(
                     offset: -1,
                     trigger: .command(shortcut: "Command-Up")
                 )
             },
             goToNextPage: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 documentStore.goToRelativePage(
                     offset: 1,
                     trigger: .command(shortcut: "Command-Down")
                 )
             },
             goToFirstPage: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 documentStore.goToFirstPage(
                     trigger: .command(shortcut: "Command-Option-Up")
                 )
             },
             goToLastPage: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 documentStore.goToLastPage(
                     trigger: .command(shortcut: "Command-Option-Down")
                 )
             },
             zoomIn: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 runZoomCommand(
                     .zoomIn,
                     trigger: .command(shortcut: "Command-Plus")
                 )
             },
             zoomOut: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 runZoomCommand(
                     .zoomOut,
                     trigger: .command(shortcut: "Command-Minus")
                 )
             },
             actualSize: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 runZoomCommand(
                     .actualSize,
                     trigger: .command(shortcut: "Command-0")
                 )
             },
             fitWidth: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 runZoomCommand(
                     .fitWidth,
                     trigger: .command(shortcut: "Command-2")
                 )
             },
             fitPage: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 runZoomCommand(
                     .fitPage,
                     trigger: .command(shortcut: "Command-1")
                 )
             },
             setDisplayStyle: { style in
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 setReadingDisplayStyle(style, trigger: .command(shortcut: nil))
             },
             showFind: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 performFindAction(.showFindPanel)
             },
             findNext: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 performFindAction(.next)
             },
             findPrevious: {
+                ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
                 performFindAction(.previous)
             },
             exportAnnotatedCopy: {
@@ -609,11 +865,9 @@ struct ContentView: View {
                         documentStore.selectMarginAnnotation(annotation)
                     },
                     onSelectMarginText: { text, pageNumber in
-                        aiReadingStore.useAnnotationSelection(
-                            text,
-                            documentName: documentStore.selectedDocumentName,
-                            pageNumber: pageNumber
-                        )
+                        pendingResearchSelection = ResearchInputBlock(kind: .annotation, text: text,
+                            evidence: currentResearchSource().map { ResearchEvidence(source: $0, kind: .annotation,
+                                anchor: ResearchPageAnchor(pageIndex: pageNumber - 1), excerpt: text) })
                     },
                     onHighlightCreated: { trigger in
                         documentStore.markAnnotationsChanged(
@@ -663,11 +917,15 @@ struct ContentView: View {
                     },
                     onScaleChanged: { scaleFactor, zoomState in
                         updateZoomScalePercent(scaleFactor)
+                        researchZoomMode = zoomState.mode.rawValue
                         scheduleZoomPersistence(zoomState)
                     },
                     onSelectionChanged: { selection in
                         documentStore.recordTextSelection(selection)
-                    }
+                        if selection?.isEmpty == false { pendingResearchSelection = nil }
+                    },
+                    onUserInteraction: { ResearchCommandService.shared.userDidInteract(viewID: windowSessionID) },
+                    onReadingPositionChanged: { researchReadingPosition = $0 }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -956,14 +1214,6 @@ struct ContentView: View {
         return totalAvailableWidth - visibleLibraryNavigatorWidth
     }
 
-    private func readerWorkspaceWidth(for availableWidth: CGFloat) -> CGFloat {
-        if let lockedReaderWorkspaceWidth {
-            return min(lockedReaderWorkspaceWidth, availableWidth)
-        }
-
-        return availableWidth - visibleAnnotationSidebarWidth
-    }
-
     private func clamped(_ value: CGFloat, to range: ClosedRange<CGFloat>) -> CGFloat {
         min(max(value, range.lowerBound), range.upperBound)
     }
@@ -1006,33 +1256,26 @@ struct ContentView: View {
     }
 
     private func toggleAnnotationSidebar(trigger: FeedbackTrigger? = nil) {
-        lockReaderWorkspaceWidth()
-
-        if isAnnotationSidebarVisible {
-            withoutViewAnimation {
-                isAnnotationSidebarVisible = false
-            }
-            windowFrameController.setAnnotationSidebarVisible(
-                false,
-                expansionWidth: annotationExpansionWidth,
-                minimumWidth: minimumWindowWidth(
-                    libraryVisible: isLibraryNavigatorVisible,
-                    annotationVisible: false
-                )
-            )
-        } else {
-            windowFrameController.setAnnotationSidebarVisible(
-                true,
-                expansionWidth: annotationExpansionWidth,
-                minimumWidth: minimumWindowWidth(
-                    libraryVisible: isLibraryNavigatorVisible,
-                    annotationVisible: true
-                )
-            )
-            withoutViewAnimation {
-                isAnnotationSidebarVisible = true
-            }
+        let transition = windowFrameController.isFullScreen ? nil : AnnotationSidebarTransition(
+            readingAreaWidth: workspaceLayout(availableWidth: workspaceWidth(for: latestContentWidth)).readingAreaWidth,
+            annotationWidth: annotationSidebarWidth)
+        let willShow = !isAnnotationSidebarVisible
+        withoutViewAnimation {
+            annotationTransition = transition
+            isAnnotationSidebarVisible = willShow
         }
+        windowFrameController.setAnnotationSidebarVisible(
+            willShow,
+            expansionWidth: annotationExpansionWidth,
+            minimumWidth: minimumWindowWidth(
+                libraryVisible: isLibraryNavigatorVisible,
+                annotationVisible: willShow
+            ), completion: {
+                // A superseded animation must not release a newer width lock.
+                guard annotationTransition?.id == transition?.id else { return }
+                withoutViewAnimation { annotationTransition = nil }
+            }
+        )
 
         postFeedback(
             isAnnotationSidebarVisible
@@ -1041,7 +1284,6 @@ struct ContentView: View {
             action: "Toggle Annotation Sidebar",
             trigger: trigger
         )
-        releaseReaderWorkspaceWidthAfterWindowSettles()
     }
 
     private func lockWorkspaceWidth() {
@@ -1055,18 +1297,6 @@ struct ContentView: View {
         workspaceLockID = UUID()
     }
 
-    private func lockReaderWorkspaceWidth() {
-        guard !windowFrameController.isFullScreen else {
-            lockedReaderWorkspaceWidth = nil
-            readerWorkspaceLockID = UUID()
-            return
-        }
-
-        let availableWidth = workspaceWidth(for: latestContentWidth)
-        lockedReaderWorkspaceWidth = readerWorkspaceWidth(for: availableWidth)
-        readerWorkspaceLockID = UUID()
-    }
-
     private func releaseWorkspaceWidthAfterWindowSettles() {
         let lockID = workspaceLockID
 
@@ -1076,18 +1306,6 @@ struct ContentView: View {
             }
 
             lockedWorkspaceWidth = nil
-        }
-    }
-
-    private func releaseReaderWorkspaceWidthAfterWindowSettles() {
-        let lockID = readerWorkspaceLockID
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
-            guard readerWorkspaceLockID == lockID else {
-                return
-            }
-
-            lockedReaderWorkspaceWidth = nil
         }
     }
 
@@ -1467,6 +1685,10 @@ struct ContentView: View {
 
     private func openLibraryItem(_ item: LibraryItem, inGroupID groupID: UUID) {
         let url = libraryStore.resolvedURL(for: item)
+        if DocumentAccessCoordinator.shared.activateExistingEditor(for: url, excluding: documentStore) {
+            libraryStore.refreshResolvedURL(url, for: item)
+            return
+        }
         if documentStore.openPDF(
             from: url,
             workingCopyURL: item.workingCopyURL,
@@ -1595,27 +1817,17 @@ struct ContentView: View {
     }
 
     private func discardWorkingCopy(_ workingCopyURL: URL, for item: LibraryItem) {
-        PDFSaveQueue.shared.waitUntilDrained()
-
-        let isCurrentDocument = documentStore.selectedPDFURL?.libraryComparablePath == item.path
-
-        if isCurrentDocument {
-            guard documentStore.discardCurrentWorkingCopyAndReopenOriginal() else {
-                return
-            }
-            documentStore.bindLibraryFile(item.id)
-        } else if FileManager.default.fileExists(atPath: workingCopyURL.path) {
-            do {
-                try FileManager.default.removeItem(at: workingCopyURL)
-            } catch {
-                postFeedback(
-                    "Could not delete the working copy. Original PDF was not changed.",
-                    kind: .error,
-                    action: "Discard Changes",
-                    trigger: .pointer
-                )
-                return
-            }
+        do {
+            try DocumentAccessCoordinator.shared.discardWorkingCopy(originalURL: item.url,
+                workingCopyURL: workingCopyURL, fileID: item.id)
+        } catch {
+            postFeedback(
+                "Could not delete the working copy. Original PDF was not changed.",
+                kind: .error,
+                action: "Discard Changes",
+                trigger: .pointer
+            )
+            return
         }
 
         libraryStore.updateWorkingCopyURL(nil, for: item)
@@ -1663,15 +1875,8 @@ struct ContentView: View {
         }
 
         do {
-            let data: Data
-            if documentStore.selectedPDFURL?.libraryComparablePath == item.path,
-               let document = documentStore.document,
-               let currentData = document.dataRepresentationWithNoteAnnotationsDisplayed() {
-                data = currentData
-            } else {
-                data = try Data(contentsOf: sourceURL)
-            }
-
+            let data = try DocumentAccessCoordinator.shared.exportData(fileID: item.id,
+                originalURL: item.url, workingCopyURL: sourceURL)
             try data.write(to: destinationURL, options: [.atomic])
             postFeedback(
                 "Saved copy to \(destinationURL.lastPathComponent). Working copy was kept.",
@@ -2006,6 +2211,8 @@ private extension PDFZoomAction {
             return "Fit Width"
         case .fitPage:
             return "Fit Page"
+        case .custom:
+            return "Zoom"
         }
     }
 
@@ -2178,9 +2385,11 @@ private final class WindowFrameController {
     func setAnnotationSidebarVisible(
         _ isVisible: Bool,
         expansionWidth: CGFloat,
-        minimumWidth: CGFloat
+        minimumWidth: CGFloat,
+        completion: @escaping @MainActor () -> Void = {}
     ) {
         guard let window else {
+            completion()
             return
         }
 
@@ -2191,10 +2400,11 @@ private final class WindowFrameController {
         )
         guard !isFullScreen else {
             deferFullScreenChange(change)
+            completion()
             return
         }
 
-        apply(change, to: window, animate: true)
+        apply(change, to: window, animate: true, completion: completion)
     }
 
     func resizeExpandedWindow(by delta: CGFloat) {
@@ -2316,9 +2526,11 @@ private final class WindowFrameController {
         _ window: NSWindow,
         by expansionWidth: CGFloat,
         minimumWidth: CGFloat,
-        animate: Bool
+        animate: Bool,
+        completion: @escaping @MainActor () -> Void = {}
     ) {
         guard collapsedFrameBeforeAnnotationExpansion == nil else {
+            completion()
             return
         }
 
@@ -2334,14 +2546,15 @@ private final class WindowFrameController {
         if expectedLibraryExpandedFrame != nil {
             expectedLibraryExpandedFrame = expandedFrame
         }
-        window.setFrame(expandedFrame, display: true, animate: animate)
+        setAnnotationFrame(expandedFrame, for: window, animate: animate, completion: completion)
     }
 
     private func collapseRight(
         _ window: NSWindow,
         by expansionWidth: CGFloat,
         minimumWidth: CGFloat,
-        animate: Bool
+        animate: Bool,
+        completion: @escaping @MainActor () -> Void = {}
     ) {
         let collapsedFrame: NSRect
 
@@ -2361,17 +2574,30 @@ private final class WindowFrameController {
         if expectedLibraryExpandedFrame != nil {
             expectedLibraryExpandedFrame = collapsedFrame
         }
-        window.setFrame(
-            constrainedToVisibleScreen(collapsedFrame, for: window),
-            display: true,
-            animate: animate
-        )
+        setAnnotationFrame(constrainedToVisibleScreen(collapsedFrame, for: window),
+            for: window, animate: animate, completion: completion)
+    }
+
+    private func setAnnotationFrame(_ frame: NSRect, for window: NSWindow, animate: Bool,
+                                    completion: @escaping @MainActor () -> Void) {
+        guard animate else {
+            window.setFrame(frame, display: true, animate: false)
+            completion()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = window.animationResizeTime(frame)
+            window.animator().setFrame(frame, display: true)
+        } completionHandler: {
+            Task { @MainActor in completion() }
+        }
     }
 
     private func apply(
         _ change: DeferredWindowFrameChange,
         to window: NSWindow,
-        animate: Bool
+        animate: Bool,
+        completion: @escaping @MainActor () -> Void = {}
     ) {
         switch change {
         case let .libraryVisibility(isVisible, expansionWidth, minimumWidth):
@@ -2396,14 +2622,14 @@ private final class WindowFrameController {
                     window,
                     by: expansionWidth,
                     minimumWidth: minimumWidth,
-                    animate: animate
+                    animate: animate, completion: completion
                 )
             } else {
                 collapseRight(
                     window,
                     by: expansionWidth,
                     minimumWidth: minimumWidth,
-                    animate: animate
+                    animate: animate, completion: completion
                 )
             }
         case let .libraryResize(delta):
@@ -2712,4 +2938,12 @@ private final class SidebarResizeHitTargetView: NSView {
         NSCursor.pop()
         cursorIsPushed = false
     }
+}
+
+private struct ResearchRegionCapture: Identifiable {
+    let id = UUID()
+    let document: PDFDocument
+    let pageIndex: Int
+    let source: ResearchSourceSnapshot
+    let sessionID: UUID
 }

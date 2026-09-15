@@ -37,6 +37,8 @@ struct PDFKitView: NSViewRepresentable {
     let onPageChanged: (Int) -> Void
     let onScaleChanged: (CGFloat, PDFZoomState) -> Void
     let onSelectionChanged: (PDFTextSelectionSnapshot?) -> Void
+    var onUserInteraction: (() -> Void)? = nil
+    var onReadingPositionChanged: ((PDFNavigationTarget) -> Void)? = nil
 
     @Environment(\.locale) private var locale
 
@@ -45,7 +47,8 @@ struct PDFKitView: NSViewRepresentable {
             displayStyle: displayStyle,
             onPageChanged: onPageChanged,
             onScaleChanged: onScaleChanged,
-            onSelectionChanged: onSelectionChanged
+            onSelectionChanged: onSelectionChanged,
+            onReadingPositionChanged: onReadingPositionChanged
         )
     }
 
@@ -69,6 +72,7 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.onAnnotationChanged = onAnnotationChanged
         pdfView.onUndoableAnnotationMutation = onUndoableAnnotationMutation
         pdfView.onFreeTextShortcut = onFreeTextShortcut
+        pdfView.onUserInteraction = onUserInteraction
         pdfView.onDogearShortcut = onToggleDogear
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
@@ -101,6 +105,7 @@ struct PDFKitView: NSViewRepresentable {
     func updateNSView(_ container: PDFReaderContainerView, context: Context) {
         _ = locale
         let pdfView = container.pdfView
+        context.coordinator.onReadingPositionChanged = onReadingPositionChanged
         if pdfView.document !== document {
             pdfView.stopQuietLinkPresentation()
             pdfView.beginQuietLinkPresentation(for: document)
@@ -128,6 +133,7 @@ struct PDFKitView: NSViewRepresentable {
                 context.coordinator.reportScale(from: pdfView)
                 container.layoutMarginCanvas()
                 context.coordinator.observeLiveScrolling(for: pdfView, in: container)
+                context.coordinator.reportReadingPosition(from: pdfView)
             }
         }
         pdfView.shortcutSet = shortcutSet
@@ -136,6 +142,7 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.onAnnotationChanged = onAnnotationChanged
         pdfView.onUndoableAnnotationMutation = onUndoableAnnotationMutation
         pdfView.onFreeTextShortcut = onFreeTextShortcut
+        pdfView.onUserInteraction = onUserInteraction
         pdfView.onDogearShortcut = onToggleDogear
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
@@ -231,12 +238,14 @@ struct PDFKitView: NSViewRepresentable {
 
     static func dismantleNSView(_ container: PDFReaderContainerView, coordinator: Coordinator) {
         container.pdfView.stopQuietLinkPresentation()
+        coordinator.stopObserving()
     }
 
     final class Coordinator {
         var onPageChanged: (Int) -> Void
         var onScaleChanged: (CGFloat, PDFZoomState) -> Void
         var onSelectionChanged: (PDFTextSelectionSnapshot?) -> Void
+        var onReadingPositionChanged: ((PDFNavigationTarget) -> Void)?
         var lastFreeTextRequestID = 0
         var lastHighlightRequestID = 0
         var lastTargetPageIndex: Int
@@ -254,17 +263,22 @@ struct PDFKitView: NSViewRepresentable {
         private var isScaleReportScheduled = false
         private var lastReportedScalePercent: Int?
         private var lastReportedZoomState: PDFZoomState?
+        private weak var pendingPositionPDFView: HighlightingPDFView?
+        private var isReadingPositionReportScheduled = false
+        private var lastReportedReadingPosition: PDFNavigationTarget?
 
         init(
             displayStyle: PDFReadingDisplayStyle,
             onPageChanged: @escaping (Int) -> Void,
             onScaleChanged: @escaping (CGFloat, PDFZoomState) -> Void,
-            onSelectionChanged: @escaping (PDFTextSelectionSnapshot?) -> Void
+            onSelectionChanged: @escaping (PDFTextSelectionSnapshot?) -> Void,
+            onReadingPositionChanged: ((PDFNavigationTarget) -> Void)? = nil
         ) {
             self.lastDisplayStyle = displayStyle
             self.onPageChanged = onPageChanged
             self.onScaleChanged = onScaleChanged
             self.onSelectionChanged = onSelectionChanged
+            self.onReadingPositionChanged = onReadingPositionChanged
             self.lastTargetPageIndex = 0
         }
 
@@ -273,7 +287,8 @@ struct PDFKitView: NSViewRepresentable {
                 forName: Notification.Name.PDFViewSelectionChanged,
                 object: pdfView,
                 queue: .main
-            ) { [weak pdfView] _ in
+            ) { [weak self, weak pdfView] _ in
+                guard let self else { return }
                 guard let pdfView,
                       let document = pdfView.document,
                       let selection = pdfView.currentSelection,
@@ -291,7 +306,15 @@ struct PDFKitView: NSViewRepresentable {
                 self.onSelectionChanged(
                     PDFTextSelectionSnapshot(
                         text: text,
-                        pageNumbers: Array(Set(pages)).sorted()
+                        pageNumbers: Array(Set(pages)).sorted(),
+                        passages: selection.pages.compactMap { page in
+                            let index = document.index(for: page)
+                            guard index != NSNotFound else { return nil }
+                            let lines = selection.selectionsByLine().filter { $0.pages.contains { $0 === page } }
+                            let selectedText = lines.compactMap(\.string).joined(separator: "\n")
+                            return PDFSelectedPassage(pageNumber: index + 1,
+                                text: selectedText.isEmpty ? text : selectedText, bounds: selection.bounds(for: page))
+                        }
                     )
                 )
             }
@@ -302,7 +325,8 @@ struct PDFKitView: NSViewRepresentable {
                 forName: Notification.Name.PDFViewPageChanged,
                 object: pdfView,
                 queue: .main
-            ) { [weak pdfView, weak container] _ in
+            ) { [weak self, weak pdfView, weak container] _ in
+                guard let self else { return }
                 guard let pdfView,
                       let document = pdfView.document,
                       let currentPage = pdfView.currentPage
@@ -318,6 +342,7 @@ struct PDFKitView: NSViewRepresentable {
                     container?.layoutDocumentViewForTwoUpIfNeeded()
                     container?.updateActiveFitScaleIfNeeded()
                     container?.layoutMarginCanvas()
+                    self.reportReadingPosition(from: pdfView)
                 }
             }
         }
@@ -332,6 +357,7 @@ struct PDFKitView: NSViewRepresentable {
 
             container.configurePDFScrollView(scrollView)
             let clipView = scrollView.contentView
+            reportReadingPosition(from: pdfView)
             guard observedClipView !== clipView else {
                 return
             }
@@ -359,6 +385,7 @@ struct PDFKitView: NSViewRepresentable {
                 }
 
                 self.reportPageChange(document.index(for: visiblePage), in: container)
+                self.reportReadingPosition(from: pdfView)
                 container.layoutMarginCanvas()
             }
         }
@@ -381,7 +408,8 @@ struct PDFKitView: NSViewRepresentable {
                 forName: Notification.Name.PDFViewScaleChanged,
                 object: pdfView,
                 queue: .main
-            ) { [weak pdfView, weak container] _ in
+            ) { [weak self, weak pdfView, weak container] _ in
+                guard let self else { return }
                 guard let pdfView else {
                     return
                 }
@@ -401,9 +429,31 @@ struct PDFKitView: NSViewRepresentable {
             lastTargetPageIndex = targetPageIndex
             lastSelectedAnnotationID = nil
             lastSelectedSearchResultID = nil
+            lastReportedReadingPosition = nil
+            lastReportedScalePercent = nil
+            lastReportedZoomState = nil
+        }
+
+        /// Position reports are deferred out of NSViewRepresentable updates and
+        /// coalesced during smooth scrolling. Read the latest native destination
+        /// when delivered so switching documents cannot emit a stale old offset.
+        func reportReadingPosition(from pdfView: HighlightingPDFView) {
+            guard onReadingPositionChanged != nil else { return }
+            pendingPositionPDFView = pdfView
+            guard !isReadingPositionReportScheduled else { return }
+            isReadingPositionReportScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isReadingPositionReportScheduled = false
+                guard let position = self.pendingPositionPDFView?.currentReadingPosition,
+                      position != self.lastReportedReadingPosition else { return }
+                self.lastReportedReadingPosition = position
+                self.onReadingPositionChanged?(position)
+            }
         }
 
         func reportScale(from pdfView: HighlightingPDFView) {
+            reportReadingPosition(from: pdfView)
             let scaleFactor = pdfView.scaleFactor
             guard scaleFactor.isFinite, scaleFactor > 0 else {
                 return
@@ -435,6 +485,20 @@ struct PDFKitView: NSViewRepresentable {
                     pendingScaleUpdate.zoomState
                 )
             }
+        }
+
+        func stopObserving() {
+            for observer in [pageObserver, scrollBoundsObserver, scaleObserver, selectionObserver].compactMap({ $0 }) {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            pageObserver = nil
+            scrollBoundsObserver = nil
+            scaleObserver = nil
+            selectionObserver = nil
+            observedClipView = nil
+            pendingPositionPDFView = nil
+            pendingScaleUpdate = nil
+            onReadingPositionChanged = nil
         }
 
         deinit {
@@ -516,6 +580,8 @@ enum PDFZoomAction: Equatable {
     case actualSize
     case fitWidth
     case fitPage
+    /// A percentage (125 means 125%), bounded to the native reader's range.
+    case custom(Double)
 }
 
 struct PDFReadingShortcutSet: Equatable {
@@ -1035,6 +1101,7 @@ final class PDFReaderContainerView: NSView {
 }
 
 final class HighlightingPDFView: PDFView {
+    var onUserInteraction: (() -> Void)?
     var shortcutSet: PDFReadingShortcutSet = .defaultReading
     var onHighlightCreated: ((FeedbackTrigger) -> Void)?
     var onHighlightRemoved: ((FeedbackTrigger) -> Void)?
@@ -1102,13 +1169,39 @@ final class HighlightingPDFView: PDFView {
         }
     }
 
+    /// PDFKit represents its current viewport as a destination in page space.
+    /// Keeping this point (including offsets outside the page edges) preserves
+    /// horizontal scrolling, page margins and rotated-page positions on return.
+    var currentReadingPosition: PDFNavigationTarget? {
+        guard let document else { return nil }
+        let destination = currentDestination
+        guard let page = destination?.page ?? currentPage else { return nil }
+        let pageIndex = document.index(for: page)
+        guard pageIndex != NSNotFound else { return nil }
+        let viewportTopLeft = NSPoint(x: bounds.minX, y: isFlipped ? bounds.minY : bounds.maxY)
+        let fallbackPoint = convert(viewportTopLeft, to: page)
+        let destinationPoint = destination?.point ?? fallbackPoint
+        let point = CGPoint(
+            x: destinationPoint.x.isFinite && destinationPoint.x != kPDFDestinationUnspecifiedValue ? destinationPoint.x : fallbackPoint.x,
+            y: destinationPoint.y.isFinite && destinationPoint.y != kPDFDestinationUnspecifiedValue ? destinationPoint.y : fallbackPoint.y
+        )
+        guard point.x.isFinite, point.y.isFinite else { return nil }
+        let pageBounds = page.bounds(for: displayBox)
+        let relative = pageBounds.height > 0 ? min(1, max(0, (pageBounds.maxY - point.y) / pageBounds.height)) : nil
+        return PDFNavigationTarget(pageIndex: pageIndex, point: point, relativePagePosition: relative)
+    }
+
     func goToOutlineTarget(_ target: PDFNavigationTarget) {
         guard let page = document?.page(at: target.pageIndex) else {
             return
         }
 
-        if let point = target.point {
-            go(to: PDFDestination(page: page, at: point))
+        if let point = target.point, point.x.isFinite, point.y.isFinite {
+            let destination = PDFDestination(page: page, at: point)
+            // Navigation restores position only. Its zoom belongs to the reader's
+            // explicit Fit/custom mode and must not be reset by PDFDestination.
+            destination.zoom = kPDFDestinationUnspecifiedValue
+            go(to: destination)
         } else {
             go(to: page)
         }
@@ -1153,6 +1246,7 @@ final class HighlightingPDFView: PDFView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        onUserInteraction?()
         window?.makeFirstResponder(self)
         if freeTextEditor != nil {
             commitFreeTextEditor()
@@ -1248,6 +1342,7 @@ final class HighlightingPDFView: PDFView {
     }
 
     override func keyDown(with event: NSEvent) {
+        onUserInteraction?()
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
               let key = event.charactersIgnoringModifiers?.lowercased()
         else {
@@ -1340,13 +1435,20 @@ final class HighlightingPDFView: PDFView {
     }
 
     override func magnify(with event: NSEvent) {
+        onUserInteraction?()
         beginUserMagnification()
         super.magnify(with: event)
     }
 
     override func smartMagnify(with event: NSEvent) {
+        onUserInteraction?()
         beginUserMagnification()
         super.smartMagnify(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        onUserInteraction?()
+        super.scrollWheel(with: event)
     }
 
     func applyZoomCommand(_ action: PDFZoomAction) {
@@ -1367,6 +1469,16 @@ final class HighlightingPDFView: PDFView {
             beginFitMode(.width)
         case .fitPage:
             beginFitMode(.page)
+        case .custom(let percent):
+            guard percent.isFinite else { return }
+            endFitMode()
+            autoScales = false
+            let requestedScale = CGFloat(min(500, max(25, percent)) / 100)
+            // PDFKit's defaults can vary with the installed page and prior Fit
+            // mode. Ensure the supported custom range is actually reachable.
+            minScaleFactor = min(minScaleFactor, requestedScale)
+            maxScaleFactor = max(maxScaleFactor, requestedScale)
+            scaleFactor = requestedScale
         }
     }
 

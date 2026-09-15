@@ -162,6 +162,7 @@ nonisolated enum AIHighlightFailureMessage {
         }
         if let retrievalError = error as? AIRetrievalError {
             switch retrievalError {
+            case .preparationTimedOut: return L10n.string("Source preparation exceeded its time budget. Narrow the source set or use lightweight retrieval.")
             case .modelMissing: return L10n.string("Import the BGE Small EN model in Settings before using semantic retrieval.")
             case .invalidSelection: return L10n.string("Choose a supported retrieval mode in Settings.")
             case .invalidModel: return L10n.string("The local embedding model is invalid or incompatible. Import a verified model package.")

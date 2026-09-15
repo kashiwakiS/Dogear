@@ -185,6 +185,14 @@ nonisolated struct AIToolProviderCapabilities: Equatable, Sendable {
     var supportsStrictToolSchemas: Bool
     var supportsResponseContinuation: Bool
     var supportsStructuredFinalResult: Bool
+    var supportsImages: Bool = false
+}
+
+/// Explicit user attachments only. Image bytes never enter routine trace records.
+nonisolated struct AIToolInputImage: Equatable, Sendable {
+    let id: UUID
+    let mimeType: String
+    let data: Data
 }
 
 nonisolated struct AIToolWorkflowProviderRequest: Equatable, Sendable {
@@ -192,6 +200,8 @@ nonisolated struct AIToolWorkflowProviderRequest: Equatable, Sendable {
     let instructions: String
     let input: String
     let tools: [AIToolDefinition]
+    var images: [AIToolInputImage] = []
+    var requiresToolCall: Bool = false
 }
 
 nonisolated struct AIToolWorkflowContinuationRequest: Equatable, Sendable {
@@ -350,7 +360,9 @@ actor AIToolWorkflowRunner {
                     budget, usage: usage, finalizationOnly: finalizationOnly, terminalToolName: terminalToolName
                 ),
                 input: request.input,
-                tools: finalizationOnly ? request.tools.filter { $0.name == terminalToolName } : request.tools
+                tools: finalizationOnly ? request.tools.filter { $0.name == terminalToolName } : request.tools,
+                images: request.images,
+                requiresToolCall: request.requiresToolCall || terminalToolName != nil
             )
             var turn = try await providerTurn(
             index: turnIndex,

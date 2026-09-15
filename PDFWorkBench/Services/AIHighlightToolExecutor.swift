@@ -31,6 +31,8 @@ actor AIHighlightToolExecutor {
     let registry: AISegmentRegistry
     let intent: AIHighlightIntent
     let policy: AIHighlightIntentPolicy
+    let mainDocumentNumber: Int?
+    let images: [AIToolInputImage]
 
     private let searcher: any AISegmentSearching
     private let evidenceRetriever: (any AIEvidenceRetrieving)?
@@ -44,6 +46,7 @@ actor AIHighlightToolExecutor {
     var evidenceReviewAttempts = 0
     var reviewedEvidenceIDs: Set<String> = []
     var approvedTerminalRequest: AIPublishAnswerRequest?
+    var approvedTerminalCompletionStatus: AIAnswerCompletionStatus?
     private var cachedSearches: [(AISegmentSearchRequest, [AISegmentSearchResult])] = []
 
     init(
@@ -53,8 +56,12 @@ actor AIHighlightToolExecutor {
         searcher: any AISegmentSearching = AISimpleLexicalSearcher(),
         limits: AIHighlightToolLimits = AIHighlightToolLimits(),
         evidenceRetriever: (any AIEvidenceRetrieving)? = nil,
-        verifiesAnswerEvidence: Bool = false
+        verifiesAnswerEvidence: Bool = false,
+        mainDocumentNumber: Int? = 1,
+        images: [AIToolInputImage] = []
     ) {
+        self.images = images
+        self.mainDocumentNumber = mainDocumentNumber
         self.registry = registry
         self.intent = intent
         self.policy = policy ?? .make(for: intent)
@@ -153,7 +160,10 @@ actor AIHighlightToolExecutor {
     }
 
     private func stage(_ request: AIStageHighlightsRequest) -> AIStageHighlightsResult {
-        guard policy.allowsAnnotations || request.items.isEmpty else {
+        guard request.items.isEmpty || (policy.allowsAnnotations && mainDocumentNumber != nil
+            && request.items.allSatisfy { candidate in
+                candidate.segmentIDs.allSatisfy { $0.document == mainDocumentNumber }
+            }) else {
             return AIStageHighlightsResult(applied: false, revision: draftRevision,
                 items: [], error: .annotationsForbidden)
         }
@@ -335,6 +345,8 @@ actor AIHighlightToolExecutor {
         if verifiesAnswerEvidence && request.terminate && !validateOnly && approvedTerminalRequest != request {
             return publicationFailure(.evidenceReviewRequired)
         }
+        let completionStatus = verifiesAnswerEvidence && request.terminate && !validateOnly
+            ? (approvedTerminalCompletionStatus ?? request.completionStatus) : request.completionStatus
         guard let title = AIHighlightGroupTitle.normalized(request.title) else {
             return publicationFailure(.emptyTitle)
         }
@@ -359,8 +371,12 @@ actor AIHighlightToolExecutor {
         guard unreadEvidence.isEmpty else {
             return publicationFailure(.unreadEvidence, missingReadIDs: unreadEvidence)
         }
-        if request.completionStatus != .notFound,
-           request.evidenceSegmentIDs.isEmpty
+        guard request.evidenceImageIDs.count <= 4,
+              Set(request.evidenceImageIDs).isSubset(of: Set(images.map(\.id))) else {
+            return publicationFailure(.missingEvidence)
+        }
+        if completionStatus != .notFound,
+           request.evidenceSegmentIDs.isEmpty && request.evidenceImageIDs.isEmpty
         {
             return publicationFailure(.missingEvidence)
         }
@@ -370,12 +386,13 @@ actor AIHighlightToolExecutor {
         }
 
         let publication = AIPublishedAnswer(
-            completionStatus: request.completionStatus,
+            completionStatus: completionStatus,
             title: title,
             resultMarkdown: markdown,
             evidenceSegmentIDs: request.evidenceSegmentIDs,
             finalDraftRevision: request.finalDraftRevision,
-            terminate: request.terminate
+            terminate: request.terminate,
+            evidenceImageIDs: request.evidenceImageIDs
         )
         if !validateOnly { latestPublication = publication }
         return AIPublishAnswerResult(

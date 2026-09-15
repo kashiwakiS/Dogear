@@ -206,13 +206,16 @@ nonisolated struct AISegmentRecord: Equatable, Sendable {
 nonisolated struct AISegmentScope: Equatable, Sendable {
     let pageRange: ClosedRange<Int>?
     let blockIDs: Set<AISegmentID>
+    let documentNumbers: Set<Int>
 
-    init(pageRange: ClosedRange<Int>? = nil, blockIDs: Set<AISegmentID> = []) {
+    init(pageRange: ClosedRange<Int>? = nil, blockIDs: Set<AISegmentID> = [], documentNumbers: Set<Int> = []) {
+        self.documentNumbers = documentNumbers
         self.pageRange = pageRange
         self.blockIDs = blockIDs
     }
 
     func includes(_ id: AISegmentID) -> Bool {
+        if !documentNumbers.isEmpty, !documentNumbers.contains(id.document) { return false }
         if let pageRange, !pageRange.contains(id.page) {
             return false
         }
@@ -262,6 +265,7 @@ nonisolated struct AIDocumentMapBlock: Codable, Equatable, Sendable {
 nonisolated struct AIDocumentMapPage: Codable, Equatable, Sendable {
     let pageNumber: Int
     let blocks: [AIDocumentMapBlock]
+    var documentNumber: Int? = nil
 }
 
 nonisolated struct AIDocumentMap: Codable, Equatable, Sendable {
@@ -406,6 +410,7 @@ nonisolated struct AIPublishAnswerRequest: Equatable, Sendable {
     let evidenceSegmentIDs: [AISegmentID]
     let finalDraftRevision: Int
     let terminate: Bool
+    var evidenceImageIDs: [UUID] = []
 }
 
 nonisolated enum AIPublishAnswerErrorCode: String, Codable, Equatable, Sendable {
@@ -427,6 +432,7 @@ nonisolated struct AIPublishedAnswer: Codable, Equatable, Sendable {
     let evidenceSegmentIDs: [AISegmentID]
     let finalDraftRevision: Int
     let terminate: Bool
+    var evidenceImageIDs: [UUID] = []
 }
 
 nonisolated struct AIPublishAnswerResult: Codable, Equatable, Sendable {
@@ -436,4 +442,17 @@ nonisolated struct AIPublishAnswerResult: Codable, Equatable, Sendable {
     let missingReadIDs: [AISegmentID]
     let publication: AIPublishedAnswer?
     var reviewIssues: [String] = []
+}
+
+extension AIPublishedAnswer {
+    nonisolated init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        completionStatus = try values.decode(AIAnswerCompletionStatus.self, forKey: .completionStatus)
+        title = try values.decode(String.self, forKey: .title)
+        resultMarkdown = try values.decode(String.self, forKey: .resultMarkdown)
+        evidenceSegmentIDs = try values.decode([AISegmentID].self, forKey: .evidenceSegmentIDs)
+        finalDraftRevision = try values.decode(Int.self, forKey: .finalDraftRevision)
+        terminate = try values.decode(Bool.self, forKey: .terminate)
+        evidenceImageIDs = try values.decodeIfPresent([UUID].self, forKey: .evidenceImageIDs) ?? []
+    }
 }

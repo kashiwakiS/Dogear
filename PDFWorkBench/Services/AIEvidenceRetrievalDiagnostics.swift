@@ -105,6 +105,40 @@ nonisolated enum AIEvidenceRetrievalDiagnostics {
             let chunks = try AIEmbeddingChunk.make(registry: registry, tokenizer: tokenizer)
             check(chunks.flatMap(\.ids) == ids, "Chunking dropped or reordered sentence IDs")
             check(chunks.allSatisfy { Set($0.ids.map(\.page)).count == 1 }, "Chunk crosses a page")
+            for count in [510, 511, 1_020, 1_021] {
+                let text = String(repeating: "hello ", count: count - 1) + "world"
+                let longRegistry = try AISegmentRegistry(snapshot: AIHighlightTextSnapshot(fingerprint: "long-\(count)",
+                    pages: [AITextPageSnapshot(pageNumber: 7, text: text, fingerprint: "long-page-\(count)")]))
+                let split = try AIEmbeddingChunk.make(registry: longRegistry, tokenizer: tokenizer)
+                check(longRegistry.records.count == 1, "Oversized fixture did not remain one source sentence")
+                check(split.count == (count + 509) / 510 && split.allSatisfy { $0.tokens.count <= 510 },
+                      "Boundary \(count): oversized sentence exceeded model capacity or lost a subchunk")
+                check(split.flatMap(\.tokens) == tokenizer.tokens(text), "Boundary \(count): token splitting truncated, duplicated, or reordered text")
+                check(split.allSatisfy { $0.ids == [longRegistry.records[0].id] }
+                    && longRegistry.records[0].text == text && longRegistry.records[0].id.page == 7,
+                      "Boundary \(count): splitting changed canonical evidence text or page locator")
+                do {
+                    _ = try AIEmbeddingChunk.make(registry: longRegistry, tokenizer: tokenizer, maximumChunks: split.count - 1)
+                    check(false, "Boundary \(count): subchunks escaped the index budget")
+                } catch { check(error as? AIRetrievalError == .indexTooLarge, "Boundary \(count): wrong chunk-budget failure") }
+            }
+            // Over 100 matching subchunks of one sentence must leave room for another
+            // sentence in both the local RRF pool and cross-file cosine candidate pool.
+            let repeatedChunks = (0..<110).map { _ in AIEmbeddingChunk(ids: [ids[0]], tokens: [200]) }
+                + [AIEmbeddingChunk(ids: [ids[1]], tokens: [201])]
+            let repeatedRetriever = AIHybridEvidenceRetriever(registry: registry, embedder: FixtureQueryEmbedder(),
+                chunks: repeatedChunks, vectors: (0..<110).map { _ in [Float(1), 0] } + [[0.8, 0.6]])
+            let noLexicalMatch = AISegmentSearchRequest(query: "zxq-unmatched", topK: 2)
+            let uniqueDense = try await repeatedRetriever.denseCandidates(noLexicalMatch)
+            check(uniqueDense.map(\.id) == [ids[0], ids[1]], "Split sentence crowded other evidence out of dense top-K")
+            let uniqueHybrid = try await repeatedRetriever.search(noLexicalMatch)
+            check(uniqueHybrid.map(\.id) == [ids[0], ids[1]], "Split sentence crowded other evidence out of local fusion")
+            let negativeRetriever = AIHybridEvidenceRetriever(registry: registry, embedder: FixtureQueryEmbedder(),
+                chunks: [AIEmbeddingChunk(ids: [ids[0]], tokens: [200]), AIEmbeddingChunk(ids: [ids[0]], tokens: [201])],
+                vectors: [[-0.8, 0.6], [-0.6, 0.8]])
+            let negativeDense = try await negativeRetriever.denseCandidates(noLexicalMatch)
+            check(abs((negativeDense.first?.score ?? 0) + 0.6) < 0.00001,
+                  "Split segment score must preserve the best negative cosine rather than zero or a sum")
             let key = try AIEmbeddingIndexCache.key(registry: registry, packageID: "model-a", chunks: chunks)
             let other = try AIEmbeddingIndexCache.key(registry: registry, packageID: "model-b", chunks: chunks)
             check(key != other, "Different models shared an index key")
@@ -173,6 +207,9 @@ nonisolated enum AIEvidenceRetrievalDiagnostics {
         func search(_ request: AISegmentSearchRequest) async throws -> [AISegmentSearchResult] {
             [AISegmentSearchResult(id: id, score: 1)]
         }
+    }
+    private struct FixtureQueryEmbedder: AIQueryEmbedding {
+        func embedQuery(_ text: String) async throws -> [Float] { [1, 0] }
     }
     private struct Parity: Decodable {
         let text: String

@@ -7,6 +7,8 @@ nonisolated enum OpenAICompatibleToolProviderError: LocalizedError, Equatable {
     case serverContinuationUnsupported
     case malformedToolSchema(String)
     case malformedToolCall
+    case imagesUnsupported
+    case invalidImageInput
 
     var errorDescription: String? {
         switch self {
@@ -22,17 +24,16 @@ nonisolated enum OpenAICompatibleToolProviderError: LocalizedError, Equatable {
             return "Tool \(name) has an invalid JSON schema."
         case .malformedToolCall:
             return "The AI provider returned a malformed tool call."
+        case .imagesUnsupported:
+            return "Image support is not confirmed for this provider and model. Your attachments have been kept."
+        case .invalidImageInput:
+            return "Image attachments exceed the request limits or use an unsupported format."
         }
     }
 }
 
 actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
-    nonisolated let toolCapabilities = AIToolProviderCapabilities(
-        supportsFunctionTools: true,
-        supportsStrictToolSchemas: true,
-        supportsResponseContinuation: true,
-        supportsStructuredFinalResult: false
-    )
+    nonisolated let toolCapabilities: AIToolProviderCapabilities
 
     private let configuration: AIProviderConfiguration
     private let apiKey: String
@@ -52,6 +53,13 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
             throw AIProviderError.invalidBaseURL
         }
         self.configuration = configuration
+        self.toolCapabilities = AIToolProviderCapabilities(
+            supportsFunctionTools: true,
+            supportsStrictToolSchemas: true,
+            supportsResponseContinuation: true,
+            supportsStructuredFinalResult: false,
+            supportsImages: configuration.imageCapability == .supported
+        )
         self.apiKey = apiKey
         self.baseURL = url
         if let session {
@@ -73,16 +81,44 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
             throw AIProviderError.missingModel
         }
         let tools = try request.tools.map(makeTool)
+        guard request.images.isEmpty || toolCapabilities.supportsImages else {
+            throw OpenAICompatibleToolProviderError.imagesUnsupported
+        }
+        guard request.images.count <= 4,
+              Set(request.images.map(\.id)).count == request.images.count,
+              request.images.allSatisfy({
+                  ["image/png", "image/jpeg"].contains($0.mimeType)
+                    && !$0.data.isEmpty && $0.data.count <= 4 * 1_024 * 1_024
+              }),
+              request.images.reduce(0, { $0 + $1.data.count }) <= 12 * 1_024 * 1_024
+        else { throw OpenAICompatibleToolProviderError.invalidImageInput }
+        let content: AIJSONValue
+        if request.images.isEmpty {
+            // Preserve the established text-only wire contract.
+            content = .string(request.input)
+        } else {
+            var parts: [AIJSONValue] = [.object(["type": .string("input_text"), "text": .string(request.input)])]
+            for image in request.images {
+                parts.append(.object(["type": .string("input_text"), "text": .string("User image ID: \(image.id.uuidString)")]))
+                parts.append(.object([
+                    "type": .string("input_image"),
+                    "image_url": .string("data:\(image.mimeType);base64,\(image.data.base64EncodedString())"),
+                    "detail": .string("auto")
+                ]))
+            }
+            content = .array(parts)
+        }
         let initialInput: [AIJSONValue] = [
             .object([
                 "role": .string("user"),
-                "content": .string(request.input)
+                "content": content
             ])
         ]
         let context = WorkflowContext(
             generationID: UUID(),
             instructions: request.instructions,
             tools: tools,
+            requiresToolCall: request.requiresToolCall,
             latestResponseID: nil,
             responseStored: nil,
             continuationMode: .serverCursor,
@@ -234,6 +270,7 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
                 instructions: context.instructions + (instructionsSupplement.map { "\n" + $0 } ?? ""),
                 input: input,
                 tools: allowedToolNames.map { allowed in context.tools.filter { allowed.contains($0.name) } } ?? context.tools,
+                toolChoice: context.requiresToolCall ? "required" : nil,
                 previousResponseID: context.continuationMode.usesServerCursor ? context.latestResponseID : nil,
                 store: context.continuationMode.usesServerCursor
             )
@@ -327,6 +364,7 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
         let generationID: UUID
         let instructions: String
         let tools: [FunctionTool]
+        let requiresToolCall: Bool
         var latestResponseID: String?
         var responseStored: Bool?
         var continuationMode: ContinuationMode
@@ -348,11 +386,13 @@ actor OpenAICompatibleToolCallingProvider: AIToolCallingProvider {
         let instructions: String
         let input: [AIJSONValue]
         let tools: [FunctionTool]
+        let toolChoice: String?
         let previousResponseID: String?
         let store: Bool
 
         private enum CodingKeys: String, CodingKey {
             case model, instructions, input, tools, store
+            case toolChoice = "tool_choice"
             case previousResponseID = "previous_response_id"
         }
     }

@@ -1,6 +1,8 @@
 import Foundation
 
 nonisolated enum AISegmentRegistryError: LocalizedError, Equatable {
+    case duplicateSource(UUID)
+    case invalidMainDocument
     case emptyFingerprint
     case invalidPage(Int)
     case duplicatePage(Int)
@@ -9,6 +11,10 @@ nonisolated enum AISegmentRegistryError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
+        case .duplicateSource(let id):
+            return "The request contains duplicate source identity: \(id)."
+        case .invalidMainDocument:
+            return "The main document is outside the prepared source scope."
         case .emptyFingerprint:
             return "The text snapshot fingerprint is empty."
         case .invalidPage(let pageNumber):
@@ -23,12 +29,39 @@ nonisolated enum AISegmentRegistryError: LocalizedError, Equatable {
     }
 }
 
+/// Immutable source data captured before a request; document ordinals are request-local.
+nonisolated struct AIWorkflowSourceSnapshot: Equatable, Sendable {
+    let fileID: UUID
+    let displayName: String
+    let snapshot: AIHighlightTextSnapshot
+    let version: String
+
+    init(fileID: UUID, displayName: String, snapshot: AIHighlightTextSnapshot, version: String? = nil) {
+        self.fileID = fileID
+        self.displayName = displayName
+        self.snapshot = snapshot
+        self.version = version ?? snapshot.fingerprint
+    }
+}
+
+nonisolated struct AIWorkflowSourceDescriptor: Codable, Equatable, Sendable {
+    let documentNumber: Int
+    let fileID: UUID
+    let displayName: String
+    let version: String
+    let snapshotFingerprint: String
+    let pageCount: Int
+}
+
 nonisolated struct AISegmentRegistry: Sendable {
     let snapshotFingerprint: String
+    let sources: [AIWorkflowSourceDescriptor]
+    let indexIdentity: String
     let segmenterVersion: String
     let records: [AISegmentRecord]
 
     private let recordsByID: [AISegmentID: AISegmentRecord]
+    private let recordsByDocument: [Int: [AISegmentRecord]]
 
     init(
         snapshot: AIHighlightTextSnapshot,
@@ -63,10 +96,69 @@ nonisolated struct AISegmentRegistry: Sendable {
             recordsByID[record.id] = record
         }
 
+        sources = []
+        indexIdentity = snapshot.fingerprint
         snapshotFingerprint = snapshot.fingerprint
         segmenterVersion = segmenter.version
         self.records = records
+        self.recordsByDocument = Dictionary(grouping: records, by: { $0.id.document })
         self.recordsByID = recordsByID
+    }
+
+    init(sources: [AIWorkflowSourceSnapshot], segmenter: AISegmenter = AISegmenter(),
+         mainDocumentNumber: Int? = nil) throws {
+        if let mainDocumentNumber, mainDocumentNumber <= 0 || !sources.indices.contains(mainDocumentNumber - 1) {
+            throw AISegmentRegistryError.invalidMainDocument
+        }
+        var seen = Set<UUID>()
+        var descriptors: [AIWorkflowSourceDescriptor] = []
+        var combined: [AISegmentRecord] = []
+        for (offset, source) in sources.enumerated() {
+            try Task.checkCancellation()
+            guard seen.insert(source.fileID).inserted else {
+                throw AISegmentRegistryError.duplicateSource(source.fileID)
+            }
+            let number = offset + 1
+            let part = try AISegmentRegistry(snapshot: source.snapshot, segmenter: segmenter,
+                                            documentNumber: number)
+            combined += part.records
+            descriptors.append(AIWorkflowSourceDescriptor(documentNumber: number, fileID: source.fileID,
+                displayName: source.displayName, version: source.version,
+                snapshotFingerprint: source.snapshot.fingerprint, pageCount: source.snapshot.pages.count))
+        }
+        self.sources = descriptors
+        self.indexIdentity = descriptors.map { "\($0.fileID)|\($0.version)|\($0.snapshotFingerprint)" }.joined(separator: "|")
+        self.snapshotFingerprint = sources.isEmpty ? "empty-sources" : sources[(mainDocumentNumber ?? 1) - 1].snapshot.fingerprint
+        self.segmenterVersion = segmenter.version
+        self.records = combined
+        self.recordsByDocument = Dictionary(grouping: combined, by: { $0.id.document })
+        self.recordsByID = Dictionary(uniqueKeysWithValues: combined.map { ($0.id, $0) })
+    }
+
+    /// Reuse already segmented records when preparing per-file retrieval components.
+    func registry(forDocument number: Int, canonicalIDs: Bool = false) -> AISegmentRegistry {
+        let selected = recordsByDocument[number, default: []].map { record in
+            guard canonicalIDs else { return record }
+            return AISegmentRecord(id: AISegmentID(document: 1, page: record.id.page,
+                block: record.id.block, sentence: record.id.sentence), text: record.text,
+                normalizedText: record.normalizedText, sourceRange: record.sourceRange,
+                pageFingerprint: record.pageFingerprint, sourceKind: record.sourceKind,
+                sourceConfidence: record.sourceConfidence)
+        }
+        let source = sources.first { $0.documentNumber == number }
+        return AISegmentRegistry(snapshotFingerprint: source?.snapshotFingerprint ?? snapshotFingerprint,
+            segmenterVersion: segmenterVersion, records: selected,
+            indexIdentity: source.map { "\($0.fileID)|\($0.version)|\($0.snapshotFingerprint)" } ?? indexIdentity)
+    }
+
+    private init(snapshotFingerprint: String, segmenterVersion: String, records: [AISegmentRecord], indexIdentity: String) {
+        self.indexIdentity = indexIdentity
+        self.snapshotFingerprint = snapshotFingerprint
+        self.segmenterVersion = segmenterVersion
+        self.sources = []
+        self.records = records
+        self.recordsByDocument = Dictionary(grouping: records, by: { $0.id.document })
+        self.recordsByID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
     }
 
     func record(for id: AISegmentID) -> AISegmentRecord? {
@@ -116,25 +208,19 @@ nonisolated struct AISegmentRegistry: Sendable {
     }
 
     func documentMap(scope: AISegmentScope = AISegmentScope()) -> AIDocumentMap {
-        let groupedPages = Dictionary(grouping: records(in: scope), by: { $0.id.page })
-        let pages = groupedPages.keys.sorted().map { pageNumber in
-            let pageRecords = groupedPages[pageNumber, default: []]
-            let groupedBlocks = Dictionary(grouping: pageRecords, by: { $0.id.block })
-            let blocks = groupedBlocks.keys.sorted().map { blockNumber in
-                let blockRecords = groupedBlocks[blockNumber, default: []]
-                let first = blockRecords.min { $0.id < $1.id }!
-                return AIDocumentMapBlock(
-                    id: AISegmentID(
-                        document: first.id.document,
-                        page: first.id.page,
-                        block: blockNumber,
-                        sentence: 1
-                    ),
-                    sentenceCount: blockRecords.count,
-                    sourceKinds: Set(blockRecords.map(\.sourceKind))
-                )
+        let documents = Dictionary(grouping: records(in: scope), by: { $0.id.document })
+        let pages = documents.keys.sorted().flatMap { number -> [AIDocumentMapPage] in
+            let groupedPages = Dictionary(grouping: documents[number, default: []], by: { $0.id.page })
+            return groupedPages.keys.sorted().map { pageNumber in
+                let groupedBlocks = Dictionary(grouping: groupedPages[pageNumber, default: []], by: { $0.id.block })
+                let blocks = groupedBlocks.keys.sorted().map { blockNumber in
+                    let blockRecords = groupedBlocks[blockNumber, default: []]
+                    return AIDocumentMapBlock(id: AISegmentID(document: number, page: pageNumber,
+                        block: blockNumber, sentence: 1), sentenceCount: blockRecords.count,
+                        sourceKinds: Set(blockRecords.map(\.sourceKind)))
+                }
+                return AIDocumentMapPage(pageNumber: pageNumber, blocks: blocks, documentNumber: number)
             }
-            return AIDocumentMapPage(pageNumber: pageNumber, blocks: blocks)
         }
         return AIDocumentMap(
             snapshotFingerprint: snapshotFingerprint,
@@ -156,6 +242,12 @@ nonisolated struct AISimpleLexicalSearcher: AISegmentSearching {
         _ request: AISegmentSearchRequest,
         in registry: AISegmentRegistry
     ) -> [AISegmentSearchResult] {
+        let numbers = Set(registry.records(in: request.scope).map { $0.id.document }).sorted()
+        if numbers.count > 1 {
+            return AIMultiSourceEvidenceRetriever.balance(numbers.map { number in
+                search(request, in: registry.registry(forDocument: number))
+            }, limit: min(max(1, request.topK), 100))
+        }
         let normalizedQuery = AISegmenter.normalizeForSearch(request.query)
         let terms = normalizedQuery.split(separator: " ").map(String.init)
         if request.strategy == .overviewSalience, terms.isEmpty {

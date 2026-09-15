@@ -31,33 +31,37 @@ nonisolated struct AIHighlightToolCodec: Sendable {
         [
             definition(
                 name: AIHighlightToolName.documentMap,
-                description: "Return the document hierarchy without returning source text.",
+                description: "Return the hierarchy per document and page without source text. An empty document_numbers list searches all request sources.",
+                schemaVersion: "2",
                 schema: """
                 {
                   "type": "object",
                   "properties": {
+                    "document_numbers": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 100},
                     "page_start": {"type": "integer", "minimum": 1},
                     "page_end": {"type": "integer", "minimum": 1}
                   },
-                  "required": ["page_start", "page_end"],
+                  "required": ["document_numbers", "page_start", "page_end"],
                   "additionalProperties": false
                 }
                 """
             ),
             definition(
                 name: AIHighlightToolName.searchSegments,
-                description: "Search segment IDs. Results contain IDs and scores, never source text. Use overviewSalience with an empty query for a page-distributed overview.",
+                description: "Search segment IDs across the selected document_numbers (empty means all request sources). Results contain IDs and scores, never source text. Candidates are balanced across sources. Use overviewSalience with an empty query for an overview.",
+                schemaVersion: "2",
                 schema: """
                 {
                   "type": "object",
                   "properties": {
                     "query": {"type": "string"},
+                    "document_numbers": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 100},
                     "page_start": {"type": "integer", "minimum": 1},
                     "page_end": {"type": "integer", "minimum": 1},
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 100},
                     "strategy": {"type": "string", "enum": ["fullText", "overviewSalience", "questionRelevance"]}
                   },
-                  "required": ["query", "page_start", "page_end", "top_k", "strategy"],
+                  "required": ["query", "document_numbers", "page_start", "page_end", "top_k", "strategy"],
                   "additionalProperties": false
                 }
                 """
@@ -74,8 +78,7 @@ nonisolated struct AIHighlightToolCodec: Sendable {
                       "type": "array",
                       "items": {"type": "string", "pattern": "^D[0-9]{3,}\\\\.P[0-9]{3,}\\\\.B[0-9]{3,}\\\\.S[0-9]{3,}$"},
                       "minItems": 1,
-                      "maxItems": 24,
-                      "uniqueItems": true
+                      "maxItems": 24
                     },
                     "context_before": {"type": "integer", "minimum": 0, "maximum": 3},
                     "context_after": {"type": "integer", "minimum": 0, "maximum": 3}
@@ -125,7 +128,7 @@ nonisolated struct AIHighlightToolCodec: Sendable {
             definition(
                 name: AIHighlightToolName.publishAnswer,
                 description: "Publish evidence-grounded Markdown in Ask. Set terminate false for an interim update. Complete all searches, reads, and optional stage_highlights calls and inspect their results BEFORE finishing. The final provider turn must contain ONLY one publish_answer with terminate true. Mixed terminal batches are rejected before publication; accepted termination ends locally with no further provider request.",
-                schemaVersion: "2",
+                schemaVersion: "3",
                 schema: """
                 {
                   "type": "object",
@@ -133,16 +136,16 @@ nonisolated struct AIHighlightToolCodec: Sendable {
                     "completion_status": {"type": "string", "enum": ["answered", "partial", "notFound"]},
                     "title": {"type": "string", "minLength": 1, "maxLength": 60},
                     "result_markdown": {"type": "string", "minLength": 1},
+                    "evidence_image_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "maxItems": 4},
                     "evidence_segment_ids": {
                       "type": "array",
                       "items": {"type": "string"},
-                      "maxItems": 48,
-                      "uniqueItems": true
+                      "maxItems": 48
                     },
                     "final_draft_revision": {"type": "integer", "minimum": 0},
                     "terminate": {"type": "boolean"}
                   },
-                  "required": ["completion_status", "title", "result_markdown", "evidence_segment_ids", "final_draft_revision", "terminate"],
+                  "required": ["completion_status", "title", "result_markdown", "evidence_segment_ids", "evidence_image_ids", "final_draft_revision", "terminate"],
                   "additionalProperties": false
                 }
                 """
@@ -212,7 +215,8 @@ nonisolated struct AIHighlightToolCodec: Sendable {
                     resultMarkdown: value.resultMarkdown,
                     evidenceSegmentIDs: try value.evidenceSegmentIDs.map(parseSegmentID),
                     finalDraftRevision: value.finalDraftRevision,
-                    terminate: value.terminate
+                    terminate: value.terminate,
+                    evidenceImageIDs: value.evidenceImageIDs ?? []
                 )
             )
         default:
@@ -244,7 +248,8 @@ nonisolated struct AIHighlightToolCodec: Sendable {
                     resultMarkdown: publication.resultMarkdown,
                     evidenceSegmentIDs: try publication.evidenceSegmentIDs.map(parseSegmentID),
                     finalDraftRevision: publication.finalDraftRevision,
-                    terminate: publication.terminate
+                    terminate: publication.terminate,
+                    evidenceImageIDs: publication.evidenceImageIDs ?? []
                 )
             },
             reviewIssues: value.reviewIssues ?? []
@@ -260,7 +265,10 @@ nonisolated struct AIHighlightToolCodec: Sendable {
         guard value.pageStart > 0, value.pageEnd >= value.pageStart else {
             throw AIHighlightToolCodecError.invalidPageRange
         }
-        return AISegmentScope(pageRange: value.pageStart...value.pageEnd)
+        guard (value.documentNumbers ?? []).allSatisfy({ $0 > 0 }), (value.documentNumbers ?? []).count <= 100 else {
+            throw AIHighlightToolCodecError.invalidPageRange
+        }
+        return AISegmentScope(pageRange: value.pageStart...value.pageEnd, documentNumbers: Set(value.documentNumbers ?? []))
     }
 
     private func parseSegmentID(_ value: String) throws -> AISegmentID {
@@ -289,16 +297,19 @@ nonisolated struct AIHighlightToolCodec: Sendable {
     }
 
     private struct PageRangeArguments: Decodable {
+        var documentNumbers: [Int]? = nil
         let pageStart: Int
         let pageEnd: Int
 
         enum CodingKeys: String, CodingKey {
+            case documentNumbers = "document_numbers"
             case pageStart = "page_start"
             case pageEnd = "page_end"
         }
     }
 
     private struct SearchArguments: Decodable {
+        var documentNumbers: [Int]? = nil
         let query: String
         let pageStart: Int
         let pageEnd: Int
@@ -307,13 +318,14 @@ nonisolated struct AIHighlightToolCodec: Sendable {
 
         enum CodingKeys: String, CodingKey {
             case query, strategy
+            case documentNumbers = "document_numbers"
             case pageStart = "page_start"
             case pageEnd = "page_end"
             case topK = "top_k"
         }
 
         var pageRange: PageRangeArguments {
-            PageRangeArguments(pageStart: pageStart, pageEnd: pageEnd)
+            PageRangeArguments(documentNumbers: documentNumbers, pageStart: pageStart, pageEnd: pageEnd)
         }
     }
 
@@ -417,6 +429,7 @@ nonisolated struct AIHighlightToolCodec: Sendable {
         let title: String
         let resultMarkdown: String
         let evidenceSegmentIDs: [String]
+        var evidenceImageIDs: [UUID]? = nil
         let finalDraftRevision: Int
         let terminate: Bool
 
@@ -425,6 +438,7 @@ nonisolated struct AIHighlightToolCodec: Sendable {
             title = value.title
             resultMarkdown = value.resultMarkdown
             evidenceSegmentIDs = value.evidenceSegmentIDs.map(\.description)
+            evidenceImageIDs = value.evidenceImageIDs
             finalDraftRevision = value.finalDraftRevision
             terminate = value.terminate
         }
@@ -434,6 +448,7 @@ nonisolated struct AIHighlightToolCodec: Sendable {
             case completionStatus = "completion_status"
             case resultMarkdown = "result_markdown"
             case evidenceSegmentIDs = "evidence_segment_ids"
+            case evidenceImageIDs = "evidence_image_ids"
             case finalDraftRevision = "final_draft_revision"
         }
     }

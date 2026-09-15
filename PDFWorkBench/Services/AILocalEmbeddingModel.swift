@@ -133,7 +133,7 @@ actor AILocalEmbeddingModels {
     }
 }
 
-actor AICoreMLEmbedder {
+actor AICoreMLEmbedder: AITextEmbedding {
     let manifest: AIEmbeddingManifest
     let tokenizer: AIBertWordPieceTokenizer
     private let model: MLModel
@@ -180,7 +180,7 @@ nonisolated struct AIEmbeddingIndexCache: Codable, Sendable {
     static func key(registry: AISegmentRegistry, packageID: String, chunks: [AIEmbeddingChunk]) throws -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         let chunkHash = AIRetrievalHash.data(try encoder.encode(chunks))
-        return AIRetrievalHash.data(Data("index-v1|whole-adjacent-3-254|\(registry.snapshotFingerprint)|\(registry.segmenterVersion)|\(packageID)|\(chunkHash)".utf8))
+        return AIRetrievalHash.data(Data("index-v3|adjacent-3-254-lossless-split-510|\(registry.indexIdentity)|\(registry.segmenterVersion)|\(packageID)|\(chunkHash)".utf8))
     }
 
     func isValid(key expected: String, chunks: [AIEmbeddingChunk], dimensions: Int) -> Bool {
@@ -193,21 +193,98 @@ nonisolated struct AIEmbeddingIndexCache: Codable, Sendable {
 }
 
 nonisolated enum AIEvidenceRetrievalFactory {
+    static func makeSources(
+        selection: AIRetrievalSelection,
+        registry: AISegmentRegistry,
+        progress: (@Sendable (Int, Int) async -> Void)? = nil,
+        indexed: (@Sendable (Int, Bool, Double) async -> Void)? = nil,
+        sharedEmbedder: (any AITextEmbedding)? = nil,
+        cacheRoot: URL? = nil,
+        maximumRequestChunks: Int = 20_000
+    ) async throws -> AIMultiSourceRetrievalPreparation {
+        if registry.records.isEmpty {
+            return AIMultiSourceRetrievalPreparation(retriever: AILexicalEvidenceRetriever(registry: registry),
+                coverage: AIMultiSourceCoverage(requestedCount: registry.sources.count, preparedFileIDs: [],
+                    skipped: registry.sources.map { .init(documentNumber: $0.documentNumber, fileID: $0.fileID,
+                        reason: "No extractable text; no OCR was performed.") }, usedFileIDs: []))
+        }
+        guard !registry.sources.isEmpty else {
+            let retriever = try await make(selection: selection, registry: registry, progress: progress, indexed: indexed,
+                cacheRoot: cacheRoot, sharedEmbedder: sharedEmbedder, maximumChunks: maximumRequestChunks)
+            return AIMultiSourceRetrievalPreparation(retriever: retriever, coverage: AIMultiSourceCoverage())
+        }
+        let started = ContinuousClock.now
+        var children: [AIMultiSourceEvidenceRetriever.Source] = []
+        var prepared: [UUID] = []
+        var skipped: [AIMultiSourceCoverage.Skipped] = []
+        var remainingChunks = min(20_000, max(0, maximumRequestChunks))
+        let embedder: (any AITextEmbedding)?
+        let queryEmbedder: (any AIQueryEmbedding)?
+        if selection.mode == .scheme2EvidenceRAG {
+            guard let package = selection.packageID else { throw AIRetrievalError.modelMissing }
+            let loaded: any AITextEmbedding
+            if let sharedEmbedder { loaded = sharedEmbedder }
+            else { loaded = try await AIEmbeddingModelPool.shared.model(
+                packageURL: AILocalEmbeddingModels.packageURL(package), packageID: package) }
+            embedder = loaded
+            queryEmbedder = AICachedQueryEmbedder(base: loaded)
+        } else { embedder = nil; queryEmbedder = nil }
+        for source in registry.sources {
+            try Task.checkCancellation()
+            let local = registry.registry(forDocument: source.documentNumber, canonicalIDs: true)
+            if local.records.isEmpty {
+                skipped.append(.init(documentNumber: source.documentNumber, fileID: source.fileID,
+                    reason: "No extractable text; no OCR was performed."))
+                continue
+            }
+            if started.duration(to: .now) >= .seconds(180) {
+                skipped.append(.init(documentNumber: source.documentNumber, fileID: source.fileID,
+                    reason: "Source preparation time budget exhausted."))
+                continue
+            }
+            do {
+                let child = try await make(selection: selection, registry: local,
+                    progress: progress, indexed: indexed, cacheRoot: cacheRoot,
+                    sharedEmbedder: embedder, queryEmbedder: queryEmbedder,
+                    preparationDeadline: started.advanced(by: .seconds(180)), maximumChunks: remainingChunks)
+                if let hybrid = child as? AIHybridEvidenceRetriever { remainingChunks -= hybrid.indexedChunkCount }
+                children.append(.init(documentNumber: source.documentNumber, retriever: child))
+                prepared.append(source.fileID)
+            } catch is CancellationError { throw CancellationError() }
+            catch let error as AIRetrievalError where error == .inputTooLong || error == .indexTooLarge || error == .preparationTimedOut {
+                skipped.append(.init(documentNumber: source.documentNumber, fileID: source.fileID,
+                    reason: error.localizedDescription))
+            }
+        }
+        return AIMultiSourceRetrievalPreparation(retriever: AIMultiSourceEvidenceRetriever(sources: children, registry: registry),
+            coverage: AIMultiSourceCoverage(requestedCount: registry.sources.count,
+                preparedFileIDs: prepared, skipped: skipped, usedFileIDs: []))
+    }
+
     static func make(
         selection: AIRetrievalSelection,
         registry: AISegmentRegistry,
         progress: (@Sendable (Int, Int) async -> Void)? = nil,
         indexed: (@Sendable (Int, Bool, Double) async -> Void)? = nil,
         packageURL: URL? = nil,
-        cacheRoot: URL? = nil
+        cacheRoot: URL? = nil,
+        sharedEmbedder: (any AITextEmbedding)? = nil,
+        queryEmbedder: (any AIQueryEmbedding)? = nil,
+        preparationDeadline: ContinuousClock.Instant? = nil,
+        maximumChunks: Int = 20_000
     ) async throws -> any AIEvidenceRetrieving {
         guard selection.mode == .scheme2EvidenceRAG else { return AILexicalEvidenceRetriever(registry: registry) }
         let started = Date()
         guard let packageID = selection.packageID else { throw AIRetrievalError.modelMissing }
         await progress?(0, 0)
         try Task.checkCancellation()
-        let embedder = try AICoreMLEmbedder(packageURL: packageURL ?? AILocalEmbeddingModels.packageURL(packageID), packageID: packageID)
-        let chunks = try AIEmbeddingChunk.make(registry: registry, tokenizer: embedder.tokenizer)
+        let embedder: any AITextEmbedding
+        if let sharedEmbedder { embedder = sharedEmbedder }
+        else { embedder = try await AIEmbeddingModelPool.shared.model(
+            packageURL: packageURL ?? AILocalEmbeddingModels.packageURL(packageID), packageID: packageID) }
+        let chunks = try AIEmbeddingChunk.make(registry: registry, tokenizer: embedder.tokenizer,
+            maximumChunks: maximumChunks)
+        if let preparationDeadline, ContinuousClock.now >= preparationDeadline { throw AIRetrievalError.preparationTimedOut }
         let key = try AIEmbeddingIndexCache.key(registry: registry, packageID: packageID, chunks: chunks)
         let root = cacheRoot ?? AILocalEmbeddingModels.root.appendingPathComponent("Indexes", isDirectory: true)
         let url = root.appendingPathComponent("\(key).json")
@@ -226,7 +303,9 @@ nonisolated enum AIEvidenceRetrievalFactory {
             await progress?(0, chunks.count)
             for (index, chunk) in chunks.enumerated() {
                 try Task.checkCancellation()
+                if let preparationDeadline, ContinuousClock.now >= preparationDeadline { throw AIRetrievalError.preparationTimedOut }
                 vectors.append(try await embedder.embed(tokens: chunk.tokens))
+                if let preparationDeadline, ContinuousClock.now >= preparationDeadline { throw AIRetrievalError.preparationTimedOut }
                 await progress?(index + 1, chunks.count)
             }
             try Task.checkCancellation()
@@ -249,7 +328,24 @@ nonisolated enum AIEvidenceRetrievalFactory {
                 try manager.moveItem(at: temp, to: url)
             }
         }
+        try Task.checkCancellation()
+        if let preparationDeadline, ContinuousClock.now >= preparationDeadline { throw AIRetrievalError.preparationTimedOut }
         await indexed?(chunks.count, cacheHit, Date().timeIntervalSince(started))
-        return AIHybridEvidenceRetriever(registry: registry, embedder: embedder, chunks: chunks, vectors: vectors)
+        return AIHybridEvidenceRetriever(registry: registry, embedder: queryEmbedder ?? AICachedQueryEmbedder(base: embedder), chunks: chunks, vectors: vectors)
+    }
+}
+
+/// Retain at most one loaded, hash-validated model; immutable request actors keep
+/// their reference when a user switches the configured package.
+actor AIEmbeddingModelPool {
+    static let shared = AIEmbeddingModelPool()
+    private var retained: (key: String, model: AICoreMLEmbedder)?
+    func model(packageURL: URL, packageID: String) throws -> AICoreMLEmbedder {
+        try Task.checkCancellation()
+        let key = packageURL.standardizedFileURL.path + "|" + packageID
+        if let retained, retained.key == key { return retained.model }
+        let model = try AICoreMLEmbedder(packageURL: packageURL, packageID: packageID)
+        retained = (key, model)
+        return model
     }
 }

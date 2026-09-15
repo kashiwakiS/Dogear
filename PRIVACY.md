@@ -13,7 +13,9 @@ separately confirms an atomic Save to Original action.
 
 AI Highlights are standard PDF annotations stored in the app-managed working
 copy. Their request titles, group visibility, and diagnostic records are local
-application data. Routine diagnostics redact document passages and questions;
+application data. Research sessions, accepted questions and answers, drafts,
+saved evidence, notes, note revisions and image attachments are also persisted
+locally. Closing a PDF does not delete that research. Routine diagnostics redact document passages and questions;
 detailed local capture is available only when explicitly enabled in a Debug
 build.
 
@@ -26,17 +28,20 @@ and numeric vectors, not AI answers or conversation history.
 Cloud AI is disabled by default. After a provider is configured and enabled:
 
 - Test Connection contacts the configured endpoint without PDF content.
-- Ask sends the question, any displayed selected text, and only the native-text
-  passages returned by targeted read tools. The PDF file is not attached.
-- Each Send starts an independent question. With a compatible stateful
-  endpoint, Dogear requests provider-side response storage and uses the
-  returned response cursor only while that question runs. With a stateless
-  compatible endpoint, it requests no provider-side response storage and keeps
-  and resends only the current question's context in memory until the request
-  completes, fails, or is canceled.
-- Dogear does not save AI answers or conversation history to disk or reuse them
-  for later questions. Applied AI Highlights and their group metadata persist
-  locally as PDF annotations and application metadata.
+- Research sends the current question, selected text, bounded discussion
+  background from up to six accepted rounds / 12,000 characters, and native-text
+  passages retrieved from the sources you choose. Entire PDF files are not
+  attached.
+- Images are sent only when explicitly added to the draft through import,
+  paste, drop or PDF-region capture, and require confirmed image capability
+  for the selected provider/model. This includes images used for evidence review.
+- Research history is saved locally and selected earlier rounds can be reused
+  as discussion background in later questions. Provider response cursors stay
+  local to each running request and are not saved in research history.
+- With a compatible stateful endpoint, Dogear requests provider-side response
+  storage while a request runs. With a stateless compatible endpoint, it
+  requests no provider-side response storage and resends the current request's
+  context as needed until completion, failure or cancellation.
 - Provider-side storage and retention follow the selected provider's policy.
 
 The optional experimental BGE Small EN model is imported explicitly and runs

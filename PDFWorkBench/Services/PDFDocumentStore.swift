@@ -80,6 +80,58 @@ final class PDFDocumentStore: ObservableObject {
     private var currentLibraryFileID: UUID?
     private var isSynchronizingAIMasterVisibility = false
     private var highlightRequestID = 0
+    private let accessCoordinator: DocumentAccessCoordinator
+    private var editorActivationHandler: (() -> Void)?
+    @Published private(set) var workingCopySaveError: String?
+
+    var canEditDocument: Bool {
+        guard let selectedPDFURL else { return document != nil }
+        return accessCoordinator.owns(self, url: selectedPDFURL)
+    }
+
+    func setEditorActivationHandler(_ handler: @escaping () -> Void) {
+        editorActivationHandler = handler
+    }
+
+    func activateEditor() { editorActivationHandler?() }
+
+    func releaseEditorAccess() {
+        guard let selectedPDFURL else { return }
+        accessCoordinator.release(self, url: selectedPDFURL)
+        openedDocumentID = UUID()
+    }
+
+    func captureWritePermit(requestID: UUID) -> PDFDocumentWritePermit? {
+        guard canEditDocument, let document, let selectedPDFURL else { return nil }
+        return PDFDocumentWritePermit(
+            requestID: requestID, fileID: currentLibraryFileID,
+            originalPath: selectedPDFURL.libraryComparablePath,
+            editSessionID: openedDocumentID,
+            contentVersion: accessCoordinator.sourceVersion(for: selectedPDFURL, document: document, workingCopyURL: currentWorkingCopyURL)
+        )
+    }
+
+    func validateWritePermit(_ permit: PDFDocumentWritePermit) throws {
+        guard canEditDocument, let document,
+              permit.originalPath == selectedPDFURL?.libraryComparablePath,
+              permit.editSessionID == openedDocumentID,
+              permit.fileID == currentLibraryFileID else { throw DocumentAccessError.editorUnavailable }
+        guard let selectedPDFURL,
+              permit.contentVersion == accessCoordinator.sourceVersion(for: selectedPDFURL, document: document, workingCopyURL: currentWorkingCopyURL) else {
+            throw DocumentAccessError.sourceChanged
+        }
+    }
+
+    func synchronizeSaveState(from entry: DocumentAccessCoordinator.Entry) {
+        guard selectedPDFURL?.libraryComparablePath == entry.originalURL.libraryComparablePath else { return }
+        hasUnsavedChanges = entry.dirty
+        workingCopySaveError = entry.saveError
+    }
+
+    func retryWorkingCopySave() {
+        guard hasUnsavedChanges, canEditDocument else { return }
+        enqueueCurrentDocumentSave()
+    }
 
     init(
         feedbackCenter: OperationFeedbackCenter,
@@ -88,7 +140,8 @@ final class PDFDocumentStore: ObservableObject {
         metadataStore: DocumentMetadataStore? = nil,
         aiHighlightGroupStore: AIHighlightGroupStore? = nil,
         workingCopyStore: PDFWorkingCopyStore? = nil,
-        saveQueue: PDFSaveQueue? = nil
+        saveQueue: PDFSaveQueue? = nil,
+        accessCoordinator: DocumentAccessCoordinator? = nil
     ) {
         self.feedbackCenter = feedbackCenter
         self.outlineProvider = outlineProvider ?? FallbackKeywordOutlineProvider()
@@ -97,6 +150,7 @@ final class PDFDocumentStore: ObservableObject {
         self.aiHighlightGroupStore = aiHighlightGroupStore ?? .shared
         self.workingCopyStore = workingCopyStore ?? (try? PDFWorkingCopyStore())
         self.saveQueue = saveQueue ?? .shared
+        self.accessCoordinator = accessCoordinator ?? .shared
     }
 
     var selectedDocumentName: String {
@@ -152,7 +206,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     var canAddHighlightToCurrentSelection: Bool {
-        document != nil && currentTextSelection?.isEmpty == false
+        canEditDocument && document != nil && currentTextSelection?.isEmpty == false
     }
 
     var annotationGroupScopeDescription: String {
@@ -267,7 +321,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     var canDeleteCurrentPage: Bool {
-        guard let document else {
+        guard canEditDocument, let document else {
             return false
         }
 
@@ -292,14 +346,16 @@ final class PDFDocumentStore: ObservableObject {
         undoManager?.removeAllActions()
     }
 
-    var canUndoDocumentChange: Bool { undoManager?.canUndo == true }
-    var canRedoDocumentChange: Bool { undoManager?.canRedo == true }
+    var canUndoDocumentChange: Bool { canEditDocument && undoManager?.canUndo == true }
+    var canRedoDocumentChange: Bool { canEditDocument && undoManager?.canRedo == true }
 
     func undoDocumentChange() {
+        guard canEditDocument else { return }
         undoManager?.undo()
     }
 
     func redoDocumentChange() {
+        guard canEditDocument else { return }
         undoManager?.redo()
     }
 
@@ -314,40 +370,65 @@ final class PDFDocumentStore: ObservableObject {
             return false
         }
 
-        closeSecurityScopedAccess()
+        if accessCoordinator.activateExistingEditor(for: url, excluding: self) {
+            postFeedback("This PDF is already open. Switched to its editing window.", action: "Open PDF", trigger: trigger)
+            return false
+        }
+        // Reopening the active source must not replace its latest state with disk.
+        if selectedPDFURL?.libraryComparablePath == url.libraryComparablePath, canEditDocument {
+            activateEditor()
+            return true
+        }
 
+        let retained = accessCoordinator.retainedEntry(for: url)
+        let recoveryWorkingCopyURL = existingWorkingCopyURL ?? workingCopyStore?.workingCopyURL(forOriginalURL: url)
+        let recoveryData = recoveryWorkingCopyURL.flatMap { saveQueue.pendingData(for: $0) }
+        let recoveredDocument = recoveryData.flatMap { PDFDocument(data: $0) }
+        if let existingWorkingCopyURL, !FileManager.default.fileExists(atPath: existingWorkingCopyURL.path),
+           retained == nil, recoveredDocument == nil {
+            postFeedback(DocumentAccessError.workingCopyMissing.localizedDescription, kind: .error, action: "Open PDF", trigger: trigger)
+            return false
+        }
         let documentURL: URL
         let workingCopyURL: URL?
 
-        if let existingWorkingCopyURL,
-           FileManager.default.fileExists(atPath: existingWorkingCopyURL.path) {
-            documentURL = existingWorkingCopyURL
-            workingCopyURL = existingWorkingCopyURL
+        if let recoveryWorkingCopyURL,
+           FileManager.default.fileExists(atPath: recoveryWorkingCopyURL.path) {
+            documentURL = recoveryWorkingCopyURL
+            workingCopyURL = recoveryWorkingCopyURL
         } else {
-            _ = url.startAccessingSecurityScopedResource()
-            accessedSecurityScopedURL = url
             documentURL = url
             workingCopyURL = nil
         }
 
-        guard let document = PDFDocument(url: documentURL) else {
+        let didStartAccessing = documentURL.startAccessingSecurityScopedResource()
+        guard let document = retained?.document ?? recoveredDocument ?? PDFDocument(url: documentURL) else {
             postFeedback(
                 "Could not open this PDF.",
                 kind: .error,
                 action: "Open PDF",
                 trigger: trigger
             )
-            closeSecurityScopedAccess()
+            if didStartAccessing { documentURL.stopAccessingSecurityScopedResource() }
             return false
         }
 
+        releaseEditorAccess()
+        closeSecurityScopedAccess()
+        if didStartAccessing { accessedSecurityScopedURL = documentURL }
         selectedPDFURL = url
-        currentWorkingCopyURL = workingCopyURL
+        currentWorkingCopyURL = retained?.workingCopyURL ?? (recoveredDocument == nil ? workingCopyURL : recoveryWorkingCopyURL)
         self.document = document
         undoManager?.removeAllActions()
         openedDocumentID = UUID()
         saveGeneration = 0
-        hasUnsavedChanges = false
+        hasUnsavedChanges = retained?.dirty ?? (recoveredDocument != nil)
+        workingCopySaveError = retained?.saveError ?? recoveryWorkingCopyURL.flatMap { saveQueue.failureDescription(for: $0) }
+        accessCoordinator.register(self, url: url, document: document, workingCopyURL: currentWorkingCopyURL)
+        if recoveredDocument != nil && retained == nil {
+            _ = accessCoordinator.noteMutation(for: url, document: document, workingCopyURL: currentWorkingCopyURL)
+            accessCoordinator.notePreparedData(for: url)
+        }
         currentPageIndex = min(max(0, initialPageIndex), max(0, document.pageCount - 1))
         selectedAnnotationID = nil
         selectedDocumentSearchResultID = nil
@@ -374,6 +455,12 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     func bindLibraryFile(_ fileID: UUID) {
+        if let selectedPDFURL, !accessCoordinator.bind(fileID: fileID, to: self, url: selectedPDFURL) {
+            releaseEditorAccess()
+            document = nil
+            postFeedback("This Library file already has an editing session. Switched to its window.", kind: .warning, action: "Open PDF")
+            return
+        }
         currentLibraryFileID = fileID
         refreshDogears()
         refreshAIHighlightGroups()
@@ -495,8 +582,11 @@ final class PDFDocumentStore: ObservableObject {
         stagedHighlights: [StagedAIHighlight],
         anchors: [ResolvedAIHighlightAnchor],
         group: AIHighlightGroup? = nil,
-        trigger: FeedbackTrigger? = nil
+        trigger: FeedbackTrigger? = nil,
+        writePermit: PDFDocumentWritePermit? = nil
     ) throws -> Int {
+        if let writePermit { try validateWritePermit(writePermit) }
+        guard canEditDocument else { throw DocumentAccessError.editorUnavailable }
         guard let document else { return 0 }
         let anchorsByCandidateID = Dictionary(
             anchors.map { ($0.candidateID, $0) },
@@ -666,7 +756,7 @@ final class PDFDocumentStore: ObservableObject {
         _ item: PDFAnnotationItem,
         trigger: FeedbackTrigger? = nil
     ) {
-        guard let document,
+        guard canEditDocument, let document,
               let annotation = AnnotationExtractor.annotation(matching: item, in: document),
               let page = annotation.page
         else {
@@ -749,7 +839,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     func requestFreeTextNote(trigger: FeedbackTrigger? = nil) {
-        guard document != nil else {
+        guard canEditDocument, document != nil else {
             return
         }
 
@@ -798,7 +888,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     func deleteCurrentPageFromWorkingCopy(trigger: FeedbackTrigger? = nil) {
-        guard let document else {
+        guard canEditDocument, let document else {
             return
         }
 
@@ -938,7 +1028,7 @@ final class PDFDocumentStore: ObservableObject {
         at indexes: IndexSet,
         trigger: FeedbackTrigger? = nil
     ) -> Bool {
-        guard let document, !indexes.isEmpty else { return false }
+        guard canEditDocument, let document, !indexes.isEmpty else { return false }
         guard document.pageCount - indexes.count >= 1 else {
             postFeedback(
                 "A PDF must keep at least one page.",
@@ -1000,10 +1090,14 @@ final class PDFDocumentStore: ObservableObject {
             return false
         }
 
-        if let currentWorkingCopyURL,
-           FileManager.default.fileExists(atPath: currentWorkingCopyURL.path) {
+        guard canEditDocument else { return false }
+        saveQueue.waitUntilDrained()
+        if let currentWorkingCopyURL {
             do {
-                try FileManager.default.removeItem(at: currentWorkingCopyURL)
+                if FileManager.default.fileExists(atPath: currentWorkingCopyURL.path) {
+                    try FileManager.default.removeItem(at: currentWorkingCopyURL)
+                }
+                try saveQueue.discardPendingData(for: currentWorkingCopyURL)
             } catch {
                 postFeedback(
                     "Could not delete the working copy. Original PDF was not changed.",
@@ -1014,6 +1108,7 @@ final class PDFDocumentStore: ObservableObject {
             }
         }
 
+        accessCoordinator.discardRetainedState(for: selectedPDFURL, owner: self)
         return openPDF(
             from: selectedPDFURL,
             workingCopyURL: nil,
@@ -1269,7 +1364,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     private func overwriteOriginalPDF(trigger: FeedbackTrigger?) {
-        guard let document,
+        guard canEditDocument, let document,
               let selectedPDFURL
         else {
             return
@@ -1342,8 +1437,9 @@ final class PDFDocumentStore: ObservableObject {
             switch result {
             case .success:
                 if self.saveGeneration == generation {
-                    self.currentWorkingCopyURL = nil
-                    self.hasUnsavedChanges = false
+                    // Keep the synchronized working-copy association. Pending
+                    // callbacks and other readers must not fall back to old disk state.
+                    self.hasUnsavedChanges = self.accessCoordinator.retainedEntry(for: selectedPDFURL)?.dirty ?? false
                     self.postFeedback(
                         "Original PDF overwritten: \(selectedPDFURL.lastPathComponent).",
                         kind: .success,
@@ -1760,7 +1856,7 @@ final class PDFDocumentStore: ObservableObject {
         trigger: FeedbackTrigger? = nil,
         mutation: () -> Void
     ) {
-        guard let document, let before = pageArrangementSnapshot() else { return }
+        guard canEditDocument, let document, let before = pageArrangementSnapshot() else { return }
         let previousPages = before.pages.map(\.page)
         mutation()
         let currentPages = (0..<document.pageCount).compactMap { document.page(at: $0) }
@@ -1923,66 +2019,37 @@ final class PDFDocumentStore: ObservableObject {
         action: String = "Save Working Copy",
         trigger: FeedbackTrigger? = nil
     ) {
-        guard let document,
-              let selectedPDFURL
-        else {
-            return
-        }
-
-        guard let data = document.dataRepresentationWithAIAnnotationsDisplayed() else {
-            postFeedback(
-                "Could not prepare working copy data.",
-                kind: .error,
-                action: action,
-                trigger: trigger
-            )
-            return
-        }
-
-        guard let workingCopyURL = currentWorkingCopyURL ?? workingCopyStore?.workingCopyURL(forOriginalURL: selectedPDFURL) else {
-            postFeedback(
-                "Could not locate the app-managed working copy directory.",
-                kind: .error,
-                action: action,
-                trigger: trigger
-            )
-            return
-        }
-
-        currentWorkingCopyURL = workingCopyURL
-
+        guard canEditDocument, let document, let selectedPDFURL else { return }
+        let workingCopyURL = currentWorkingCopyURL ?? workingCopyStore?.workingCopyURL(forOriginalURL: selectedPDFURL)
+        hasUnsavedChanges = true
+        let coordinatedGeneration = accessCoordinator.noteMutation(
+            for: selectedPDFURL, document: document, workingCopyURL: workingCopyURL
+        )
         saveGeneration += 1
         let generation = saveGeneration
         let documentID = openedDocumentID
-        hasUnsavedChanges = true
-
+        guard let workingCopyURL, let data = document.dataRepresentationWithAIAnnotationsDisplayed() else {
+            let error = DocumentAccessError.snapshotUnavailable
+            accessCoordinator.finishSave(for: selectedPDFURL, generation: coordinatedGeneration, result: .failure(error))
+            workingCopySaveError = error.localizedDescription
+            postFeedback("Could not prepare working copy data. Edits remain in memory; retry saving.", kind: .error, action: action, trigger: trigger)
+            return
+        }
+        currentWorkingCopyURL = workingCopyURL
+        workingCopySaveError = nil
+        accessCoordinator.notePreparedData(for: selectedPDFURL)
+        let coordinator = accessCoordinator
         saveQueue.enqueue(data: data, to: workingCopyURL) { [weak self] result in
-            guard let self,
-                  self.openedDocumentID == documentID
-            else {
-                return
-            }
-
+            // Saving belongs to the file, even after the initiating view is gone.
+            coordinator.finishSave(for: selectedPDFURL, generation: coordinatedGeneration, result: result)
+            guard let self, self.openedDocumentID == documentID, self.saveGeneration == generation else { return }
             switch result {
             case .success:
-                if generation == self.saveGeneration {
-                    self.hasUnsavedChanges = false
-                    self.postFeedback(
-                        successMessage,
-                        kind: .success,
-                        action: action,
-                        trigger: trigger
-                    )
-                }
-            case .failure:
-                if generation == self.saveGeneration {
-                    self.postFeedback(
-                        "Working copy save failed. Original PDF was not changed.",
-                        kind: .error,
-                        action: action,
-                        trigger: trigger
-                    )
-                }
+                self.hasUnsavedChanges = false
+                self.postFeedback(successMessage, kind: .success, action: action, trigger: trigger)
+            case .failure(let error):
+                self.workingCopySaveError = error.localizedDescription
+                self.postFeedback("Working copy save failed. Edits were retained; retry saving. Original PDF was not changed.", kind: .error, action: action, trigger: trigger)
             }
         }
     }
