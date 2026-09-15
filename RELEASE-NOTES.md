@@ -1,4 +1,4 @@
-# Dogear 0.3.0
+# Dogear 0.2.4
 
 发布日期 / Release date: 2026-09-15
 
