@@ -17,6 +17,8 @@ enum DocumentAccessError: LocalizedError {
     case snapshotUnavailable
     case workingCopyMissing
     case discardFailed
+    case relinkConflict
+    case pendingSaveFailed
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +27,8 @@ enum DocumentAccessError: LocalizedError {
         case .snapshotUnavailable: return "Could not read the latest PDF source."
         case .workingCopyMissing: return "The recorded working copy is missing. Locate or explicitly discard it before using this source."
         case .discardFailed: return "Could not discard the working copy. Original PDF was not changed."
+        case .relinkConflict: return "This PDF has another active editing session. Close that session before locating the original."
+        case .pendingSaveFailed: return "Save the working copy successfully before locating its original. Your edits have been retained."
         }
     }
 }
@@ -33,6 +37,19 @@ struct PDFSourceReadSnapshot {
     let fileID: UUID?
     let originalURL: URL
     let contentVersion: String
+    let document: PDFDocument
+}
+
+/// Detached PDF state plus a cheap retrieval-cache revision. The revision is
+/// a SHA-256 of the exact source bytes for a stable on-disk document. A dirty
+/// in-memory editor also includes its coordinator mutation generation, so an
+/// unsaved edit can never reuse an older text snapshot merely because the last
+/// written working-copy bytes are unchanged.
+struct PDFSourceRetrievalCandidate {
+    let fileID: UUID?
+    let originalURL: URL
+    let sourceByteFingerprint: String
+    let fastRevision: String?
     let document: PDFDocument
 }
 
@@ -72,7 +89,7 @@ final class DocumentAccessCoordinator {
 
     final class Entry {
         weak var owner: PDFDocumentStore?
-        let originalURL: URL
+        var originalURL: URL
         var fileID: UUID?
         var document: PDFDocument
         var workingCopyURL: URL?
@@ -94,6 +111,67 @@ final class DocumentAccessCoordinator {
     private let saveQueue: PDFSaveQueue
 
     init(saveQueue: PDFSaveQueue? = nil) { self.saveQueue = saveQueue ?? .shared }
+
+    struct WorkingCopyStatus {
+        let isOpen: Bool
+        let hasUnsavedChanges: Bool
+        let saveError: String?
+        let workingCopyURL: URL?
+    }
+
+    var protectedWorkingCopyURLs: Set<URL> {
+        Set(entries.values.filter { $0.owner != nil || $0.dirty }.compactMap(\.workingCopyURL))
+            .union(saveQueue.pendingDestinations)
+    }
+
+    func workingCopyStatus(for originalURL: URL) -> WorkingCopyStatus? {
+        guard let entry = entries[originalURL.libraryComparablePath] else { return nil }
+        return WorkingCopyStatus(isOpen: entry.owner != nil, hasUnsavedChanges: entry.dirty,
+            saveError: entry.saveError, workingCopyURL: entry.workingCopyURL)
+    }
+
+    /// The caller verifies the original's exact SHA-256 and validates the
+    /// candidate again in updateLibrary. Durable Library commit happens before
+    /// this no-throw in-memory handoff; failure leaves the editor/path unchanged.
+    func relocateOriginal(fileID: UUID, from oldURL: URL, to newURL: URL,
+                          updateLibrary: () throws -> Void) throws {
+        let oldPath = oldURL.libraryComparablePath
+        let newPath = newURL.libraryComparablePath
+        if let registeredPath = pathsByFileID[fileID], registeredPath != oldPath {
+            throw DocumentAccessError.sourceChanged
+        }
+        let entry = entries[oldPath]
+        if let entry, let boundID = entry.fileID, boundID != fileID {
+            throw DocumentAccessError.relinkConflict
+        }
+        if oldPath != newPath, let destination = entries[newPath],
+           destination.owner != nil || destination.dirty {
+            throw DocumentAccessError.relinkConflict
+        }
+        entry?.owner?.retryWorkingCopySave()
+        saveQueue.waitUntilDrained()
+        if saveQueue.pendingData(for: oldURL) != nil { throw DocumentAccessError.pendingSaveFailed }
+        if let entry, entry.dirty {
+            guard entry.hasPreparedData, let workingCopy = entry.workingCopyURL,
+                  saveQueue.pendingData(for: workingCopy) == nil,
+                  FileManager.default.fileExists(atPath: workingCopy.path) else {
+                throw DocumentAccessError.pendingSaveFailed
+            }
+        }
+        try updateLibrary()
+        if let entry {
+            entries.removeValue(forKey: oldPath)
+            entry.originalURL = newURL
+            entry.fileID = fileID
+            entry.dirty = false
+            entry.saveError = nil
+            entry.generation = UUID()
+            entries[newPath] = entry
+        }
+        pathsByFileID[fileID] = newPath
+        entry?.owner?.adoptRelocatedOriginal(newURL, fileID: fileID)
+        if let entry { entry.owner?.synchronizeSaveState(from: entry) }
+    }
 
     /// Call after PDFSaveQueue.waitUntilDrained() at app termination. Queue
     /// state is authoritative even if main-actor completion callbacks are pending.
@@ -131,6 +209,16 @@ final class DocumentAccessCoordinator {
     @discardableResult
     func activateExistingEditor(for url: URL, excluding store: PDFDocumentStore? = nil) -> Bool {
         guard let owner = entries[url.libraryComparablePath]?.owner, owner !== store else { return false }
+        owner.activateEditor()
+        return true
+    }
+
+    /// A security-scoped bookmark may follow a Finder move before the active
+    /// editor has a new path. Check stable identity before opening a new store.
+    @discardableResult
+    func activateExistingEditor(fileID: UUID, excluding store: PDFDocumentStore? = nil) -> Bool {
+        guard let path = pathsByFileID[fileID], let owner = entries[path]?.owner,
+              owner !== store else { return false }
         owner.activateEditor()
         return true
     }
@@ -187,6 +275,14 @@ final class DocumentAccessCoordinator {
     /// resurrect the discarded PDF; closed owners also retain recoverable bytes.
     func discardWorkingCopy(originalURL: URL, workingCopyURL: URL, fileID: UUID? = nil) throws {
         let path = originalURL.libraryComparablePath
+        // A bookmark may have followed a Finder move while the active writer
+        // still owns the previous path. Do not bypass that owner and delete its
+        // copy as if it were closed: its next save could resurrect the edits.
+        // Exact-content Locate Original coordinates this handoff first.
+        if let fileID, let registeredPath = pathsByFileID[fileID], registeredPath != path,
+           let registered = entries[registeredPath], registered.owner != nil || registered.dirty {
+            throw DocumentAccessError.sourceChanged
+        }
         if let owner = entries[path]?.owner {
             let boundFileID = entries[path]?.fileID ?? fileID
             guard owner.discardCurrentWorkingCopyAndReopenOriginal() else { throw DocumentAccessError.discardFailed }
@@ -244,37 +340,88 @@ final class DocumentAccessCoordinator {
         } else {
             data = try? Data(contentsOf: originalURL)
         }
-        let fileDigest = data.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() } ?? "unavailable"
+        let fileDigest = data.map(Self.sha256) ?? "unavailable"
         return Self.contentVersion(of: document) + ":" + fileDigest
     }
 
     func readSnapshot(fileID: UUID? = nil, originalURL: URL, workingCopyURL: URL? = nil) throws -> PDFSourceReadSnapshot {
+        let candidate = try retrievalCandidate(
+            fileID: fileID,
+            originalURL: originalURL,
+            workingCopyURL: workingCopyURL
+        )
+        return PDFSourceReadSnapshot(
+            fileID: candidate.fileID,
+            originalURL: candidate.originalURL,
+            contentVersion: retrievalContentVersion(for: candidate),
+            document: candidate.document
+        )
+    }
+
+    /// Captures a detached source without asking PDFKit to extract every page's
+    /// text. Callers may first consult the derived source cache using
+    /// `fastRevision`; a cache miss can then build the semantic text snapshot.
+    func retrievalCandidate(
+        fileID: UUID? = nil,
+        originalURL: URL,
+        workingCopyURL: URL? = nil
+    ) throws -> PDFSourceRetrievalCandidate {
         let path = fileID.flatMap { pathsByFileID[$0] } ?? originalURL.libraryComparablePath
+        let resolvedOriginalURL = entries[path]?.originalURL ??
+            (path == originalURL.libraryComparablePath ? originalURL : URL(fileURLWithPath: path))
         var scopedURLs: [URL] = []
         defer { scopedURLs.forEach { $0.stopAccessingSecurityScopedResource() } }
-        let source: PDFDocument
-        let effectiveWorkingCopyURL: URL?
+        let detached: PDFDocument
+        let sourceBytes: Data?
+        let dirtyGeneration: UUID?
         if let entry = entries[path], entry.owner != nil || entry.dirty {
-            source = entry.document
-            effectiveWorkingCopyURL = entry.workingCopyURL
+            let effectiveWorkingCopyURL = entry.workingCopyURL
+            if let effectiveWorkingCopyURL {
+                sourceBytes = saveQueue.pendingData(for: effectiveWorkingCopyURL)
+                    ?? (try? Data(contentsOf: effectiveWorkingCopyURL))
+            } else {
+                sourceBytes = try? Data(contentsOf: resolvedOriginalURL)
+            }
+            dirtyGeneration = entry.dirty ? entry.generation : nil
+            guard let data = entry.document.dataRepresentationWithAIAnnotationsDisplayed(),
+                  let snapshot = PDFDocument(data: data) else {
+                throw DocumentAccessError.snapshotUnavailable
+            }
+            detached = snapshot
         } else {
-            let candidate = workingCopyURL ?? (try? PDFWorkingCopyStore())?.workingCopyURL(forOriginalURL: originalURL)
+            let candidate = workingCopyURL ?? (try? PDFWorkingCopyStore())?.workingCopyURL(forOriginalURL: resolvedOriginalURL)
             if let workingCopyURL, !FileManager.default.fileExists(atPath: workingCopyURL.path),
                saveQueue.pendingData(for: workingCopyURL) == nil { throw DocumentAccessError.workingCopyMissing }
-            effectiveWorkingCopyURL = candidate.flatMap {
-                FileManager.default.fileExists(atPath: $0.path) || saveQueue.pendingData(for: $0) != nil ? $0 : nil
-            }
-            let readURL = candidate.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil } ?? originalURL
+            let readURL = candidate.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil } ?? resolvedOriginalURL
             if readURL.startAccessingSecurityScopedResource() { scopedURLs.append(readURL) }
-            guard let loaded = candidate.flatMap({ saveQueue.pendingData(for: $0) }).flatMap({ PDFDocument(data: $0) }) ?? PDFDocument(url: readURL),
+            let pending = candidate.flatMap { saveQueue.pendingData(for: $0) }
+            sourceBytes = pending ?? (try? Data(contentsOf: readURL))
+            guard let loaded = sourceBytes.flatMap(PDFDocument.init(data:)) ?? PDFDocument(url: readURL),
                   let data = loaded.dataRepresentationWithAIAnnotationsDisplayed(),
-                  let detached = PDFDocument(data: data) else { throw DocumentAccessError.snapshotUnavailable }
-            source = detached
+                  let snapshot = PDFDocument(data: data) else { throw DocumentAccessError.snapshotUnavailable }
+            detached = snapshot
+            dirtyGeneration = nil
         }
-        let version = sourceVersion(for: originalURL, document: source, workingCopyURL: effectiveWorkingCopyURL)
-        guard let data = source.dataRepresentationWithAIAnnotationsDisplayed(),
-              let snapshot = PDFDocument(data: data) else { throw DocumentAccessError.snapshotUnavailable }
-        return PDFSourceReadSnapshot(fileID: fileID, originalURL: originalURL, contentVersion: version, document: snapshot)
+        let byteFingerprint = sourceBytes.map(Self.sha256) ?? "unavailable"
+        let revision: String?
+        if byteFingerprint == "unavailable" {
+            revision = nil
+        } else if let dirtyGeneration {
+            revision = Self.sha256(Data("dogear-live-source-v1|\(dirtyGeneration.uuidString)|\(byteFingerprint)".utf8))
+        } else {
+            revision = Self.sha256(Data("dogear-byte-source-v1|\(byteFingerprint)".utf8))
+        }
+        return PDFSourceRetrievalCandidate(
+            fileID: fileID,
+            originalURL: resolvedOriginalURL,
+            sourceByteFingerprint: byteFingerprint,
+            fastRevision: revision,
+            document: detached
+        )
+    }
+
+    func retrievalContentVersion(for candidate: PDFSourceRetrievalCandidate) -> String {
+        Self.contentVersion(of: candidate.document) + ":" + candidate.sourceByteFingerprint
     }
 
     /// A semantic fingerprint, not PDF serialization bytes (which may contain
@@ -322,5 +469,9 @@ final class DocumentAccessCoordinator {
     private static func colorVersion(_ color: NSColor?) -> String {
         guard let color = color?.usingColorSpace(.deviceRGB) else { return "" }
         return "\(color.redComponent),\(color.greenComponent),\(color.blueComponent),\(color.alphaComponent)"
+    }
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

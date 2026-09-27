@@ -58,12 +58,12 @@ nonisolated enum AITextSourceKind: String, Codable, Equatable, Hashable, Sendabl
     case visualText
 }
 
-nonisolated struct AIHighlightTextSnapshot: Equatable, Sendable {
+nonisolated struct AIHighlightTextSnapshot: Codable, Equatable, Sendable {
     let fingerprint: String
     let pages: [AITextPageSnapshot]
 }
 
-nonisolated struct AITextPageSnapshot: Equatable, Sendable {
+nonisolated struct AITextPageSnapshot: Codable, Equatable, Sendable {
     let pageNumber: Int
     let text: String
     let fingerprint: String
@@ -193,7 +193,7 @@ nonisolated struct AISegmentID: Codable, Hashable, Comparable, Sendable,
     }
 }
 
-nonisolated struct AISegmentRecord: Equatable, Sendable {
+nonisolated struct AISegmentRecord: Codable, Equatable, Sendable {
     let id: AISegmentID
     let text: String
     let normalizedText: String
@@ -423,6 +423,7 @@ nonisolated enum AIPublishAnswerErrorCode: String, Codable, Equatable, Sendable 
     case highlightsNotCoveredByEvidence
     case evidenceReviewFailed
     case evidenceReviewRequired
+    case evidenceReviewSizeExceeded
 }
 
 nonisolated struct AIPublishedAnswer: Codable, Equatable, Sendable {

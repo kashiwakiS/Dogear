@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 struct ReaderSidebarView: View {
@@ -29,7 +28,8 @@ struct ReaderSidebarView: View {
             let availableHeight = max(1, geometry.size.height)
             let layout = ReaderSidebarLayout(
                 availableHeight: availableHeight,
-                expandedSections: expandedSections, visibleSections: visibleSections
+                expandedSections: expandedSections, visibleSections: visibleSections,
+                dogearCount: documentStore.dogears.count
             )
 
             VStack(spacing: 0) {
@@ -102,7 +102,7 @@ struct ReaderSidebarView: View {
                 expand(.askSelection, availableHeight: availableHeight)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color.dogearControlBackground)
     }
 
     private func expandRequestedFindScope(availableHeight: CGFloat) {
@@ -127,9 +127,7 @@ struct ReaderSidebarView: View {
             expansionOrder.removeAll { $0 == section }
             expansionOrder.append(section)
             trimExpandedSections(
-                to: ReaderSidebarLayout.maximumExpandedSectionCount(
-                    for: availableHeight, sectionCount: visibleSections.count
-                ),
+                availableHeight: availableHeight,
                 preserving: section
             )
         }
@@ -138,9 +136,7 @@ struct ReaderSidebarView: View {
     private func enforceExpansionCapacity(availableHeight: CGFloat) {
         withAnimation(.easeInOut(duration: 0.22)) {
             trimExpandedSections(
-                to: ReaderSidebarLayout.maximumExpandedSectionCount(
-                    for: availableHeight, sectionCount: visibleSections.count
-                ),
+                availableHeight: availableHeight,
                 preserving: expansionOrder.last
             )
         }
@@ -155,9 +151,7 @@ struct ReaderSidebarView: View {
             expansionOrder.removeAll { $0 == section }
             expansionOrder.append(section)
             trimExpandedSections(
-                to: ReaderSidebarLayout.maximumExpandedSectionCount(
-                    for: availableHeight, sectionCount: visibleSections.count
-                ),
+                availableHeight: availableHeight,
                 preserving: section
             )
         }
@@ -171,10 +165,13 @@ struct ReaderSidebarView: View {
     }
 
     private func trimExpandedSections(
-        to maximumCount: Int,
+        availableHeight: CGFloat,
         preserving preservedSection: ReaderSidebarSection?
     ) {
-        while expandedSections.count > maximumCount {
+        while expandedSections.intersection(visibleSections).count > 1,
+              !ReaderSidebarLayout(availableHeight: availableHeight,
+                  expandedSections: expandedSections, visibleSections: visibleSections,
+                  dogearCount: documentStore.dogears.count).fitsExpandedSections {
             guard let sectionToCollapse = expansionOrder.first(where: {
                 $0 != preservedSection && expandedSections.contains($0)
             }) else {
@@ -282,8 +279,7 @@ private struct AISidebarView: View {
                         .textSelection(.enabled)
 
                     Button("Copy Answer") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(answer.resultMarkdown, forType: .string)
+                        PlatformClipboard.copyText(answer.resultMarkdown)
                     }
                     .font(.caption)
                 }
@@ -424,7 +420,10 @@ private struct AISidebarView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Choose Debug Log Folder…") { aiHighlightStore.chooseDebugLogFolder() }
+                DirectoryImportButton(title: "Choose Debug Log Folder…",
+                                      prepare: { await aiHighlightStore.canChooseDebugLogFolder() }) { result in
+                    Task { await aiHighlightStore.chooseDebugLogFolder(result) }
+                }
                     .disabled(isAnyAIActionRunning)
                 Text("New logs go into DogearDiagnostics inside the selected folder. Existing logs are not moved.")
                     .font(.caption2)

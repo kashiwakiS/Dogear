@@ -26,6 +26,19 @@ final class MarginCanvasView: NSView {
     private var selectedEntryID: String?
     private var laneFrame = NSRect.zero
     private var isNightMode = false
+    private var cardHeightCache: [String: CardHeightMeasurement] = [:]
+    /// Native performance diagnostics count real text measurements rather than
+    /// relying on machine-dependent timing thresholds.
+    private(set) var textMeasurementCount = 0
+    var cachedTextMeasurementCount: Int { cardHeightCache.count }
+    private static var noteFont: NSFont { .systemFont(ofSize: 12) }
+
+    private struct CardHeightMeasurement {
+        let text: String
+        let textWidth: CGFloat
+        let font: NSFont
+        let height: CGFloat
+    }
 
     override var isFlipped: Bool { false }
 
@@ -45,6 +58,16 @@ final class MarginCanvasView: NSView {
         selectedEntryID: String?,
         isNightMode: Bool
     ) {
+        // Retain at most one measurement per current entry. Scrolling into new
+        // pages must not accumulate all annotations or old versions of notes.
+        let currentIDs = Set(entries.map(\.id))
+        if self.isNightMode != isNightMode {
+            cardHeightCache.removeAll(keepingCapacity: true)
+        } else {
+            for id in cardHeightCache.keys.filter({ !currentIDs.contains($0) }) {
+                cardHeightCache.removeValue(forKey: id)
+            }
+        }
         self.entries = entries
         self.laneFrame = laneFrame
         self.selectedEntryID = selectedEntryID
@@ -153,24 +176,36 @@ final class MarginCanvasView: NSView {
     }
 
     private func cardHeight(for entry: MarginCanvasAnnotationEntry, width: CGFloat) -> CGFloat {
+        let textWidth = max(80, width - 20)
+        let font = Self.noteFont
+        if let cached = cardHeightCache[entry.id],
+           cached.text == entry.note, cached.textWidth == textWidth,
+           cached.font.isEqual(font) {
+            return cached.height
+        }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byWordWrapping
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: font,
             .paragraphStyle: paragraph
         ]
+        textMeasurementCount += 1
         let textBounds = (entry.note as NSString).boundingRect(
             with: NSSize(
-                width: max(80, width - 20),
+                width: textWidth,
                 height: CGFloat.greatestFiniteMagnitude
             ),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attributes
         )
-        return max(54, ceil(textBounds.height) + 36)
+        let height = max(54, ceil(textBounds.height) + 36)
+        cardHeightCache[entry.id] = CardHeightMeasurement(text: entry.note,
+            textWidth: textWidth, font: font, height: height)
+        return height
     }
 
     private func drawConnector(for layout: CardLayout) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
         let isSelected = layout.entry.id == selectedEntryID
         let accent = accentColor(for: layout.entry)
         let start = NSPoint(
@@ -179,31 +214,30 @@ final class MarginCanvasView: NSView {
         )
         let end = NSPoint(x: layout.frame.minX, y: layout.frame.midY)
 
-        let connector = NSBezierPath()
-        connector.move(to: start)
-        let elbowX = max(start.x + 8, end.x - 14)
-        connector.line(to: NSPoint(x: elbowX, y: start.y))
-        connector.line(to: NSPoint(x: elbowX, y: end.y))
-        connector.line(to: end)
-        connector.lineWidth = isSelected ? 1.8 : 1
-        accent.withAlphaComponent(isSelected ? 0.88 : 0.42).setStroke()
-        connector.stroke()
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.addPath(PDFOverlayGeometry.marginConnector(from: start, to: end))
+        context.setLineWidth(isSelected ? 1.8 : 1)
+        context.setStrokeColor(accent.withAlphaComponent(isSelected ? 0.88 : 0.42).cgColor)
+        context.strokePath()
     }
 
     private func drawCard(_ layout: CardLayout) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
         let entry = layout.entry
         let isSelected = entry.id == selectedEntryID
         let accent = accentColor(for: entry)
-        let cardPath = NSBezierPath(roundedRect: layout.frame, xRadius: 7, yRadius: 7)
+        let cardPath = PDFOverlayGeometry.marginCard(in: layout.frame)
         let background = isNightMode
             ? NSColor(calibratedWhite: 0.19, alpha: 0.98)
             : NSColor.textBackgroundColor.withAlphaComponent(0.98)
-        background.setFill()
-        cardPath.fill()
-
-        accent.withAlphaComponent(isSelected ? 0.95 : 0.62).setStroke()
-        cardPath.lineWidth = isSelected ? 2 : 1
-        cardPath.stroke()
+        context.saveGState()
+        context.addPath(cardPath)
+        context.setFillColor(background.cgColor)
+        context.setStrokeColor(accent.withAlphaComponent(isSelected ? 0.95 : 0.62).cgColor)
+        context.setLineWidth(isSelected ? 2 : 1)
+        context.drawPath(using: .fillStroke)
+        context.restoreGState()
 
         let pageLabel = L10n.string("Page \(entry.pageNumber)")
         let label = entry.isAIGenerated
@@ -249,15 +283,24 @@ final class MarginCanvasView: NSView {
             if textView.string != entry.note {
                 textView.string = entry.note
             }
-            textView.frame = NSRect(
+            let font = Self.noteFont
+            if textView.font?.isEqual(font) != true { textView.font = font }
+            let frame = NSRect(
                 x: layout.frame.minX + 10,
                 y: layout.frame.minY + 8,
                 width: layout.frame.width - 20,
                 height: layout.frame.height - 32
             )
-            textView.textColor = isNightMode
+            if textView.frame.size == frame.size {
+                // A scroll changes placement, not the text container's size.
+                if textView.frame.origin != frame.origin { textView.setFrameOrigin(frame.origin) }
+            } else {
+                textView.frame = frame
+            }
+            let textColor = isNightMode
                 ? NSColor(calibratedWhite: 0.88, alpha: 1)
                 : NSColor.labelColor
+            if textView.textColor?.isEqual(textColor) != true { textView.textColor = textColor }
             textView.toolTip = L10n.string("Select text to ask a follow-up question")
             textView.forwardedScrollView = pdfView?.documentView?.enclosingScrollView
         }
@@ -271,7 +314,7 @@ final class MarginCanvasView: NSView {
         textView.isRichText = false
         textView.importsGraphics = false
         textView.allowsUndo = false
-        textView.font = NSFont.systemFont(ofSize: 12)
+        textView.font = Self.noteFont
         textView.textContainerInset = .zero
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true

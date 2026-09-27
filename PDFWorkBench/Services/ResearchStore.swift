@@ -92,10 +92,12 @@ final class ResearchStore: ObservableObject {
         sessionID: UUID,
         question: String,
         sourceSnapshot: [ResearchSourceSnapshot],
-        input: ResearchDraft? = nil
+        input: ResearchDraft? = nil,
+        contextSummary: ResearchContextSummary? = nil
     ) -> UUID? {
         guard var session = session(id: sessionID), session.activeRequestID == nil else { return nil }
-        let message = ResearchMessage(question: question, input: input ?? session.draft, sourceSnapshot: sourceSnapshot)
+        let message = ResearchMessage(question: question, input: input ?? session.draft,
+            sourceSnapshot: sourceSnapshot, contextSummary: contextSummary)
         session.messages.append(message)
         guard updateSession(session) else {
             // Retain the failed attempt and draft, but never leave a phantom active request.
@@ -120,7 +122,8 @@ final class ResearchStore: ObservableObject {
         status: ResearchRequestStatus,
         errorMessage: String? = nil,
         origin: ResearchContentOrigin = .verifiedAI,
-        operationResults: [String] = []
+        operationResults: [String] = [],
+        contextSummary: ResearchContextSummary? = nil
     ) -> Bool {
         guard status != .running, var session = session(id: sessionID),
               let index = session.messages.firstIndex(where: { $0.requestID == requestID && $0.status == .running }) else {
@@ -133,6 +136,7 @@ final class ResearchStore: ObservableObject {
         session.messages[index].errorMessage = errorMessage
         session.messages[index].origin = origin
         session.messages[index].operationResults = operationResults
+        if let contextSummary { session.messages[index].contextSummary = contextSummary }
         session.messages[index].completedAt = Date()
         if status == .accepted && session.draft == sentDraft { session.draft = ResearchDraft() }
         return updateSession(session)

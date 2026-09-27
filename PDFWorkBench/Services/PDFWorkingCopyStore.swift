@@ -1,7 +1,9 @@
 import CryptoKit
 import Foundation
 
-struct PDFWorkingCopyStore {
+// Immutable configuration; FileManager is only used through its thread-safe
+// URL/file APIs. Front ends own pickers and document-writer coordination.
+nonisolated struct PDFWorkingCopyStore: @unchecked Sendable {
     enum StoreError: Error {
         case missingApplicationSupportDirectory
     }
@@ -33,7 +35,7 @@ struct PDFWorkingCopyStore {
     }
 
     func workingCopyURL(forOriginalURL originalURL: URL) -> URL {
-        let comparablePath = originalURL.libraryComparablePath
+        let comparablePath = originalURL.resolvingSymlinksInPath().standardizedFileURL.path
         let digest = SHA256.hash(data: Data(comparablePath.utf8))
             .map { String(format: "%02x", $0) }
             .joined()

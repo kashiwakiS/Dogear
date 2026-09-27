@@ -18,9 +18,15 @@ struct LibrarySidebarView: View {
     let onOpen: (LibraryItem, LibraryGroup) -> Void
     let onRemoveFromLibrary: (LibraryItem) -> Void
     let onDiscardAllChanges: (LibraryItem) -> Void
+    let onFileInfo: (LibraryItem) -> Void
+    let onCreateGroupFromFiles: ([UUID]) -> Void
     let onImportURLsToGroup: ([URL], LibraryGroup) -> Void
     let onImportURLsToCurrentWindow: ([URL]) -> Void
 
+    @State private var selectedRows: Set<LibraryFileSelection> = []
+    @State private var query = ""
+    @State private var selectedTag = ""
+    @State private var operationError: String?
     @State private var expandedGroupIDs: Set<UUID> = []
     @State private var contentDropTargetGroupID: UUID?
     @State private var insertionDropTarget: GroupInsertionTarget?
@@ -32,10 +38,41 @@ struct LibrarySidebarView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
 
+            HStack {
+                TextField("Find a file", text: $query).textFieldStyle(.roundedBorder)
+                Menu {
+                    Button("All Tags") { selectedTag = "" }
+                    ForEach(allTags, id: \.self) { tag in Button(tag) { selectedTag = tag } }
+                } label: { Image(systemName: selectedTag.isEmpty ? "tag" : "tag.fill") }
+                .help("Filter by tag")
+            }.padding(.horizontal, 12)
+            if !selectedTag.isEmpty {
+                HStack {
+                    Text(selectedTag).font(.caption)
+                    Button { selectedTag = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).accessibilityLabel("Clear tag filter")
+                    Spacer()
+                }.padding(.horizontal, 12)
+            }
             groupTree
+            if !selectedRows.isEmpty {
+                HStack {
+                    Text("\(selectedFileIDs.count) selected").font(.caption)
+                    Spacer()
+                    Menu("Organize") { batchActions }
+                }.padding(.horizontal, 12).padding(.bottom, 8)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor))
+        .alert("Library operation failed", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
+            Button("OK", role: .cancel) { operationError = nil }
+        } message: { Text(L10n.string(String.LocalizationValue(operationError ?? ""))) }
+        .onChange(of: query) { _, _ in selectedRows = [] }
+        .onChange(of: selectedTag) { _, _ in selectedRows = [] }
+        .onChange(of: libraryStore.state.files.map(\.id)) { _, ids in
+            selectedRows = selectedRows.filter { ids.contains($0.fileID) }
+        }
         .onAppear {
             expandedGroupIDs.formUnion(libraryStore.sidebarGroups.map(\.id))
         }
@@ -69,10 +106,18 @@ struct LibrarySidebarView: View {
     }
 
     private var groupTree: some View {
-        List {
-            ForEach(libraryStore.sidebarGroups) { group in
+        List(selection: $selectedRows) {
+            ForEach(filteredSidebarGroups) { group in
                 groupRows(for: group)
             }
+        }
+        .onChange(of: selectedRows) { old, new in
+            guard NSApp.currentEvent?.type == .keyDown,
+                  NSEvent.modifierFlags.intersection([.command, .shift, .control]).isEmpty,
+                  new.count == 1, let row = new.first,
+                  let file = libraryStore.allFiles.first(where: { $0.id == row.fileID }),
+                  let group = libraryStore.group(withID: row.groupID) else { return }
+            onOpen(file, group)
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
@@ -197,13 +242,17 @@ struct LibrarySidebarView: View {
             )
         )
         .contentShape(Rectangle())
-        .onTapGesture {
-            onOpen(item, group)
-        }
+        .tag(LibraryFileSelection(fileID: item.id, groupID: group.id))
         .help(item.path)
         .contextMenu {
-            fileContextMenu(for: item, in: group)
+            if selectedRows.contains(.init(fileID: item.id, groupID: group.id)), selectedRows.count > 1 {
+                batchActions
+            } else { fileContextMenu(for: item, in: group) }
         }
+        .simultaneousGesture(TapGesture().onEnded {
+            guard NSEvent.modifierFlags.intersection([.command, .shift, .control]).isEmpty else { return }
+            onOpen(item, group)
+        })
         .draggable(LibraryFileDragItem(fileID: item.id, groupID: group.id))
         .dropDestination(for: LibraryFileDragItem.self) { items, location in
             guard let source = items.first, source.fileID != item.id else {
@@ -289,12 +338,23 @@ struct LibrarySidebarView: View {
         }
     }
 
-    private func displayedFiles(in group: LibraryGroup) -> [LibraryItem] {
-        if group.id == selectedGroupID {
-            return libraryStore.filesForWindow(in: group.id, sessionID: sessionID)
+    private var filteredSidebarGroups: [LibraryGroup] {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selectedTag.isEmpty else {
+            return libraryStore.sidebarGroups
         }
+        return libraryStore.sidebarGroups.filter { !displayedFiles(in: $0).isEmpty }
+    }
 
-        return libraryStore.files(in: group.id)
+    private func displayedFiles(in group: LibraryGroup) -> [LibraryItem] {
+        let files = group.id == selectedGroupID
+            ? libraryStore.filesForWindow(in: group.id, sessionID: sessionID)
+            : libraryStore.files(in: group.id)
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return files.filter { file in
+            (selectedTag.isEmpty || file.tags.contains(selectedTag)) &&
+            (needle.isEmpty || file.displayName.localizedCaseInsensitiveContains(needle) ||
+             file.tags.contains(where: { $0.localizedCaseInsensitiveContains(needle) }))
+        }
     }
 
     private func toggleExpansion(of group: LibraryGroup) {
@@ -340,6 +400,9 @@ struct LibrarySidebarView: View {
 
     @ViewBuilder
     private func fileContextMenu(for item: LibraryItem, in sourceGroup: LibraryGroup) -> some View {
+        Button("File Info…") { onFileInfo(item) }
+        Button("New Group from Selection…") { onCreateGroupFromFiles([item.id]) }
+        Divider()
         if !libraryStore.activeUserGroups.isEmpty {
             Menu("Add to Group") {
                     ForEach(libraryStore.activeUserGroups) { group in
@@ -381,6 +444,43 @@ struct LibrarySidebarView: View {
             onDiscardAllChanges(item)
         }
         .disabled(workingCopyURL(for: item) == nil)
+    }
+
+
+    private var allTags: [String] { Array(Set(libraryStore.allFiles.flatMap(\.tags))).sorted() }
+    private var selectedFileIDs: [UUID] {
+        libraryStore.allFiles.filter { file in selectedRows.contains(where: { $0.fileID == file.id }) }.map(\.id)
+    }
+    private var selectedSourceGroup: UUID? {
+        let groups = Set(selectedRows.map(\.groupID))
+        return groups.count == 1 ? groups.first : nil
+    }
+    @ViewBuilder private var batchActions: some View {
+        Button("New Group from Selection…") { onCreateGroupFromFiles(selectedFileIDs) }
+        Menu("Add to Group") {
+            ForEach(libraryStore.activeUserGroups) { group in
+                Button(group.localizedName) { runBatch { _ = try libraryStore.addFiles(selectedFileIDs, to: group.id) } }
+            }
+        }
+        if let source = selectedSourceGroup {
+            Menu("Move to Group") {
+                ForEach(libraryStore.activeUserGroups.filter { $0.id != source }) { group in
+                    Button(group.localizedName) {
+                        runBatch { _ = try libraryStore.moveFiles(selectedFileIDs, to: group.id, from: source) }
+                    }
+                }
+            }
+            if source != LibraryGroup.ungroupedID {
+                Button("Remove from This Group") {
+                    runBatch { _ = try libraryStore.removeFiles(selectedFileIDs, from: source) }
+                }
+            }
+        }
+        Button("Clear Selection") { selectedRows = [] }
+    }
+    private func runBatch(_ operation: () throws -> Void) {
+        do { try operation(); selectedRows = [] }
+        catch { operationError = error.localizedDescription }
     }
 
     private func workingCopyURL(for item: LibraryItem) -> URL? {
@@ -1040,4 +1140,9 @@ private struct DuplicateLibraryMarker: View {
         .frame(width: 8, height: 8)
         .accessibilityLabel("Duplicate filename marker")
     }
+}
+
+private struct LibraryFileSelection: Hashable {
+    let fileID: UUID
+    let groupID: UUID
 }

@@ -71,16 +71,17 @@ nonisolated enum AIEvidenceRetrievalDiagnostics {
             check((try? AILocalEmbeddingModels.validatePackage(at: source)) == nil, "Corrupt model asset accepted")
 
             let registry = try AISegmentRegistry(snapshot: snapshot)
-            let lexical = AILexicalEvidenceRetriever(registry: registry)
+            let lexical = try AILexicalEvidenceRetriever(registry: registry)
             let query = AISegmentSearchRequest(query: "convolutional", topK: 2)
             let original = AISimpleLexicalSearcher().search(query, in: registry)
             let wrapped = try await lexical.search(query)
             check(original == wrapped, "Scheme 1 wrapper changed results")
             let ids = registry.records.map(\.id)
             let fused = AIHybridEvidenceRetriever.fuse(lexical: [ids[0], ids[1], ids[0]], dense: [ids[1], ids[2]])
-            check(fused.first?.id == ids[1], "RRF should prefer shared evidence")
+            check(fused.map(\.id) == [ids[1], ids[2]], "Frozen 1/0 RRF did not preserve dense ranking")
             check(Set(fused.map(\.id)).count == fused.count, "RRF duplicated IDs")
-            check(abs((fused.first?.score ?? 0) - (1.0 / 61 + 1.0 / 62)) < 0.000001, "RRF added incompatible raw scores")
+            check(abs((fused.first?.score ?? 0) - (1.0 / 61)) < 0.000001,
+                  "Weighted RRF changed its frozen rank-only formula")
             let replacement = FixtureRetriever(id: ids.last!)
             let executor = AIHighlightToolExecutor(registry: registry, intent: .overview, evidenceRetriever: replacement)
             let output = try await executor.executeForWorkflow(.searchSegments(query))
@@ -102,9 +103,205 @@ nonisolated enum AIEvidenceRetrievalDiagnostics {
             check(tokenizer.tokens("playing") == [204,205], "WordPiece suffix mismatch")
             check(tokenizer.tokens("[CLS] HELLO [MASK]") == [101,200,103], "Special-token handling mismatch")
             check(tokenizer.tokens(String(repeating: "a", count: 101)) == [100], "Overlong word must become UNK")
+
+            let scheme2Backend = CountingLexicalBackend()
+            let scheme2Cache = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "DogearDenseOnly-\(UUID().uuidString)"
+            )
+            defer { try? FileManager.default.removeItem(at: scheme2Cache) }
+            let scheme2Selection = AIRetrievalSelection(
+                mode: .scheme2EvidenceRAG,
+                packageID: String(repeating: "d", count: 64)
+            )
+            let scheme2Embedder = FixtureTextEmbedder(tokenizer: tokenizer)
+            let secondarySnapshot = AIHighlightTextSnapshot(
+                fingerprint: "rag-fixture-secondary",
+                pages: [
+                    AITextPageSnapshot(
+                        pageNumber: 1,
+                        text: "A second source states its opening result. A follow-up sentence gives supporting evidence.",
+                        fingerprint: "secondary-p1"
+                    ),
+                    AITextPageSnapshot(
+                        pageNumber: 2,
+                        text: "The second page describes the method. Another sentence records its limitations.",
+                        fingerprint: "secondary-p2"
+                    ),
+                    AITextPageSnapshot(
+                        pageNumber: 3,
+                        text: "The final page gives a conclusion. A final detail closes the source.",
+                        fingerprint: "secondary-p3"
+                    )
+                ]
+            )
+            let scheme2Registry = try AISegmentRegistry(sources: [
+                AIWorkflowSourceSnapshot(
+                    fileID: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!,
+                    displayName: "dense-only-a.pdf",
+                    snapshot: snapshot
+                ),
+                AIWorkflowSourceSnapshot(
+                    fileID: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!,
+                    displayName: "dense-only-b.pdf",
+                    snapshot: secondarySnapshot
+                )
+            ])
+            let scheme2 = try await AIEvidenceRetrievalFactory.makeSources(
+                selection: scheme2Selection,
+                registry: scheme2Registry,
+                sharedEmbedder: scheme2Embedder,
+                cacheRoot: scheme2Cache.appendingPathComponent("populated"),
+                lexicalBackend: scheme2Backend
+            )
+            let ordinaryRequest = AISegmentSearchRequest(
+                query: "stable dense ranking",
+                topK: 4,
+                strategy: .questionRelevance
+            )
+            let ordinaryResults = try await scheme2.retriever.search(ordinaryRequest)
+            let repeatedOrdinaryResults = try await scheme2.retriever.search(ordinaryRequest)
+            check(
+                ordinaryResults == repeatedOrdinaryResults,
+                "Scheme 2 multi-source dense ranking was not stable."
+            )
+            check(
+                ordinaryResults.map(\.id.document) == [1, 2, 1, 2],
+                "Scheme 2 ordinary search lost source balance."
+            )
+            let overviewResults = try await scheme2.retriever.search(AISegmentSearchRequest(
+                query: "",
+                topK: 4,
+                strategy: .overviewSalience
+            ))
+            let overviewByDocument = Dictionary(
+                grouping: overviewResults,
+                by: { $0.id.document }
+            )
+            check(
+                overviewResults.map(\.id.document) == [1, 2, 1, 2],
+                "Scheme 2 overview lost source balance."
+            )
+            check(
+                overviewByDocument.count == 2
+                    && overviewByDocument.values.allSatisfy {
+                        $0.count == 2 && Set($0.map(\.id.page)).count == 2
+                    },
+                "Scheme 2 global dense ranking erased per-source overview page distribution."
+            )
+            let populatedPrepareCalls = await scheme2Backend.prepareCallCount
+            check(
+                populatedPrepareCalls == 0,
+                "Scheme 2 prepared a lexical backend."
+            )
+
+            let emptyRegistry = try AISegmentRegistry(snapshot: AIHighlightTextSnapshot(
+                fingerprint: "dense-empty-registry",
+                pages: []
+            ))
+            let emptyScheme2 = try await AIEvidenceRetrievalFactory.makeSources(
+                selection: scheme2Selection,
+                registry: emptyRegistry,
+                sharedEmbedder: RejectingTextEmbedder(tokenizer: tokenizer),
+                cacheRoot: scheme2Cache.appendingPathComponent("empty-registry"),
+                lexicalBackend: scheme2Backend
+            )
+            let emptyResults = try await emptyScheme2.retriever.search(query)
+            check(
+                emptyResults.isEmpty,
+                "Empty Scheme 2 registry returned evidence."
+            )
+            let noTextSource = AIWorkflowSourceSnapshot(
+                fileID: UUID(),
+                displayName: "no-text.pdf",
+                snapshot: AIHighlightTextSnapshot(
+                    fingerprint: "dense-no-text-source",
+                    pages: [AITextPageSnapshot(
+                        pageNumber: 1,
+                        text: "",
+                        fingerprint: "dense-no-text-page"
+                    )]
+                )
+            )
+            let noTextRegistry = try AISegmentRegistry(sources: [noTextSource])
+            let noTextScheme2 = try await AIEvidenceRetrievalFactory.makeSources(
+                selection: scheme2Selection,
+                registry: noTextRegistry,
+                sharedEmbedder: RejectingTextEmbedder(tokenizer: tokenizer),
+                cacheRoot: scheme2Cache.appendingPathComponent("no-text"),
+                lexicalBackend: scheme2Backend
+            )
+            let noTextResults = try await noTextScheme2.retriever.search(query)
+            let finalPrepareCalls = await scheme2Backend.prepareCallCount
+            check(
+                noTextScheme2.coverage.preparedFileIDs.isEmpty
+                    && noTextScheme2.coverage.skipped.map(\.fileID) == [noTextSource.fileID]
+                    && noTextResults.isEmpty
+                    && finalPrepareCalls == 0,
+                "Empty-text Scheme 2 performed retrieval work or overstated coverage."
+            )
+
+            let windowSnapshot = AIHighlightTextSnapshot(
+                fingerprint: "retrieval-window-fixture",
+                pages: [AITextPageSnapshot(
+                    pageNumber: 9,
+                    text: "Opening background. Prior observations. The mechanism uses alpha. Beta completes the reaction. Limitations remain. Closing note.",
+                    fingerprint: "retrieval-window-page"
+                )]
+            )
+            let windowRegistry = try AISegmentRegistry(snapshot: windowSnapshot)
+            let windows = AIRetrievalWindow.make(records: windowRegistry.records)
+            check(
+                windows.map { $0.anchorID.sentence } == [2, 4, 6]
+                    && windows.map { $0.segmentIDs.map(\.sentence) }
+                        == [[1, 2, 3], [3, 4, 5], [5, 6]],
+                "Retrieval windows changed their deterministic max-three/stride-two topology."
+            )
+            check(
+                zip(windows, windows.dropFirst()).allSatisfy { pair in
+                    Set(pair.0.segmentIDs).intersection(pair.1.segmentIDs).count <= 1
+                },
+                "Adjacent retrieval windows can crowd top-K with duplicate context."
+            )
+            check(
+                windows.allSatisfy { window in
+                    window.records.count <= 3
+                        && Set(window.records.map(\.id.document)).count == 1
+                        && Set(window.records.map(\.id.page)).count == 1
+                        && Set(window.records.map(\.id.block)).count == 1
+                        && windowRegistry.record(for: window.anchorID) != nil
+                },
+                "A retrieval window crossed source scope or lost its canonical sentence anchor."
+            )
+            let windowLexical = try AILexicalEvidenceRetriever(registry: windowRegistry)
+            let crossSentence = try await windowLexical.search(AISegmentSearchRequest(
+                query: "alpha beta",
+                topK: 10,
+                strategy: .questionRelevance
+            ))
+            check(
+                crossSentence.first?.id == windows[1].anchorID
+                    && Set(crossSentence.map(\.id)).isSubset(of: Set(windows.map(\.anchorID))),
+                "BM25 did not rank cross-sentence window evidence through stable anchors."
+            )
+            let windowChunks = try AIEmbeddingChunk.make(
+                registry: windowRegistry,
+                tokenizer: tokenizer
+            )
+            check(
+                windowChunks.count == windows.count
+                    && windowChunks.map(\.anchorID) == windows.map(\.anchorID)
+                    && windowChunks.map(\.ids) == windows.map(\.segmentIDs),
+                "Dense chunks did not reuse the BM25 retrieval-window topology."
+            )
+
             let chunks = try AIEmbeddingChunk.make(registry: registry, tokenizer: tokenizer)
             check(chunks.flatMap(\.ids) == ids, "Chunking dropped or reordered sentence IDs")
-            check(chunks.allSatisfy { Set($0.ids.map(\.page)).count == 1 }, "Chunk crosses a page")
+            check(chunks.allSatisfy {
+                Set($0.ids.map(\.document)).count == 1
+                    && Set($0.ids.map(\.page)).count == 1
+                    && Set($0.ids.map(\.block)).count == 1
+                    && registry.record(for: $0.anchorID) != nil
+            }, "Chunk crosses source scope or returns a noncanonical anchor")
             for count in [510, 511, 1_020, 1_021] {
                 let text = String(repeating: "hello ", count: count - 1) + "world"
                 let longRegistry = try AISegmentRegistry(snapshot: AIHighlightTextSnapshot(fingerprint: "long-\(count)",
@@ -126,28 +323,37 @@ nonisolated enum AIEvidenceRetrievalDiagnostics {
             // sentence in both the local RRF pool and cross-file cosine candidate pool.
             let repeatedChunks = (0..<110).map { _ in AIEmbeddingChunk(ids: [ids[0]], tokens: [200]) }
                 + [AIEmbeddingChunk(ids: [ids[1]], tokens: [201])]
-            let repeatedRetriever = AIHybridEvidenceRetriever(registry: registry, embedder: FixtureQueryEmbedder(),
+            let repeatedRetriever = try AIHybridEvidenceRetriever(registry: registry, embedder: FixtureQueryEmbedder(),
                 chunks: repeatedChunks, vectors: (0..<110).map { _ in [Float(1), 0] } + [[0.8, 0.6]])
             let noLexicalMatch = AISegmentSearchRequest(query: "zxq-unmatched", topK: 2)
             let uniqueDense = try await repeatedRetriever.denseCandidates(noLexicalMatch)
             check(uniqueDense.map(\.id) == [ids[0], ids[1]], "Split sentence crowded other evidence out of dense top-K")
             let uniqueHybrid = try await repeatedRetriever.search(noLexicalMatch)
             check(uniqueHybrid.map(\.id) == [ids[0], ids[1]], "Split sentence crowded other evidence out of local fusion")
-            let negativeRetriever = AIHybridEvidenceRetriever(registry: registry, embedder: FixtureQueryEmbedder(),
+            let negativeRetriever = try AIHybridEvidenceRetriever(registry: registry, embedder: FixtureQueryEmbedder(),
                 chunks: [AIEmbeddingChunk(ids: [ids[0]], tokens: [200]), AIEmbeddingChunk(ids: [ids[0]], tokens: [201])],
                 vectors: [[-0.8, 0.6], [-0.6, 0.8]])
             let negativeDense = try await negativeRetriever.denseCandidates(noLexicalMatch)
             check(abs((negativeDense.first?.score ?? 0) + 0.6) < 0.00001,
                   "Split segment score must preserve the best negative cosine rather than zero or a sum")
-            let key = try AIEmbeddingIndexCache.key(registry: registry, packageID: "model-a", chunks: chunks)
-            let other = try AIEmbeddingIndexCache.key(registry: registry, packageID: "model-b", chunks: chunks)
-            check(key != other, "Different models shared an index key")
-            let valid = AIEmbeddingIndexCache(key: key, ids: chunks.map(\.ids), vectors: chunks.map { _ in [1,0] })
-            check(valid.isValid(key: key, chunks: chunks, dimensions: 2), "Valid cache rejected")
-            check(!valid.isValid(key: other, chunks: chunks, dimensions: 2), "Stale cache accepted")
-            check(!valid.isValid(key: key, chunks: chunks, dimensions: 384), "Wrong vector dimension accepted")
-            let invalid = AIEmbeddingIndexCache(key: key, ids: chunks.map(\.ids), vectors: chunks.map { _ in [.nan,0] })
-            check(!invalid.isValid(key: key, chunks: chunks, dimensions: 2), "NaN cache accepted")
+            let descriptor = try AIEmbeddingCacheDescriptor(
+                registry: registry,
+                packageID: "model-a",
+                dimensions: 2,
+                chunks: chunks
+            )
+            let other = try AIEmbeddingCacheDescriptor(
+                registry: registry,
+                packageID: "model-b",
+                dimensions: 2,
+                chunks: chunks
+            )
+            check(descriptor.identity != other.identity, "Different models shared an index key")
+            check(descriptor.matches(chunks: chunks), "Valid dense generation descriptor rejected")
+            check(
+                !descriptor.matches(chunks: chunks + [chunks[0]]),
+                "Changed dense chunk input reused an index key"
+            )
             let cancellation = Task { () throws -> [AISegmentSearchResult] in
                 try await Task.sleep(for: .seconds(1)); return try await lexical.search(query)
             }
@@ -190,12 +396,10 @@ nonisolated enum AIEvidenceRetrievalDiagnostics {
                 let cached = try await AIEvidenceRetrievalFactory.make(selection: selection, registry: registry, packageURL: root, cacheRoot: cacheRoot)
                 let repeated = try await cached.search(AISegmentSearchRequest(query: "How are handwritten symbols classified?", topK: 2))
                 check(repeated == results, "Cached index changed ranking")
-                let cacheFiles = try FileManager.default.contentsOfDirectory(at: cacheRoot, includingPropertiesForKeys: nil)
-                check(cacheFiles.count == 1, "Index cache left partial/duplicate files")
-                if let file = cacheFiles.first {
-                    let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
-                    check(mode?.intValue == 0o600, "Index file is not private")
-                }
+                let database = AISQLiteEmbeddingIndexCache.databaseURL(cacheRoot: cacheRoot)
+                check(FileManager.default.fileExists(atPath: database.path), "Dense SQLite cache was not created")
+                let mode = try FileManager.default.attributesOfItem(atPath: database.path)[.posixPermissions] as? NSNumber
+                check(mode?.intValue == 0o600, "Dense SQLite cache is not private")
                 print("RAG REAL MODEL: build \(started.duration(to: built)); total \(started.duration(to: .now)); \(registry.records.count) segments")
             }
         } catch { check(false, "Retrieval diagnostics failed: \(error)") }
@@ -210,6 +414,28 @@ nonisolated enum AIEvidenceRetrievalDiagnostics {
     }
     private struct FixtureQueryEmbedder: AIQueryEmbedding {
         func embedQuery(_ text: String) async throws -> [Float] { [1, 0] }
+    }
+    private struct FixtureTextEmbedder: AITextEmbedding {
+        let tokenizer: AIBertWordPieceTokenizer
+        func embed(tokens: [Int32]) async throws -> [Float] { Self.vector }
+        func embedQuery(_ text: String) async throws -> [Float] { Self.vector }
+        private static let vector: [Float] = [1] + Array(repeating: 0, count: 383)
+    }
+    private struct RejectingTextEmbedder: AITextEmbedding {
+        let tokenizer: AIBertWordPieceTokenizer
+        func embed(tokens: [Int32]) async throws -> [Float] {
+            throw AIRetrievalError.invalidVector
+        }
+        func embedQuery(_ text: String) async throws -> [Float] {
+            throw AIRetrievalError.invalidVector
+        }
+    }
+    private actor CountingLexicalBackend: AILexicalIndexBackend {
+        private(set) var prepareCallCount = 0
+        func prepare(sources: [AILexicalIndexSource]) async throws -> AILexicalPreparedIndex {
+            prepareCallCount += 1
+            return try await AIInMemoryBM25IndexBackend().prepare(sources: sources)
+        }
     }
     private struct Parity: Decodable {
         let text: String

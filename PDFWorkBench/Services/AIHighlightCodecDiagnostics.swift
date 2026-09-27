@@ -217,7 +217,12 @@ nonisolated enum AIHighlightCodecDiagnostics {
                 ]
             ))
             let matches = try JSONSerialization.jsonObject(with: search.output) as? [[String: Any]]
-            check(matches?.first?["id"] as? String == id.description, "Wire search missed fixture ID.")
+            let windowAnchor = AIRetrievalWindow.make(records: registry.records).first?.anchorID
+            check(
+                matches?.first?["id"] as? String == windowAnchor?.description
+                    && windowAnchor.flatMap { registry.record(for: $0) } != nil,
+                "Wire search did not return the canonical retrieval-window anchor."
+            )
             let unread = try await executor.execute(invocation(
                 AIHighlightToolName.stageHighlights, stageArguments(id: id)
             ))

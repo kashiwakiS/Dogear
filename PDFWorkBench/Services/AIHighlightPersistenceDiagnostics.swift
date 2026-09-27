@@ -114,7 +114,21 @@ enum AIHighlightPersistenceDiagnostics {
                 groupID: groupID,
                 event: .workflowPrepared(
                     promptVersion: "fixture-v1", instructions: "private instructions",
-                    input: "private question", toolSchemaVersions: [:]
+                    input: "private question", toolSchemaVersions: [:],
+                    lexicalBackend: .memory
+                )
+            )
+            await recorder.record(
+                workflowID: groupID,
+                groupID: groupID,
+                event: .workflowPrepared(
+                    promptVersion: "fixture-v1-small-en",
+                    instructions: "private hybrid instructions",
+                    input: "private hybrid question",
+                    toolSchemaVersions: [:],
+                    retrievalMode: "scheme2",
+                    embeddingPackage: String(repeating: "a", count: 64),
+                    lexicalBackend: nil
                 )
             )
             await recorder.record(
@@ -147,8 +161,8 @@ enum AIHighlightPersistenceDiagnostics {
             let redactedTrace = try String(contentsOf: traceURL, encoding: .utf8)
             check(redactedTrace.contains(groupID.uuidString), "Trace omitted its group ID.")
             check(
-                redactedTrace.contains("Conclusion Evidence"),
-                "Trace omitted the generated workflow title."
+                !redactedTrace.contains("Conclusion Evidence"),
+                "Default trace retained the generated workflow title."
             )
             check(
                 redactedTrace.contains("<redacted>")
@@ -156,6 +170,8 @@ enum AIHighlightPersistenceDiagnostics {
                     && !redactedTrace.contains("private provider payload")
                     && !redactedTrace.contains("private instructions")
                     && !redactedTrace.contains("private question")
+                    && !redactedTrace.contains("private hybrid instructions")
+                    && !redactedTrace.contains("private hybrid question")
                     && !redactedTrace.contains("private answer")
                     && !redactedTrace.contains("private note")
                     && !redactedTrace.contains("private query"),
@@ -169,8 +185,53 @@ enum AIHighlightPersistenceDiagnostics {
                     && record["workflow_id"] as? String == groupID.uuidString
             }, "Workflow trace sequence or workflow identity is inconsistent.")
             let events = records.compactMap { $0["event"] as? [String: Any] }
-            check(events.contains { $0["retrieval_mode"] as? String == "scheme1" },
-                  "Trace omitted the active lexical retrieval mode.")
+            let lexicalPreparation = events.first {
+                $0["kind"] as? String == "workflow_prepared"
+                    && $0["retrieval_mode"] as? String == "scheme1"
+            }
+            check(
+                lexicalPreparation?["retrieval_components"] as? String == "bm25"
+                    && lexicalPreparation?["lexical_backend"] as? String == "memory"
+                    && lexicalPreparation?["retrieval_window_profile"] as? String
+                        == AIRetrievalWindow.profile
+                    && lexicalPreparation?["bm25_configuration_identity"] as? String
+                        == AIBM25Parameters.configurationIdentity
+                    && lexicalPreparation?["bm25_configuration_sha256"] as? String
+                        == AIRetrievalHash.data(Data(AIBM25Parameters.configurationIdentity.utf8))
+                    && lexicalPreparation?["bm25_tokenizer_version"] as? String
+                        == AILexicalTokenizer.currentVersion
+                    && lexicalPreparation?["bm25_index_schema_version"] as? Int
+                        == AIBM25IndexData.currentSchemaVersion,
+                "Trace omitted the active BM25 configuration or backend."
+            )
+            let hybridPreparation = events.first {
+                $0["kind"] as? String == "workflow_prepared"
+                    && $0["retrieval_mode"] as? String == "scheme2"
+            }
+            let frozenFusionIdentity =
+                "dogear.weighted-rrf.v1|dense=3ff0000000000000|lexical=0000000000000000|rrf-k=60|pool-min=24|pool-multiplier=3|pool-cap=100"
+            let frozenFusionHash =
+                "ea4643ad74df1c912f28ea67a88108448e47b1b3acdb1a718419f4b071a4ebe1"
+            check(
+                hybridPreparation?["retrieval_components"] as? String
+                    == "bge-small-en-dense+weighted-rrf"
+                    && hybridPreparation?["lexical_backend"] as? String == "none"
+                    && hybridPreparation?["retrieval_window_profile"] as? String
+                        == AIRetrievalWindow.profile
+                    && hybridPreparation?["bm25_configuration_identity"] == nil
+                    && hybridPreparation?["bm25_configuration_sha256"] == nil
+                    && hybridPreparation?["bm25_tokenizer_version"] == nil
+                    && hybridPreparation?["bm25_index_schema_version"] == nil
+                    && hybridPreparation?["weighted_rrf_configuration_identity"] as? String
+                        == frozenFusionIdentity
+                    && hybridPreparation?["weighted_rrf_configuration_sha256"] as? String
+                        == frozenFusionHash
+                    && AIRetrievalFusionConfiguration.frozen.canonicalIdentity
+                        == frozenFusionIdentity
+                    && AIRetrievalFusionConfiguration.frozen.canonicalHash
+                        == frozenFusionHash,
+                "Trace omitted the frozen weighted-RRF configuration."
+            )
             check(events.contains {
                 $0["kind"] as? String == "answer_completed"
                     && $0["answer_evidence_count"] as? Int == 2

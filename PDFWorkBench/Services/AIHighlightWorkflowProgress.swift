@@ -79,6 +79,9 @@ nonisolated enum AIHighlightFailureKind: Equatable, Sendable {
     case noProgress
     case internalOutcome
     case documentChanged
+    case sourceUnavailable
+    case invalidInput
+    case persistence
     case cancellation
     case unknown
 }
@@ -86,8 +89,42 @@ nonisolated enum AIHighlightFailureKind: Equatable, Sendable {
 nonisolated enum AIHighlightFailureMessage {
     static func kind(of error: Error) -> AIHighlightFailureKind {
         if error is CancellationError { return .cancellation }
+        if let error = error as? ResearchRuntimeError {
+            switch error {
+            case .configureProvider, .imagesUnavailable: return .configuration
+            case .sourceChanged: return .documentChanged
+            case .noSources: return .sourceUnavailable
+            case .sourceOutsideScope, .inputTooLarge: return .invalidInput
+            case .preparationTimedOut, .requestTimedOut: return .timeout
+            case .persistenceFailed: return .persistence
+            }
+        }
+        if let error = error as? DocumentAccessError {
+            switch error {
+            case .sourceChanged: return .documentChanged
+            case .discardFailed: return .persistence
+            default: return .sourceUnavailable
+            }
+        }
+        if let error = error as? ResearchStoreError {
+            switch error {
+            case .invalidAttachment: return .invalidInput
+            case .missingAttachment: return .sourceUnavailable
+            default: return .persistence
+            }
+        }
+        if let error = error as? ResearchCommandError {
+            switch error {
+            case .inactiveRequest: return .cancellation
+            case .outsideSources, .invalidArguments, .unauthorizedNote, .unknownTool: return .invalidInput
+            case .staleNote: return .documentChanged
+            case .viewUnavailable, .userTookOver: return .sourceUnavailable
+            }
+        }
         if error is AIConfigurationError { return .configuration }
-        if error is AIRetrievalError { return .configuration }
+        if let error = error as? AIRetrievalError {
+            return error == .preparationTimedOut ? .timeout : .configuration
+        }
         if let urlError = error as? URLError {
             return urlError.code == .timedOut ? .timeout : .transport
         }
@@ -147,12 +184,43 @@ nonisolated enum AIHighlightFailureMessage {
         case .noProgress: return "no_progress"
         case .internalOutcome: return "internal_outcome"
         case .documentChanged: return "document_changed"
+        case .sourceUnavailable: return "source_unavailable"
+        case .invalidInput: return "invalid_input"
+        case .persistence: return "persistence"
         case .cancellation: return "cancelled"
         case .unknown: return "unknown"
         }
     }
 
     @MainActor static func userMessage(for error: Error) -> String {
+        if let error = error as? ResearchRuntimeError { return error.localizedDescription }
+        if error is CancellationError {
+            return L10n.string("Request canceled. Your draft has been kept.")
+        }
+        if let commandError = error as? ResearchCommandError, case .inactiveRequest = commandError {
+            return L10n.string("Request canceled. Your draft has been kept.")
+        }
+        if let error = error as? DocumentAccessError {
+            switch error {
+            case .sourceChanged: return L10n.string("The PDF changed while the AI request was running. No result was accepted.")
+            case .workingCopyMissing: return L10n.string("The source working copy is missing. Locate it or explicitly discard it before retrying.")
+            case .editorUnavailable: return L10n.string("The PDF editing session is no longer available. Reopen the document before adding annotations.")
+            default: return L10n.string("Dogear could not read the latest source. Your input has been kept.")
+            }
+        }
+        if let error = error as? ResearchStoreError {
+            switch error {
+            case .invalidAttachment:
+                return L10n.string("The image type or size is not supported. Remove it or attach a supported image before sending.")
+            case .missingAttachment:
+                return L10n.string("A research attachment is missing. Attach the image again before sending. Your draft has been kept.")
+            default:
+                return L10n.string("Research could not be saved. Retry saving before sending a request.")
+            }
+        }
+        if error is ResearchCommandError {
+            return L10n.string("The research workspace changed or this operation is unavailable. Your input has been kept.")
+        }
         if let reviewError = error as? AIAnswerEvidenceReviewError {
             switch reviewError {
             case .attemptsExhausted: return L10n.string("The answer still failed evidence review after one correction. No final answer or annotations were accepted.")
@@ -220,6 +288,22 @@ nonisolated enum AIHighlightFailureMessage {
             }
         }
         return L10n.string("The AI request failed. No result was accepted.")
+    }
+
+    /// Optional annotation failure must not invalidate an already accepted
+    /// answer or reuse a whole-request failure's "No result was accepted" text.
+    @MainActor static func optionalHighlightsMessage(for error: Error) -> String {
+        let outcome = L10n.string("The answer is ready, but its optional highlights were not applied.")
+        let reason: String
+        switch kind(of: error) {
+        case .documentChanged:
+            reason = L10n.string("The PDF changed before the optional highlights could be applied.")
+        case .sourceUnavailable:
+            reason = L10n.string("The PDF editing session is no longer available. Reopen the document before adding annotations.")
+        default:
+            reason = L10n.string("Dogear could not validate or apply these highlights. The accepted answer has been kept.")
+        }
+        return outcome + " " + reason
     }
 
     @MainActor private static func message(for error: AIWorkflowFoundationError) -> String {

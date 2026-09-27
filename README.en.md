@@ -25,6 +25,8 @@ surface quiet, makes annotations portable, and keeps page operations reversible.
   document.
 - Continue persistent research conversations across selected PDFs, text excerpts
   and explicitly added images, with clickable references to saved evidence.
+- Ask uses deterministic local BM25 retrieval by default and groups up to three
+  adjacent sentences from the same page and text block into an evidence window.
 - Save research as independent editable notes and export Markdown with image
   attachments. Read PDF, AI and annotations in adjacent panes.
 - Create optional source-linked AI Highlights, organize them by named request
@@ -67,9 +69,18 @@ scripts/build.sh --release --clean --universal
 GitHub Actions runs the same source scan, Debug build, universal Release build,
 and app metadata checks for every push and pull request.
 
-### Optional local semantic retrieval
+### Local evidence retrieval
 
-Ask uses lightweight lexical retrieval by default and needs no local model.
+Ask uses deterministic local BM25 retrieval by default and needs no model
+download. Results expand to an evidence window of up to three adjacent
+sentences within the same page and text block, providing fuller context while
+keeping citations and highlight locations traceable.
+
+When PDF text and segmentation rules have not changed, Dogear reuses derived
+retrieval caches in its private app storage to avoid repeating extraction,
+segmentation and vector calculation. These caches can be safely deleted and
+rebuilt as needed, and they never modify the original PDF.
+
 For English papers, Settings also offers the experimental “Semantic — Small
 EN” mode with a manually imported local BGE Small EN package. Dogear never
 downloads this model automatically. Advanced users can install the pinned
@@ -82,7 +93,8 @@ python3 scripts/prepare-bge-small-en.py --output /path/to/output
 
 The script downloads the pinned upstream model, verifies its weights, and
 creates a `SmallEN` folder. Import that folder with “Import Local Model…” in
-Dogear's AI settings. Lexical retrieval remains available without this setup.
+Dogear's AI settings. The default BM25 retrieval remains available without this
+setup.
 
 ## Shortcuts
 
@@ -112,7 +124,8 @@ and current-page deletion; deletion is disabled for a one-page document.
 ## Privacy and file safety
 
 Dogear has no telemetry and no account requirement. Library data stays on the
-Mac. Cloud AI is optional and off by default. Research conversations, drafts, evidence and notes are stored locally. When
+Mac. Cloud AI is optional and off by default. Research conversations, drafts,
+evidence, notes and rebuildable retrieval caches are stored locally. When
 enabled, AI sends the configured provider the current question, bounded
 conversation background, passages from selected sources and images you
 explicitly add; it does not attach entire PDF files. See

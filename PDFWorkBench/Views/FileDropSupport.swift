@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 import UniformTypeIdentifiers
 
 enum FileDropSupport {

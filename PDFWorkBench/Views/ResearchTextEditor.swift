@@ -207,6 +207,7 @@ struct ResearchSelectableText: NSViewRepresentable {
     var evidence: [ResearchEvidence] = []
     var onViewEvidence: ((ResearchEvidence) -> Void)? = nil
     var onQuote: ((String) -> Void)? = nil
+    @Environment(\.openURL) private var openURL
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -282,11 +283,13 @@ struct ResearchSelectableText: NSViewRepresentable {
 
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             guard let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) else { return true }
-            if url.scheme == "dogear-evidence", let host = url.host, let id = UUID(uuidString: host),
-               let evidence = parent.evidence.first(where: { $0.id == id }) {
-                parent.onViewEvidence?(evidence)
-            } else if ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
-                NSWorkspace.shared.open(url)
+            switch ResearchLinkTarget(url: url) {
+            case .evidence(let id):
+                if let evidence = parent.evidence.first(where: { $0.id == id }) {
+                    parent.onViewEvidence?(evidence)
+                }
+            case .web(let url): parent.openURL(url)
+            case .unsupported: break
             }
             return true
         }

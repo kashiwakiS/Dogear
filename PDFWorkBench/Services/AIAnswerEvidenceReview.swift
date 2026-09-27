@@ -15,6 +15,8 @@ nonisolated enum AIAnswerEvidenceReviewError: LocalizedError {
 }
 
 nonisolated enum AIAnswerEvidenceReview {
+    static let maximumAnswerCharacters = 8_000
+    static let maximumEvidenceCharacters = 24_000
     static let toolName = "submit_evidence_review"
     static let definition = AIToolDefinition(name: toolName,
         description: "Review every factual assertion and annotation note against the supplied evidence. Report contradictions and missing support, never search or modify the PDF.",
@@ -68,6 +70,30 @@ nonisolated enum AIAnswerEvidenceReview {
 }
 
 extension AIHighlightToolExecutor: AITerminalEvidenceReviewing {
+    /// A rejected size check is a local tool result, not a failed paid review.
+    /// The normal runner can return it for correction within its existing
+    /// budgets; nothing is published or approved until a bounded review passes.
+    func reviewSizeRejection(for request: AIPublishAnswerRequest) -> AIPublishAnswerResult? {
+        guard verifiesAnswerEvidence, request.terminate else { return nil }
+        let citedIDs = Set(request.evidenceSegmentIDs)
+        let citedRecords = reviewRecords().filter { citedIDs.contains($0.id) }
+        let answerCharacters = request.resultMarkdown.count
+        let evidenceCharacters = citedRecords.reduce(0) { $0 + $1.text.count }
+        guard answerCharacters > AIAnswerEvidenceReview.maximumAnswerCharacters
+                || evidenceCharacters > AIAnswerEvidenceReview.maximumEvidenceCharacters else { return nil }
+        var result = publicationFailure(.evidenceReviewSizeExceeded)
+        result.reviewIssues = [
+            "result_markdown has \(answerCharacters) characters; maximum \(AIAnswerEvidenceReview.maximumAnswerCharacters). Distinct cited source passages total \(evidenceCharacters) characters; maximum \(AIAnswerEvidenceReview.maximumEvidenceCharacters). No answer was published and no evidence-review attempt was consumed.",
+            "Compress the answer and keep only representative evidence IDs supporting the remaining claims. Do not alter or truncate source text. If necessary narrow the answer and use partial or notFound. Every staged highlight must still be covered; change the complete optional draft first if needed, inspect the new revision, then publish_answer alone with terminate true. All corrections and the mandatory independent review share the remaining workflow budgets."
+        ]
+        if evidenceCharacters > AIAnswerEvidenceReview.maximumEvidenceCharacters {
+            result.reviewIssues.append("Cited passage sizes: " + citedRecords.map {
+                "\($0.id.description)=\($0.text.count)"
+            }.joined(separator: ", "))
+        }
+        return result
+    }
+
     func reviewRequest(for invocation: AIToolInvocation) throws -> AIToolWorkflowProviderRequest? {
         guard verifiesAnswerEvidence,
               case .publishAnswer(let request) = try AIHighlightToolCodec().decode(invocation),
@@ -80,7 +106,10 @@ extension AIHighlightToolExecutor: AITerminalEvidenceReviewing {
         var passages: [[String: Any]] = []
         var characters = 0
         for record in ordered {
-            if characters + record.text.count > 24_000 {
+            if characters + record.text.count > AIAnswerEvidenceReview.maximumEvidenceCharacters {
+                // publish(validateOnly:) already returned repairable size
+                // feedback for oversized cited evidence. Retain a fail-closed
+                // invariant here; never silently omit a cited passage.
                 if cited.contains(record.id) { throw AIAnswerEvidenceReviewError.evidenceTooLarge }
                 continue
             }
@@ -88,7 +117,9 @@ extension AIHighlightToolExecutor: AITerminalEvidenceReviewing {
             passages.append(["id": record.id.description, "text": record.text,
                 "source": registry.sources.first { $0.documentNumber == record.id.document }?.displayName ?? "PDF"])
         }
-        guard request.resultMarkdown.count <= 8_000 else { throw AIAnswerEvidenceReviewError.evidenceTooLarge }
+        guard request.resultMarkdown.count <= AIAnswerEvidenceReview.maximumAnswerCharacters else {
+            throw AIAnswerEvidenceReviewError.evidenceTooLarge
+        }
         let notes = currentDraft().items.compactMap { item -> [String: Any]? in
             guard let note = item.candidate.note else { return nil }
             return ["note": note, "evidence_ids": item.candidate.segmentIDs.map(\.description)]

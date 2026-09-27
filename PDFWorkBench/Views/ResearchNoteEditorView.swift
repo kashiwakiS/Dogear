@@ -41,14 +41,12 @@ struct ResearchNoteEditorView: View {
                     if !note.suggestions.isEmpty { suggestions(note) }
                     if preview {
                         ScrollView {
-                            Text(.init(note.body)).textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(20)
+                            contentPreview(note.content, provenance: note.provenance, onQuote: quote)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
                         }
                     } else {
-                        ResearchTextEditor(text: Binding(get: { self.note?.body ?? "" }, set: { body in edit { $0.body = body } }),
-                            isEditable: ownsEditor, placeholder: L10n.string("Write your research note in Markdown…"),
-                            onQuote: quote, onEditingBoundary: { store.endNoteEditBurst(noteID: noteID) })
-                            .id(noteID)
+                        contentEditor(note)
                     }
                     if showSources && !note.provenance.flatMap(\.evidence).isEmpty {
                         Divider()
@@ -135,7 +133,9 @@ struct ResearchNoteEditorView: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(note.suggestions) { suggestion in
                 DisclosureGroup {
-                    ScrollView { ResearchSelectableText(text: suggestion.body) }.frame(maxHeight: 220)
+                    ScrollView {
+                        contentPreview(suggestion.content, provenance: suggestion.provenance)
+                    }.frame(maxHeight: 220)
                     HStack {
                         if suggestion.baseRevision != note.revision {
                             Text("The note changed since this suggestion. Create a new suggestion for the latest revision.")
@@ -160,7 +160,8 @@ struct ResearchNoteEditorView: View {
             if let note, !note.revisions.isEmpty {
                 List(note.revisions.reversed()) { revision in
                     DisclosureGroup {
-                        ResearchSelectableText(text: revision.body, onQuote: { text in quote(text, revision: revision.number) })
+                        contentPreview(revision.content, provenance: revision.provenance,
+                            onQuote: { text in quote(text, revision: revision.number) })
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Revision \(revision.number) · \(revision.title)")
@@ -174,14 +175,67 @@ struct ResearchNoteEditorView: View {
         }.padding(20).frame(width: 580, height: 450)
     }
 
+    @ViewBuilder
+    private func contentEditor(_ note: ResearchNote) -> some View {
+        switch note.content {
+        case .markdown:
+            ResearchTextEditor(
+                text: Binding(
+                    get: {
+                        switch self.note?.content ?? note.content {
+                        case .markdown(let markdown): return markdown
+                        }
+                    },
+                    set: { markdown in edit { $0.content = .markdown(markdown) } }
+                ),
+                isEditable: ownsEditor,
+                placeholder: L10n.string("Write your research note in Markdown…"),
+                onQuote: quote,
+                onEditingBoundary: { store.endNoteEditBurst(noteID: noteID) }
+            )
+            .id(noteID)
+        }
+    }
+
+    private func contentPreview(
+        _ content: ResearchNoteContent,
+        provenance: [ResearchNoteProvenance],
+        onQuote: ((String) -> Void)? = nil
+    ) -> some View {
+        ResearchNoteContentPreview(
+            content: content,
+            sources: citationSources(for: provenance),
+            evidence: uniqueEvidence(provenance),
+            onViewEvidence: onViewEvidence,
+            onQuote: onQuote
+        )
+    }
+
+    private func citationSources(for provenance: [ResearchNoteProvenance]) -> [ResearchSourceSnapshot] {
+        // D001-style citations refer to a frozen request catalog. Combining
+        // evidence or live Group members would silently change their meaning.
+        let catalogs = provenance.compactMap { item -> [ResearchSourceSnapshot]? in
+            guard let sessionID = item.sessionID, let messageID = item.messageID,
+                  let message = store.session(id: sessionID)?.messages.first(where: { $0.id == messageID })
+            else { return nil }
+            return message.sourceSnapshot.filter { $0.fingerprint != "pending" }
+        }
+        guard catalogs.count == provenance.count, let catalog = catalogs.first,
+              catalogs.allSatisfy({ $0 == catalog }) else { return [] }
+        return catalog
+    }
+
     private func edit(_ mutation: (inout ResearchNote) -> Void) {
         guard ownsEditor, var note else { return }
         mutation(&note)
         _ = store.updateNote(note, coalescingEdits: true)
     }
     private func uniqueEvidence(_ note: ResearchNote) -> [ResearchEvidence] {
+        uniqueEvidence(note.provenance)
+    }
+    private func uniqueEvidence(_ provenance: [ResearchNoteProvenance]) -> [ResearchEvidence] {
         var seen = Set<UUID>()
-        return note.provenance.flatMap(\.evidence).filter { seen.insert($0.id).inserted }
+        return provenance.flatMap(\.evidence).filter { seen.insert($0.id).inserted }
     }
     private func quote(_ text: String) { quote(text, revision: note?.revision ?? 1) }
     private func quote(_ text: String, revision: Int) {
@@ -198,6 +252,24 @@ struct ResearchNoteEditorView: View {
     private func exportNote() {
         do { try ResearchExportUI.exportNote(id: noteID, store: store) }
         catch { self.error = error.localizedDescription }
+    }
+}
+
+/// A renderer has no editor ownership or window lifecycle. Multiple previews
+/// can show one note while its existing store continues to own edits/revisions.
+struct ResearchNoteContentPreview: View {
+    let content: ResearchNoteContent
+    var sources: [ResearchSourceSnapshot] = []
+    var evidence: [ResearchEvidence] = []
+    var onViewEvidence: ((ResearchEvidence) -> Void)? = nil
+    var onQuote: ((String) -> Void)? = nil
+
+    var body: some View {
+        switch content {
+        case .markdown(let markdown):
+            ResearchSelectableText(text: markdown, sources: sources, evidence: evidence,
+                onViewEvidence: onViewEvidence, onQuote: onQuote)
+        }
     }
 }
 

@@ -2,7 +2,6 @@
 //  PDFWorkBenchApp.swift
 //  PDFWorkBench
 //
-//  Created by kashiwakiS on 12/6/2026.
 //
 
 import SwiftUI
@@ -11,16 +10,21 @@ import Combine
 
 struct PDFWorkBenchApp: App {
     @NSApplicationDelegateAdaptor(PDFWorkBenchAppDelegate.self) private var appDelegate
-    @StateObject private var libraryStore = LibraryStore()
+    @StateObject private var libraryStore: LibraryStore
+    private let libraryLifecycle: LibraryMacLifecycleAdapter
     @StateObject private var languageStore = AppLanguageStore.shared
+
+    init() {
+        let library = LibraryStore()
+        _libraryStore = StateObject(wrappedValue: library)
+        libraryLifecycle = LibraryMacLifecycleAdapter(library: library)
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView(
-                libraryStore: libraryStore,
-                initialGroupID: libraryStore.initialWindowGroupID,
-                initialSessionID: libraryStore.initialWindowSessionID
-            )
+            GroupWorkspaceSceneRoot(libraryStore: libraryStore,
+                initialWorkspace: GroupWindowPayload(sessionID: libraryStore.initialWindowSessionID,
+                    groupID: libraryStore.initialWindowGroupID))
                 .environment(\.locale, languageStore.locale)
         }
         .defaultSize(width: 1080, height: 760)
@@ -33,12 +37,10 @@ struct PDFWorkBenchApp: App {
         }
 
         WindowGroup(L10n.string("Group"), for: GroupWindowPayload.self) { payload in
-            ContentView(
-                libraryStore: libraryStore,
-                initialGroupID: payload.wrappedValue?.groupID,
-                initialSessionID: payload.wrappedValue?.sessionID
-            )
-            .environment(\.locale, languageStore.locale)
+            if let payload = payload.wrappedValue {
+                GroupWorkspaceSceneRoot(libraryStore: libraryStore, initialWorkspace: payload)
+                    .environment(\.locale, languageStore.locale)
+            }
         }
         .defaultSize(width: 1080, height: 760)
         .windowResizability(.contentMinSize)
@@ -53,6 +55,12 @@ struct PDFWorkBenchApp: App {
             )
             .environment(\.locale, languageStore.locale)
         }
+
+        Window(L10n.string("Working Copies"), id: "working-copies") {
+            WorkingCopiesWindow(library: libraryStore)
+                .environment(\.locale, languageStore.locale)
+        }
+        .defaultSize(width: 720, height: 540)
 
         Window(L10n.string("Research"), id: "research-library") {
             ResearchLibraryWindow(library: libraryStore)
@@ -80,10 +88,114 @@ struct PDFWorkBenchApp: App {
     }
 }
 
+private struct WorkspaceOpenWindowKey: EnvironmentKey {
+    static let defaultValue: OpenWindowAction? = nil
+}
+
+extension EnvironmentValues {
+    var workspaceOpenWindow: OpenWindowAction? {
+        get { self[WorkspaceOpenWindowKey.self] }
+        set { self[WorkspaceOpenWindowKey.self] = newValue }
+    }
+}
+
+/// Inject scene actions explicitly because retained workspaces have independent hosting roots.
+private struct GroupWorkspaceSceneRoot: View {
+    @ObservedObject var libraryStore: LibraryStore
+    let initialWorkspace: GroupWindowPayload
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        GroupWorkspaceHostView(initialWorkspace: initialWorkspace) { payload, context in
+            AnyView(GroupWorkspaceContentRoot(libraryStore: libraryStore, payload: payload,
+                workspace: context).environment(\.workspaceOpenWindow, openWindow))
+        }
+        .frame(minWidth: 520, minHeight: 680)
+        .onOpenURL { ExternalPDFOpenCoordinator.shared.openURLs([$0]) }
+    }
+}
+
+private struct GroupWorkspaceContentRoot: View {
+    let libraryStore: LibraryStore
+    let payload: GroupWindowPayload
+    let workspace: GroupWorkspaceContext
+    @ObservedObject private var language = AppLanguageStore.shared
+
+    var body: some View {
+        let groupID = libraryStore.group(withID: payload.groupID)?.id ?? LibraryGroup.ungroupedID
+        ContentView(libraryStore: libraryStore, initialGroupID: groupID,
+            initialSessionID: payload.sessionID, workspaceContext: workspace)
+            .environment(\.locale, language.locale)
+            .onAppear { workspace.updateGroupID(groupID) }
+    }
+}
+
+/// SwiftUI's scene-focused values do not cross independent NSHostingController roots.
+/// Keep commands attached to the active workspace of the actual key window.
+@MainActor
+final class WorkspaceCommandRouter: ObservableObject {
+    static let shared = WorkspaceCommandRouter()
+    @Published private var revision = 0
+    private weak var workspace: GroupWorkspaceContext?
+    private var currentHandlers: PDFWorkbenchCommandHandlers?
+    private var observers: [NSObjectProtocol] = []
+
+    private init() {
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.revision += 1 }
+            })
+        }
+    }
+
+    var activeWorkspace: GroupWorkspaceContext? {
+        guard let workspace, workspace.isActive, workspace.window?.isKeyWindow == true,
+              workspace.window?.attachedSheet == nil else { return nil }
+        return workspace
+    }
+    var commandWindow: NSWindow? {
+        guard let window = NSApp.keyWindow, window.attachedSheet == nil, window.sheetParent == nil else { return nil }
+        return window
+    }
+    var handlers: PDFWorkbenchCommandHandlers? { activeWorkspace == nil ? nil : currentHandlers }
+    func activate(workspace: GroupWorkspaceContext, handlers: PDFWorkbenchCommandHandlers) {
+        guard workspace.isActive, workspace.window?.isKeyWindow == true else { return }
+        self.workspace = workspace
+        currentHandlers = handlers
+        revision += 1
+    }
+    func deactivate(workspaceID: UUID) {
+        guard workspace?.workspaceID == workspaceID else { return }
+        workspace = nil
+        currentHandlers = nil
+        revision += 1
+    }
+}
+
 @main
 enum DogearEntryPoint {
     @MainActor static func main() {
-        if CommandLine.arguments.contains("--run-ai-diagnostics") {
+        if CommandLine.arguments.contains("--run-research-acceptance") {
+            // Explicit opt-in only; never initialize the user's Library or windows.
+            Task { @MainActor in
+                exit(await ResearchLiveAcceptance.run(arguments: CommandLine.arguments))
+            }
+            RunLoop.main.run()
+        } else if CommandLine.arguments.contains("--run-native-ui-diagnostics") {
+            // Foreground native focus checks run separately from offline fixtures.
+            // Neither entry constructs the user's SwiftUI scenes or Library.
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            application.finishLaunching()
+            Task { @MainActor in
+                let result = await NativeTabPreviewInteractionDiagnostics.run()
+                for failure in result.failures { print("FAIL: \(failure)") }
+                print("NATIVE UI DIAGNOSTICS: \(result.checks) checks, \(result.failures.count) failures")
+                exit(result.failures.isEmpty ? EXIT_SUCCESS : EXIT_FAILURE)
+            }
+            application.run()
+        } else if CommandLine.arguments.contains("--run-ai-diagnostics") {
             // Enter before constructing the SwiftUI app or its persisted Library.
             Task { @MainActor in
                 let succeeded = await AIWorkflowDiagnosticSuite.run()
@@ -98,6 +210,10 @@ enum DogearEntryPoint {
 
 @MainActor
 final class PDFWorkBenchAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLanguageStore.shared.refreshMenuBarLocalization()
     }
@@ -117,6 +233,7 @@ final class PDFWorkBenchAppDelegate: NSObject, NSApplicationDelegate {
             }
             return .terminateCancel
         }
+        GroupWorkspaceHostRegistry.shared.prepareForApplicationTermination()
         return .terminateNow
     }
 
@@ -174,6 +291,7 @@ extension URL {
 struct PDFWorkbenchCommandHandlers {
     let openPDF: () -> Void
     let savePDF: () -> Void
+    let showFileInfo: () -> Void
     let createLibraryGroup: () -> Void
     let toggleLibraryNavigator: () -> Void
     let toggleAnnotationSidebar: () -> Void
@@ -224,7 +342,8 @@ extension FocusedValues {
 
 private struct PDFWorkBenchCommands: Commands {
     @Environment(\.openWindow) private var openWindow
-    @FocusedValue(\.pdfWorkbenchCommandHandlers) private var commandHandlers
+    @ObservedObject private var workspaceCommands = WorkspaceCommandRouter.shared
+    private var commandHandlers: PDFWorkbenchCommandHandlers? { workspaceCommands.handlers }
     @ObservedObject var languageStore: AppLanguageStore
 
     var body: some Commands {
@@ -236,6 +355,35 @@ private struct PDFWorkBenchCommands: Commands {
             }
             .keyboardShortcut("o")
             .disabled(commandHandlers == nil)
+
+            Button(L10n.string(workspaceCommands.activeWorkspace == nil ? "Close Window" : "Close Workspace")) {
+                if let workspace = workspaceCommands.activeWorkspace { workspace.close() }
+                else { workspaceCommands.commandWindow?.performClose(nil) }
+            }
+                .keyboardShortcut("w")
+                .disabled(workspaceCommands.commandWindow == nil)
+        }
+
+        CommandGroup(after: .windowList) {
+            Button(workspaceCommands.commandWindow?.styleMask.contains(.fullScreen) == true
+                   ? L10n.string("Exit Full Screen") : L10n.string("Enter Full Screen")) {
+                workspaceCommands.commandWindow?.toggleFullScreen(nil)
+            }
+            .keyboardShortcut("f", modifiers: [.command, .control])
+            .disabled(workspaceCommands.commandWindow == nil)
+            Divider()
+            Button(L10n.string("Previous Workspace")) { workspaceCommands.activeWorkspace?.selectNextWorkspace(backward: true) }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+                .disabled(workspaceCommands.activeWorkspace == nil)
+            Button(L10n.string("Next Workspace")) { workspaceCommands.activeWorkspace?.selectNextWorkspace() }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+                .disabled(workspaceCommands.activeWorkspace == nil)
+        }
+
+        CommandGroup(after: .newItem) {
+            Button(L10n.string("File Info…")) { commandHandlers?.showFileInfo() }
+                .disabled(!canUseDocumentCommands)
+            Button(L10n.string("Working Copies…")) { openWindow(id: "working-copies") }
         }
 
         CommandGroup(replacing: .saveItem) {
@@ -449,5 +597,21 @@ private struct PDFWorkBenchCommands: Commands {
         }
 
         return L10n.string("Show Annotation Sidebar")
+    }
+}
+
+private struct WorkingCopiesWindow: View {
+    @ObservedObject var library: LibraryStore
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        WorkingCopiesView(library: library, onOpen: { file in
+            let original = library.resolvedURL(for: file)
+            if DocumentAccessCoordinator.shared.activateExistingEditor(fileID: file.id)
+                || DocumentAccessCoordinator.shared.activateExistingEditor(for: original) { return }
+            let groupID = library.groups(containing: file).first?.id ?? LibraryGroup.ungroupedID
+            let sessionID = UUID()
+            library.recordOpenedFile(file.id, in: groupID, sessionID: sessionID)
+            openWindow(value: GroupWindowPayload(sessionID: sessionID, groupID: groupID))
+        }, onReveal: { NSWorkspace.shared.activateFileViewerSelecting([$0]) })
     }
 }

@@ -1,6 +1,8 @@
 import Foundation
 
-struct LibraryJSONStore {
+// Configuration is immutable. Only FileManager's thread-safe file/URL APIs are
+// used (no delegate is installed); LibraryStateWriter serializes all writes.
+nonisolated struct LibraryJSONStore: @unchecked Sendable {
     enum StoreError: Error {
         case missingApplicationSupportDirectory
     }

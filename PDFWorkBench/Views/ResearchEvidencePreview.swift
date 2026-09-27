@@ -21,8 +21,8 @@ struct ResearchEvidencePreview: View {
             }
             if let attachmentID = evidence.attachmentID,
                let url = ResearchStore.shared.attachmentURL(id: attachmentID),
-               let image = NSImage(contentsOf: url) {
-                Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 240)
+               let image = LocalImageDecoding.stillImage(at: url) {
+                Image(decorative: image, scale: 1).resizable().scaledToFit().frame(maxHeight: 240)
             }
             Text(evidence.excerpt).font(.callout).textSelection(.enabled).lineLimit(6)
             if let error {
@@ -125,7 +125,6 @@ final class ReadOnlyEvidencePDFView: PDFView {
     }
     @objc private func copyEvidence(_ sender: Any?) {
         guard let text = currentSelection?.string else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        PlatformClipboard.copyText(text)
     }
 }

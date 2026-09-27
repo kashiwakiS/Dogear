@@ -23,10 +23,39 @@ enum ReaderSidebarSection: CaseIterable, Hashable {
 struct ReaderSidebarLayout {
     static let collapsedSectionHeight: CGFloat = 36
     static let minimumExpandedSectionHeight: CGFloat = 240
+    static let dogearRowHeight: CGFloat = 30
+    static let dogearRowSpacing: CGFloat = 4
+    static let maximumVisibleDogearRows = 8
+    private static let expandedContentInsets: CGFloat = 16
+    private static let emptyDogearContentHeight: CGFloat = 44
 
     let availableHeight: CGFloat
     let expandedSections: Set<ReaderSidebarSection>
     var visibleSections: Set<ReaderSidebarSection> = Set(ReaderSidebarSection.allCases)
+    var dogearCount = 0
+
+    private var expandedVisibleSections: Set<ReaderSidebarSection> {
+        expandedSections.intersection(visibleSections)
+    }
+
+    private var minimumDogearHeight: CGFloat {
+        Self.collapsedSectionHeight + Self.expandedContentInsets + Self.dogearRowHeight
+    }
+
+    var preferredDogearHeight: CGFloat {
+        let rows = min(max(0, dogearCount), Self.maximumVisibleDogearRows)
+        let contentHeight = rows == 0 ? Self.emptyDogearContentHeight
+            : CGFloat(rows) * Self.dogearRowHeight + CGFloat(rows - 1) * Self.dogearRowSpacing
+        return Self.collapsedSectionHeight + Self.expandedContentInsets + contentHeight
+    }
+
+    var fitsExpandedSections: Bool {
+        let requiredHeight = visibleSections.reduce(CGFloat(0)) { total, section in
+            guard expandedVisibleSections.contains(section) else { return total + Self.collapsedSectionHeight }
+            return total + (section == .dogears ? minimumDogearHeight : Self.minimumExpandedSectionHeight)
+        }
+        return requiredHeight <= availableHeight
+    }
 
     static func maximumExpandedSectionCount(for availableHeight: CGFloat, sectionCount: Int = ReaderSidebarSection.allCases.count) -> Int {
         for expandedCount in stride(from: sectionCount, through: 1, by: -1) {
@@ -47,13 +76,24 @@ struct ReaderSidebarLayout {
             return Self.collapsedSectionHeight
         }
 
-        let expandedCount = max(1, expandedSections.intersection(visibleSections).count)
+        let expandedCount = max(1, expandedVisibleSections.count)
         let collapsedCount = visibleSections.count - expandedCount
         let availableExpandedHeight = max(
             Self.collapsedSectionHeight,
             availableHeight - CGFloat(collapsedCount) * Self.collapsedSectionHeight
         )
-        return availableExpandedHeight / CGFloat(expandedCount)
+        guard expandedVisibleSections.contains(.dogears) else {
+            return availableExpandedHeight / CGFloat(expandedCount)
+        }
+
+        // A short index takes only its content height. Longer indexes scroll
+        // after eight rows, or sooner when the other open panes need space.
+        let flexibleCount = expandedCount - 1
+        let reservedHeight = CGFloat(flexibleCount) * Self.minimumExpandedSectionHeight
+        let dogearHeight = min(preferredDogearHeight, availableExpandedHeight,
+            max(minimumDogearHeight, availableExpandedHeight - reservedHeight))
+        if section == .dogears { return dogearHeight }
+        return max(0, availableExpandedHeight - dogearHeight) / CGFloat(max(1, flexibleCount))
     }
 }
 

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import ImageIO
 import PDFKit
 
 struct ResearchRequestProgress: Equatable {
@@ -19,7 +20,7 @@ struct ResearchRequestProgress: Equatable {
 
 enum ResearchRuntimeError: LocalizedError {
     case noSources, configureProvider, sourceOutsideScope, sourceChanged(String), imagesUnavailable
-    case inputTooLarge, preparationTimedOut, persistenceFailed
+    case inputTooLarge, preparationTimedOut, requestTimedOut, persistenceFailed
 
     var errorDescription: String? {
         switch self {
@@ -30,6 +31,7 @@ enum ResearchRuntimeError: LocalizedError {
         case .imagesUnavailable: return L10n.string("Image support is not confirmed for this provider and model. Your attachments have been kept.")
         case .inputTooLarge: return L10n.string("The input exceeds the request limits. Remove some passages or images and try again.")
         case .preparationTimedOut: return L10n.string("Source preparation reached its time limit. Narrow the sources and try again.")
+        case .requestTimedOut: return L10n.string("The research request reached its time limit. Your input has been kept.")
         case .persistenceFailed: return L10n.string("Research could not be saved. Retry saving before sending a request.")
         }
     }
@@ -47,12 +49,39 @@ final class ResearchRuntime: ObservableObject {
     private let storage: ResearchStore
     private let configuration: AIConfigurationStore
     private let service: AIHighlightWorkflowService
+    private let trace: AIHighlightTraceRecorder
+    private let commands: ResearchCommandService
+    private let requestTimeout: Duration
+    private let providerResolver: ((AIProviderRequestTicket) async throws -> any AIToolCallingProvider)?
+    private let retrievalSelection: AIRetrievalSelection?
+    private var requestTraces: [UUID: RequestTrace] = [:]
+
+    /// MainActor ownership claims the terminal result synchronously. The start
+    /// task orders terminal logging even when Cancel immediately follows Send.
+    private final class RequestTrace {
+        let requestID: UUID
+        let started: Task<Void, Never>
+        init(requestID: UUID, started: Task<Void, Never>) {
+            self.requestID = requestID
+            self.started = started
+        }
+    }
 
     init(storage: ResearchStore? = nil, configuration: AIConfigurationStore? = nil,
-         service: AIHighlightWorkflowService? = nil) {
+         service: AIHighlightWorkflowService? = nil,
+         traceRecorder: AIHighlightTraceRecorder = .shared,
+         commands: ResearchCommandService? = nil,
+         requestTimeout: Duration = .seconds(420),
+         retrievalSelection: AIRetrievalSelection? = nil,
+         providerResolver: ((AIProviderRequestTicket) async throws -> any AIToolCallingProvider)? = nil) {
         self.storage = storage ?? .shared
         self.configuration = configuration ?? .shared
-        self.service = service ?? AIHighlightWorkflowService()
+        self.service = service ?? AIHighlightWorkflowService(traceRecorder: traceRecorder)
+        self.trace = traceRecorder
+        self.commands = commands ?? .shared
+        self.requestTimeout = requestTimeout
+        self.providerResolver = providerResolver
+        self.retrievalSelection = retrievalSelection
     }
 
     var cloudAvailable: Bool {
@@ -65,12 +94,9 @@ final class ResearchRuntime: ObservableObject {
     func setError(_ error: String?, sessionID: UUID) { errors[sessionID] = error }
 
     func cancel(sessionID: UUID) {
-        guard let progress = jobs.removeValue(forKey: sessionID) else { return }
-        tasks.removeValue(forKey: sessionID)?.cancel()
-        timeoutTasks.removeValue(forKey: sessionID)?.cancel()
-        ResearchCommandService.shared.cancel(requestID: progress.requestID)
-        storage.finishRequest(sessionID: sessionID, requestID: progress.requestID,
-            status: .cancelled, errorMessage: L10n.string("Request canceled. Your draft has been kept."))
+        guard let progress = jobs[sessionID] else { return }
+        finishFailure(CancellationError(), sessionID: sessionID, requestID: progress.requestID,
+                      cause: "user_cancelled", cancelTask: true)
     }
 
     func shutdown() {
@@ -110,7 +136,7 @@ final class ResearchRuntime: ObservableObject {
                   imageIDs.count <= ResearchInputLimits.maximumImages else { throw ResearchRuntimeError.inputTooLarge }
             let images = try loadImages(ids: imageIDs)
             let ticket = configuration.captureProviderRequest()
-            let retrieval = local ? AIRetrievalSelection.lexical : try AIRetrievalSelection.capture(from: .standard)
+            let retrieval = local ? AIRetrievalSelection.lexical : try retrievalSelection ?? AIRetrievalSelection.capture(from: .standard)
             let resolved = sourceIDs.map { id in
                 library.allFiles.first(where: { $0.id == id }).map { file in
                     CapturedFile(file: file, url: library.resolvedURL(for: file))
@@ -119,39 +145,39 @@ final class ResearchRuntime: ObservableObject {
             let initialSources = zip(sourceIDs, resolved).map { id, value in
                 ResearchSourceSnapshot(fileID: id, displayName: value?.file.displayName ?? L10n.string("Unavailable source"), fingerprint: "pending")
             }
+            let history = ResearchHistorySelection.select(from: session)
+            let contextSummary = ResearchContextSummary.capture(session: session, history: history,
+                imageCount: images.count, excludedImageCount: textOnly ? draft.attachmentIDs.count : 0,
+                isLocalOutline: local)
             guard let requestID = storage.beginRequest(sessionID: sessionID, question: question,
-                sourceSnapshot: initialSources, input: sentDraft) else { throw ResearchRuntimeError.persistenceFailed }
-            let commandExecutor = local ? nil : ResearchCommandService.shared.makeExecutor(requestID: requestID,
+                sourceSnapshot: initialSources, input: sentDraft,
+                contextSummary: contextSummary) else { throw ResearchRuntimeError.persistenceFailed }
+            let commandExecutor = local ? nil : commands.makeExecutor(requestID: requestID,
                 sessionID: sessionID, viewID: viewID, allowedSources: initialSources,
                 question: question, targetNoteID: draft.blocks.last(where: { $0.kind == .note })?.evidence?.noteID)
             let permit = mainStore?.captureWritePermit(requestID: requestID)
             let mainFileID = mainStore.flatMap { library.file(for: $0.selectedPDFURL)?.id }
-            let history = ResearchHistorySelection.select(from: session)
             jobs[sessionID] = ResearchRequestProgress(requestID: requestID,
                 phase: L10n.string("Preparing research sources…"), totalSources: sourceIDs.count)
-            timeoutTasks[sessionID] = Task { [weak self] in
-                do { try await Task.sleep(for: .seconds(420)) } catch { return }
-                guard let self, self.jobs[sessionID]?.requestID == requestID else { return }
-                self.tasks.removeValue(forKey: sessionID)?.cancel()
-                ResearchCommandService.shared.cancel(requestID: requestID)
-                let message = L10n.string("The research request reached its time limit. Your input has been kept.")
-                self.errors[sessionID] = message
-                self.storage.finishRequest(sessionID: sessionID, requestID: requestID, status: .failed, errorMessage: message)
-                self.jobs.removeValue(forKey: sessionID)
-                self.timeoutTasks.removeValue(forKey: sessionID)
-            }
-            tasks[sessionID] = Task {
-                let trace = AIHighlightTraceRecorder.shared
+            let started = Task {
                 await trace.record(workflowID: requestID, groupID: requestID,
                     event: .jobStarted(requestKind: question.isEmpty ? .overview : .question,
                         question: question.isEmpty ? nil : question,
                         providerName: local ? "Local outline" : ticket.configuration.name,
                         modelName: local ? "" : ticket.configuration.model))
+            }
+            requestTraces[sessionID] = RequestTrace(requestID: requestID, started: started)
+            timeoutTasks[sessionID] = Task { [weak self] in
+                do { try await Task.sleep(for: self?.requestTimeout ?? .seconds(420)) } catch { return }
+                guard let self, self.jobs[sessionID]?.requestID == requestID else { return }
+                self.finishFailure(ResearchRuntimeError.requestTimedOut, sessionID: sessionID,
+                                   requestID: requestID, cause: "request_timeout", cancelTask: true)
+            }
+            tasks[sessionID] = Task {
+                await started.value
+                var requestContext = contextSummary
                 defer {
-                    ResearchCommandService.shared.end(requestID: requestID)
-                    if self.jobs[sessionID]?.requestID == requestID || self.jobs[sessionID] == nil {
-                        self.timeoutTasks.removeValue(forKey: sessionID)?.cancel()
-                    }
+                    commands.end(requestID: requestID)
                 }
                 do {
                     let deadline = ContinuousClock.now.advanced(by: .seconds(180))
@@ -161,26 +187,59 @@ final class ResearchRuntime: ObservableObject {
                         try ensureActive(sessionID, requestID)
                         if ContinuousClock.now >= deadline {
                             skipped += initialSources[index...].map { $0.displayName + ": " + L10n.string("Preparation time limit") }
+                            requestContext.skippedSources += initialSources[index...].map {
+                                ResearchSourceOmission(fileID: $0.fileID, reason: L10n.string("Preparation time limit"))
+                            }
                             break
                         }
                         guard let file else {
                             skipped.append(initialSources[index].displayName + ": " + L10n.string("Removed from Library"))
+                            requestContext.skippedSources.append(ResearchSourceOmission(fileID: initialSources[index].fileID,
+                                reason: L10n.string("Removed from Library")))
                             continue
                         }
                         do {
-                            let read = try DocumentAccessCoordinator.shared.readSnapshot(fileID: file.file.id,
-                                originalURL: file.url, workingCopyURL: file.file.workingCopyURL)
-                            let snapshot = try await NativePDFTextSnapshotBuilder(document: read.document).makeTextSnapshotCooperatively()
+                            let read: PDFSourceReadSnapshot
+                            let snapshot: AIHighlightTextSnapshot
+                            let preparedRecords: [AISegmentRecord]?
+                            if local {
+                                read = try DocumentAccessCoordinator.shared.readSnapshot(
+                                    fileID: file.file.id,
+                                    originalURL: file.url,
+                                    workingCopyURL: file.file.workingCopyURL
+                                )
+                                snapshot = try await NativePDFTextSnapshotBuilder(document: read.document)
+                                    .makeTextSnapshotCooperatively()
+                                preparedRecords = nil
+                            } else {
+                                let prepared = try await AIRetrievalSourcePreparer().prepare(
+                                    fileID: file.file.id,
+                                    originalURL: file.url,
+                                    workingCopyURL: file.file.workingCopyURL
+                                )
+                                read = prepared.read
+                                snapshot = prepared.snapshot
+                                preparedRecords = prepared.records
+                            }
                             try ensureActive(sessionID, requestID)
                             let hasRegionImage = !textOnly && draft.blocks.contains { $0.kind == .image && $0.evidence?.source?.fileID == file.file.id }
                             if !local && !hasRegionImage && snapshot.pages.allSatisfy({ $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
                                 skipped.append(file.file.displayName + ": " + L10n.string("No native text; OCR is not enabled"))
+                                requestContext.skippedSources.append(ResearchSourceOmission(fileID: file.file.id,
+                                    reason: L10n.string("No native text; OCR is not enabled")))
                                 continue
                             }
-                            sources.append(PreparedSource(file: file, read: read, snapshot: snapshot))
+                            sources.append(PreparedSource(
+                                file: file,
+                                read: read,
+                                snapshot: snapshot,
+                                preparedRecords: preparedRecords
+                            ))
                         } catch is CancellationError { throw CancellationError() }
                         catch {
-                            skipped.append(file.file.displayName + ": " + error.localizedDescription)
+                            skipped.append(file.file.displayName + ": " + AIHighlightFailureMessage.userMessage(for: error))
+                            requestContext.skippedSources.append(ResearchSourceOmission(fileID: file.file.id,
+                                reason: AIHighlightFailureMessage.userMessage(for: error)))
                         }
                         jobs[sessionID]?.preparedSources = sources.count
                         jobs[sessionID]?.skippedSources = skipped
@@ -190,10 +249,12 @@ final class ResearchRuntime: ObservableObject {
                     try validateInputVersions(draft: sentDraft, sources: sources)
                     let preparedByID = Dictionary(uniqueKeysWithValues: sources.map { ($0.file.file.id, $0.researchSource) })
                     let persistedSources = initialSources.map { preparedByID[$0.fileID] ?? $0 }
+                    requestContext.preparedFileIDs = sources.map { $0.file.file.id }
                     if var current = storage.session(id: sessionID),
                        let index = current.messages.firstIndex(where: { $0.requestID == requestID }) {
                         current.messages[index].sourceSnapshot = persistedSources
                         current.messages[index].operationResults = skipped
+                        current.messages[index].contextSummary = requestContext
                         guard storage.updateSession(current) else { throw ResearchRuntimeError.persistenceFailed }
                     }
                     guard !sources.isEmpty || !images.isEmpty else { throw ResearchRuntimeError.noSources }
@@ -207,12 +268,17 @@ final class ResearchRuntime: ObservableObject {
                         }
                         try validateSources(sources)
                         try ensureActive(sessionID, requestID)
-                        storage.finishRequest(sessionID: sessionID, requestID: requestID,
+                        let saved = storage.finishRequest(sessionID: sessionID, requestID: requestID,
                             answer: output.joined(separator: "\n\n"), status: .accepted,
-                            origin: .localOutline, operationResults: coverageResults(total: sourceIDs.count, sources: sources, used: [], skipped: skipped))
+                            origin: .localOutline, operationResults: coverageResults(total: sourceIDs.count, sources: sources, used: [], skipped: skipped),
+                            contextSummary: requestContext)
+                        finishTrace(sessionID: sessionID, requestID: requestID, status: .accepted,
+                                    cause: "local_outline", saved: saved)
                     } else {
                         jobs[sessionID]?.phase = L10n.string("Preparing credentials; check for a macOS Keychain prompt…")
-                        let provider = try await configuration.toolCallingProvider(for: ticket)
+                        let provider: any AIToolCallingProvider
+                        if let providerResolver { provider = try await providerResolver(ticket) }
+                        else { provider = try await configuration.toolCallingProvider(for: ticket) }
                         try ensureActive(sessionID, requestID)
                         let mainNumber = mainFileID.flatMap { id in sources.firstIndex { $0.file.file.id == id }.map { $0 + 1 } }
                         let allows = annotationChoice && permit != nil && mainNumber != nil
@@ -220,11 +286,14 @@ final class ResearchRuntime: ObservableObject {
                             requestedCount: sourceIDs.count, textOnly: textOnly)
                         guard discussion.count <= 40_000 else { throw ResearchRuntimeError.inputTooLarge }
                         guard let commandExecutor else { throw ResearchCommandError.inactiveRequest }
-                        try ResearchCommandService.shared.prepareSources(requestID: requestID,
+                        try commands.prepareSources(requestID: requestID,
                             sources: sources.map(\.researchSource))
                         let result = try await service.generateReadingResult(
                             sources: sources.map { AIWorkflowSourceSnapshot(fileID: $0.file.file.id,
-                                displayName: $0.file.file.displayName, snapshot: $0.snapshot, version: $0.read.contentVersion) },
+                                displayName: $0.file.file.displayName,
+                                snapshot: $0.snapshot,
+                                version: $0.read.contentVersion,
+                                preparedRecords: $0.preparedRecords) },
                             mainDocumentNumber: mainNumber,
                             intent: question.isEmpty ? .overview : .question(question),
                             discussionContext: discussion,
@@ -244,6 +313,10 @@ final class ResearchRuntime: ObservableObject {
                         try validateSources(sources)
                         let evidence = makeEvidence(result: result, sources: sources, draft: draft)
                         let indexedIDs = Set(result.sourceCoverage.preparedFileIDs)
+                        requestContext.retrievalFileIDs = result.sourceCoverage.preparedFileIDs
+                        requestContext.skippedSources += result.sourceCoverage.skipped.map {
+                            ResearchSourceOmission(fileID: $0.fileID, reason: $0.reason)
+                        }
                         let indexSkipped = result.sourceCoverage.skipped.map { item in
                             (sources.first(where: { $0.file.file.id == item.fileID })?.file.file.displayName
                                 ?? L10n.string("Unavailable source")) + ": " + item.reason
@@ -269,32 +342,54 @@ final class ResearchRuntime: ObservableObject {
                                 operations.append(L10n.string("Highlights added") + ": \(count)")
                             } catch is CancellationError { throw CancellationError() }
                             catch {
-                                operations.append(L10n.string("The answer is ready, but its optional highlights were not applied.") + " " + error.localizedDescription)
+                                operations.append(AIHighlightFailureMessage.optionalHighlightsMessage(for: error))
                             }
                         }
                         try ensureActive(sessionID, requestID)
-                        operations += ResearchCommandService.shared.complete(requestID: requestID,
+                        operations += commands.complete(requestID: requestID,
                             acceptedAnswer: result.answer.resultMarkdown, evidence: evidence)
-                        storage.finishRequest(sessionID: sessionID, requestID: requestID,
+                        let saved = storage.finishRequest(sessionID: sessionID, requestID: requestID,
                             answer: result.answer.resultMarkdown, evidence: evidence, status: .accepted,
-                            operationResults: operations)
+                            operationResults: operations, contextSummary: requestContext)
+                        finishTrace(sessionID: sessionID, requestID: requestID, status: .accepted,
+                                    cause: "completed", saved: saved)
                     }
-                    jobs.removeValue(forKey: sessionID)
-                    tasks.removeValue(forKey: sessionID)
                 } catch {
-                    if jobs[sessionID]?.requestID == requestID {
-                        let message = error is CancellationError ? L10n.string("Request canceled. Your draft has been kept.") : error.localizedDescription
-                        errors[sessionID] = message
-                        storage.finishRequest(sessionID: sessionID, requestID: requestID,
-                            status: error is CancellationError ? .cancelled : .failed, errorMessage: message)
-                        jobs.removeValue(forKey: sessionID)
-                        tasks.removeValue(forKey: sessionID)
-                    }
-                    await trace.record(workflowID: requestID, groupID: requestID,
-                        event: error is CancellationError ? .cancelled : .failed(code: "research_request", message: error.localizedDescription))
+                    finishFailure(error, sessionID: sessionID, requestID: requestID)
                 }
             }
-        } catch { errors[sessionID] = error.localizedDescription }
+        } catch { errors[sessionID] = AIHighlightFailureMessage.userMessage(for: error) }
+    }
+
+    private func finishFailure(_ error: Error, sessionID: UUID, requestID: UUID,
+                               cause: String? = nil, cancelTask: Bool = false) {
+        guard jobs[sessionID]?.requestID == requestID else { return }
+        let cancelled = AIHighlightFailureMessage.kind(of: error) == .cancellation
+        let status: ResearchRequestStatus = cancelled ? .cancelled : .failed
+        let message = AIHighlightFailureMessage.userMessage(for: error)
+        errors[sessionID] = message
+        commands.cancel(requestID: requestID)
+        let saved = storage.finishRequest(sessionID: sessionID, requestID: requestID,
+                                          status: status, errorMessage: message)
+        finishTrace(sessionID: sessionID, requestID: requestID, status: status,
+                    cause: cause ?? AIHighlightFailureMessage.code(for: error), saved: saved,
+                    cancelTask: cancelTask)
+    }
+
+    private func finishTrace(sessionID: UUID, requestID: UUID, status: ResearchRequestStatus,
+                             cause: String, saved: Bool, cancelTask: Bool = false) {
+        guard let lifecycle = requestTraces[sessionID], lifecycle.requestID == requestID else { return }
+        requestTraces.removeValue(forKey: sessionID)
+        jobs.removeValue(forKey: sessionID)
+        let task = tasks.removeValue(forKey: sessionID)
+        if cancelTask { task?.cancel() }
+        timeoutTasks.removeValue(forKey: sessionID)?.cancel()
+        Task {
+            await lifecycle.started.value
+            await trace.record(workflowID: requestID, groupID: requestID,
+                event: .requestFinished(status: status.rawValue, cause: cause, saved: saved,
+                                        cancellationRequested: cancelTask))
+        }
     }
 
     /// Per-session preference; captured by send and never changed by a model tool.
@@ -311,6 +406,7 @@ final class ResearchRuntime: ObservableObject {
         let file: CapturedFile
         let read: PDFSourceReadSnapshot
         let snapshot: AIHighlightTextSnapshot
+        let preparedRecords: [AISegmentRecord]?
         var researchSource: ResearchSourceSnapshot {
             ResearchSourceSnapshot(fileID: file.file.id, displayName: file.file.displayName, fingerprint: read.contentVersion)
         }
@@ -326,9 +422,18 @@ final class ResearchRuntime: ObservableObject {
         var seen = Set<UUID>()
         let images = try ids.filter { seen.insert($0).inserted }.map { id in
             guard let attachment = storage.attachments.first(where: { $0.id == id }),
-                  let url = storage.attachmentURL(id: id) else { throw ResearchStoreError.invalidAttachment }
-            let data = try Data(contentsOf: url)
+                  let url = storage.attachmentURL(id: id) else { throw ResearchStoreError.missingAttachment }
+            let data: Data
+            do { data = try Data(contentsOf: url) }
+            catch let error as CocoaError where [CocoaError.Code.fileNoSuchFile, .fileReadNoSuchFile, .fileReadNoPermission].contains(error.code) {
+                throw ResearchStoreError.missingAttachment
+            }
             guard data.count <= ResearchInputLimits.maximumProcessedImageBytes else { throw ResearchRuntimeError.inputTooLarge }
+            guard ["image/png", "image/jpeg", "image/webp", "image/gif"].contains(attachment.mimeType),
+                  let image = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+                  CGImageSourceCreateImageAtIndex(image, 0, [kCGImageSourceShouldCache: false] as CFDictionary) != nil else {
+                throw ResearchStoreError.invalidAttachment
+            }
             return AIToolInputImage(id: id, mimeType: attachment.mimeType, data: data)
         }
         guard images.reduce(0, { $0 + $1.data.count }) <= ResearchInputLimits.maximumRequestImageBytes else {
