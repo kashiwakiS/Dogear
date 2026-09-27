@@ -157,7 +157,9 @@ extension PDFDocument {
             let identifier = ObjectIdentifier(annotation)
             guard visited.insert(identifier).inserted else { return }
             states.append((annotation, annotation.shouldDisplay))
-            annotation.shouldDisplay = shouldDisplay
+            if annotation.shouldDisplay != shouldDisplay {
+                annotation.shouldDisplay = shouldDisplay
+            }
         }
 
         for pageIndex in 0..<pageCount {

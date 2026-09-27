@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import PDFKit
 
@@ -202,10 +201,9 @@ enum AIAnnotationProvenance {
     }
 }
 
-@MainActor
-struct AIHighlightNativeAnnotationStyle {
-    let color = NSColor(
-        calibratedRed: 0.30,
+nonisolated struct AIHighlightNativeAnnotationStyle: Equatable, Sendable {
+    let color = PDFColorComponents(
+        red: 0.30,
         green: 0.78,
         blue: 0.88,
         alpha: 1.0
@@ -260,9 +258,9 @@ struct AIHighlightNativeAnnotationFactory {
             forType: .highlight,
             withProperties: nil
         )
-        annotation.color = style.color
+        annotation.color = PDFPlatformStyle.color(style.color)
         annotation.quadrilateralPoints = anchor.quadrilateralPoints.map {
-            NSValue(point: $0.cgPoint)
+            PDFPlatformStyle.pointValue($0.cgPoint)
         }
         annotation.shouldDisplay = true
         annotation.shouldPrint = true

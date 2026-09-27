@@ -27,42 +27,23 @@ final class DogearPageOverlayView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        guard marker != nil else { return }
-
-        let foldRect = NSRect(
-            x: bounds.maxX - foldSize,
-            y: bounds.maxY - foldSize,
-            width: foldSize,
-            height: foldSize
-        )
-
-        let triangle = NSBezierPath()
-        triangle.move(to: NSPoint(x: foldRect.minX + 4, y: foldRect.maxY - 4))
-        triangle.line(to: NSPoint(x: foldRect.maxX - 4, y: foldRect.maxY - 4))
-        triangle.line(to: NSPoint(x: foldRect.maxX - 4, y: foldRect.minY + 4))
-        triangle.close()
-
-        (isNightMode ? NSColor.yellow.withAlphaComponent(0.86) : NSColor.yellow.withAlphaComponent(0.78))
-            .setFill()
-        triangle.fill()
-
-        let crease = NSBezierPath()
-        crease.move(to: NSPoint(x: foldRect.minX + 4, y: foldRect.maxY - 4))
-        crease.line(to: NSPoint(x: foldRect.maxX - 4, y: foldRect.minY + 4))
-        crease.lineWidth = 1
-        NSColor.orange.withAlphaComponent(0.7).setStroke()
-        crease.stroke()
+        guard marker != nil, let context = NSGraphicsContext.current?.cgContext else { return }
+        let foldRect = PDFOverlayGeometry.dogearFold(in: bounds, size: foldSize)
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.addPath(PDFOverlayGeometry.dogearTriangle(in: foldRect))
+        context.setFillColor(NSColor.yellow.withAlphaComponent(isNightMode ? 0.86 : 0.78).cgColor)
+        context.fillPath()
+        context.addPath(PDFOverlayGeometry.dogearCrease(in: foldRect))
+        context.setLineWidth(1)
+        context.setStrokeColor(NSColor.orange.withAlphaComponent(0.7).cgColor)
+        context.strokePath()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard marker != nil else { return nil }
 
-        let foldRect = NSRect(
-            x: bounds.maxX - foldSize,
-            y: bounds.maxY - foldSize,
-            width: foldSize,
-            height: foldSize
-        )
+        let foldRect = PDFOverlayGeometry.dogearFold(in: bounds, size: foldSize)
         return foldRect.contains(point) ? self : nil
     }
 
@@ -78,12 +59,7 @@ final class DogearPageOverlayView: NSView {
         super.resetCursorRects()
         guard marker != nil else { return }
 
-        let foldRect = NSRect(
-            x: bounds.maxX - foldSize,
-            y: bounds.maxY - foldSize,
-            width: foldSize,
-            height: foldSize
-        )
+        let foldRect = PDFOverlayGeometry.dogearFold(in: bounds, size: foldSize)
         addCursorRect(foldRect, cursor: .pointingHand)
     }
 }

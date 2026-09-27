@@ -179,23 +179,23 @@ final class AIHighlightGenerationStore: ObservableObject {
     }
 
 #if DEBUG
-    func chooseDebugLogFolder() {
-        guard !isRunning else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = L10n.string("Choose Log Folder")
-        panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            Task { @MainActor in
-                do {
-                    try await self.traceRecorder.chooseDebugDirectory(url)
-                    await self.refreshTraceLocation()
-                } catch {
-                    self.traceStatus = L10n.string("Could not select the log folder. Finish active requests and choose a writable folder.")
-                }
-            }
+    func canChooseDebugLogFolder() async -> Bool {
+        guard !isRunning, !(await traceRecorder.hasActiveWorkflows) else {
+            traceStatus = L10n.string("Could not select the log folder. Finish active requests and choose a writable folder.")
+            return false
+        }
+        return true
+    }
+
+    func chooseDebugLogFolder(_ selection: Result<URL, Error>) async {
+        do {
+            guard !isRunning else { throw CocoaError(.fileWriteFileExists) }
+            // The actor checks again: a workflow may have started while the
+            // SwiftUI picker was open or while awaiting the actor.
+            try await traceRecorder.chooseDebugDirectory(selection.get())
+            await refreshTraceLocation()
+        } catch {
+            traceStatus = L10n.string("Could not select the log folder. Finish active requests and choose a writable folder.")
         }
     }
 #endif

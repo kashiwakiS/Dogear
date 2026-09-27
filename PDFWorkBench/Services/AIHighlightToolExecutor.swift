@@ -342,6 +342,7 @@ actor AIHighlightToolExecutor {
     }
 
     func publish(_ request: AIPublishAnswerRequest, validateOnly: Bool = false) -> AIPublishAnswerResult {
+        if let rejection = reviewSizeRejection(for: request) { return rejection }
         if verifiesAnswerEvidence && request.terminate && !validateOnly && approvedTerminalRequest != request {
             return publicationFailure(.evidenceReviewRequired)
         }

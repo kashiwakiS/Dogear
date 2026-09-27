@@ -140,16 +140,20 @@ final class AIConfigurationStore: ObservableObject {
     private var plaintextAPIKey: String
     private let secretStore: AISecretStoring
     private let backgroundSecretReader: AIBackgroundSecretReader?
+    // Explicit live acceptance may resolve existing credentials without changing
+    // the user's saved availability flag when Keychain access finds no key.
+    private let persistsMissingCredentialStatus: Bool
     private var credentialRevision: UInt64 = 0
     private let legacyConfigurationKey = "PDFWorkBench.AIProviderConfiguration"
     private var isApplyingTransaction = false
 
-    convenience init() {
+    convenience init(persistsMissingCredentialStatus: Bool = true) {
         self.init(
             configurationURL: Self.defaultConfigurationURL,
             legacyUserDefaults: .standard,
             secretStore: KeychainAISecretStore(),
-            secretReader: KeychainAISecretReader()
+            secretReader: KeychainAISecretReader(),
+            persistsMissingCredentialStatus: persistsMissingCredentialStatus
         )
     }
 
@@ -157,10 +161,12 @@ final class AIConfigurationStore: ObservableObject {
         configurationURL: URL,
         legacyUserDefaults: UserDefaults = .standard,
         secretStore: AISecretStoring,
-        secretReader: (any AISecretReading)? = nil
+        secretReader: (any AISecretReading)? = nil,
+        persistsMissingCredentialStatus: Bool = true
     ) {
         self.configurationURL = configurationURL
         self.secretStore = secretStore
+        self.persistsMissingCredentialStatus = persistsMissingCredentialStatus
         backgroundSecretReader = secretReader.map { AIBackgroundSecretReader(reader: $0) }
 
         if let data = try? Data(contentsOf: configurationURL),
@@ -396,7 +402,7 @@ final class AIConfigurationStore: ObservableObject {
             if ticket.configuration.secretStorageMode == .keychain {
                 hasKeychainAPIKey = false
                 isAPIKeyConfigured = false
-                try? persistConfiguration()
+                if persistsMissingCredentialStatus { try? persistConfiguration() }
             }
             throw AIProviderError.missingAPIKey
         }
@@ -415,7 +421,7 @@ final class AIConfigurationStore: ObservableObject {
             } else {
                 hasKeychainAPIKey = false
                 isAPIKeyConfigured = false
-                try? persistConfiguration()
+                if persistsMissingCredentialStatus { try? persistConfiguration() }
                 throw AIProviderError.missingAPIKey
             }
         }

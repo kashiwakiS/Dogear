@@ -87,6 +87,8 @@ nonisolated struct ResearchMessage: Codable, Equatable, Sendable, Identifiable {
     var origin: ResearchContentOrigin = .user
     var errorMessage: String? = nil
     var operationResults: [String] = []
+    /// Nil for legacy records; never reconstruct a past request from today's session/Group.
+    var contextSummary: ResearchContextSummary? = nil
     var createdAt: Date = Date()
     var completedAt: Date? = nil
 }

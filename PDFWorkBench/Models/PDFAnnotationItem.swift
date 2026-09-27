@@ -1,6 +1,35 @@
 import Foundation
 import PDFKit
 
+enum AnnotationExportScope: String, CaseIterable, Identifiable {
+    case all, filtered, selected
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .all: return L10n.string("All Annotations")
+        case .filtered: return L10n.string("Current Filtered Annotations")
+        case .selected: return L10n.string("Selected Annotation")
+        }
+    }
+}
+
+/// Keeps the actual PDF objects so a sheet cannot edit a replacement document
+/// or an unrelated unnamed annotation after its page index changes.
+struct HighlightEditDraft: Identifiable {
+    let id = UUID()
+    let document: PDFDocument
+    let annotation: PDFAnnotation
+    let quote: String
+    let color: PDFPlatformColor
+    let comment: String
+}
+
+extension Notification.Name {
+    static let dogearAnnotationsChanged = Notification.Name("DogearAnnotationsChanged")
+}
+
 enum ReaderFindScope: String, CaseIterable, Identifiable {
     case documentText
     case annotations

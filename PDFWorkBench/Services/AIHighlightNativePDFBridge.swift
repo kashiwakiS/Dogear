@@ -415,7 +415,7 @@ private enum NativePDFTextFingerprint {
         let cropBounds = page.bounds(for: .cropBox)
         return text(
             [
-                "native-pdf-text-page-v1",
+                AINativeTextSnapshotProfile.current + "|page",
                 String(pageNumber),
                 String(page.rotation),
                 rectComponent(mediaBounds),
@@ -427,7 +427,7 @@ private enum NativePDFTextFingerprint {
 
     static func document(pageFingerprints: [String]) -> String {
         text(
-            (["native-pdf-text-document-v1", String(pageFingerprints.count)]
+            ([AINativeTextSnapshotProfile.current + "|document", String(pageFingerprints.count)]
                 + pageFingerprints)
                 .joined(separator: "\u{1E}")
         )

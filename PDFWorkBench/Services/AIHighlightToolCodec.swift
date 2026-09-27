@@ -48,7 +48,7 @@ nonisolated struct AIHighlightToolCodec: Sendable {
             ),
             definition(
                 name: AIHighlightToolName.searchSegments,
-                description: "Search segment IDs across the selected document_numbers (empty means all request sources). Results contain IDs and scores, never source text. Candidates are balanced across sources. Use overviewSalience with an empty query for an overview.",
+                description: "Search stable sentence IDs across the selected document_numbers (empty means all request sources). Each result anchors a same-page, same-block window of up to three sentences; results contain IDs and scores, never source text. Read one neighboring sentence on each side when inspecting a candidate. Candidates are balanced across sources. Use overviewSalience with an empty query for an overview.",
                 schemaVersion: "2",
                 schema: """
                 {
@@ -127,15 +127,15 @@ nonisolated struct AIHighlightToolCodec: Sendable {
             ),
             definition(
                 name: AIHighlightToolName.publishAnswer,
-                description: "Publish evidence-grounded Markdown in Ask. Set terminate false for an interim update. Complete all searches, reads, and optional stage_highlights calls and inspect their results BEFORE finishing. The final provider turn must contain ONLY one publish_answer with terminate true. Mixed terminal batches are rejected before publication; accepted termination ends locally with no further provider request.",
-                schemaVersion: "3",
+                description: "Publish evidence-grounded Markdown in Ask, at most \(AIAnswerEvidenceReview.maximumAnswerCharacters) characters. Set terminate false for an interim update. Before final evidence review, distinct cited passages must total at most \(AIAnswerEvidenceReview.maximumEvidenceCharacters) characters. Oversized final proposals return evidenceReviewSizeExceeded with repair instructions; compress and republish within the remaining shared budgets. Complete all searches, reads, and optional stage_highlights calls and inspect their results BEFORE finishing. The final provider turn must contain ONLY one publish_answer with terminate true. Mixed terminal batches are rejected before publication; accepted termination ends locally with no further provider request.",
+                schemaVersion: "4",
                 schema: """
                 {
                   "type": "object",
                   "properties": {
                     "completion_status": {"type": "string", "enum": ["answered", "partial", "notFound"]},
                     "title": {"type": "string", "minLength": 1, "maxLength": 60},
-                    "result_markdown": {"type": "string", "minLength": 1},
+                    "result_markdown": {"type": "string", "minLength": 1, "maxLength": \(AIAnswerEvidenceReview.maximumAnswerCharacters)},
                     "evidence_image_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "maxItems": 4},
                     "evidence_segment_ids": {
                       "type": "array",

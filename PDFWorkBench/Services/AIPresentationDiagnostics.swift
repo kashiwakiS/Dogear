@@ -63,6 +63,26 @@ enum AIPresentationDiagnostics {
         check(AIHighlightFailureMessage.userMessage(for: AIHighlightGenerationError.noUsableNativeText)
               != AIHighlightFailureMessage.userMessage(for: AIHighlightGenerationError.documentChanged),
               "Image-only PDFs are incorrectly reported as document mutation.")
+        let acceptedAnswerPrefix = L10n.string("The answer is ready, but its optional highlights were not applied.")
+        for error in [DocumentAccessError.sourceChanged, .editorUnavailable] {
+            let message = AIHighlightFailureMessage.optionalHighlightsMessage(for: error)
+            check(message.hasPrefix(acceptedAnswerPrefix)
+                  && !message.contains(AIHighlightFailureMessage.userMessage(for: DocumentAccessError.sourceChanged)),
+                  "An optional highlight failure falsely rejected the accepted answer.")
+        }
+        let privateError = NSError(domain: "SENTINEL_OPTIONAL_ERROR", code: 1,
+                                   userInfo: [NSLocalizedDescriptionKey: "SENTINEL_OPTIONAL_BODY"])
+        let optionalMessage = AIHighlightFailureMessage.optionalHighlightsMessage(for: privateError)
+        check(optionalMessage.hasPrefix(acceptedAnswerPrefix) && !optionalMessage.contains("SENTINEL_"),
+              "An optional highlight failure exposed raw error content or lost the accepted answer state.")
+        for error in [ResearchStoreError.invalidAttachment, .missingAttachment] {
+            check(AIHighlightFailureMessage.userMessage(for: error)
+                  != AIHighlightFailureMessage.userMessage(for: ResearchStoreError.storageUnavailable),
+                  "An unavailable image attachment incorrectly instructed the user to retry saving Research.")
+        }
+        check(AIHighlightFailureMessage.kind(of: ResearchStoreError.invalidAttachment) == .invalidInput
+              && AIHighlightFailureMessage.kind(of: ResearchStoreError.missingAttachment) == .sourceUnavailable,
+              "Invalid and missing image attachments lost their input/source error classification.")
         let unsupported = OpenAICompatibleToolProviderError.serverContinuationUnsupported
         check(AIHighlightFailureMessage.kind(of: unsupported) == .providerCapabilityUnsupported,
               "Unsupported continuation was misclassified as malformed provider data.")

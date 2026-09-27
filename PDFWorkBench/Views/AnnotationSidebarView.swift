@@ -1,7 +1,9 @@
+import PDFKit
 import SwiftUI
 
 struct AnnotationSidebarView: View {
     @ObservedObject var documentStore: PDFDocumentStore
+    @ObservedObject private var languageStore = AppLanguageStore.shared
     let layout: ReaderSidebarLayout
     let expandedSections: Set<ReaderSidebarSection>
     let onToggleSection: (ReaderSidebarSection) -> Void
@@ -10,6 +12,8 @@ struct AnnotationSidebarView: View {
     let onFindFieldFocusChanged: (ReaderFindScope?) -> Void
 
     @FocusState private var focusedFindScope: ReaderFindScope?
+    @State private var highlightEditDraft: HighlightEditDraft?
+    @State private var freeTextEditDraft: FreeTextEditDraft?
 
     private let maximumVisibleAIHighlightGroupRows = 5
     private let aiHighlightGroupRowHeight: CGFloat = 24
@@ -60,6 +64,20 @@ struct AnnotationSidebarView: View {
                 activeFindScope = newScope
             }
             onFindFieldFocusChanged(newScope)
+        }
+        .sheet(item: $highlightEditDraft) { draft in
+            HighlightEditorSheet(documentStore: documentStore, draft: draft)
+                .environment(\.locale, languageStore.locale)
+        }
+        .sheet(item: $freeTextEditDraft) { draft in
+            FreeTextEditorSheet(draft: draft, onSave: { values in
+                documentStore.updateFreeText(draft, values: values)
+            }, onDismiss: { freeTextEditDraft = nil })
+                .environment(\.locale, languageStore.locale)
+        }
+        .onChange(of: documentStore.document.map(ObjectIdentifier.init)) { _, _ in
+            highlightEditDraft = nil
+            freeTextEditDraft = nil
         }
     }
 
@@ -123,6 +141,22 @@ struct AnnotationSidebarView: View {
 
                 Spacer()
 
+                Menu {
+                    ForEach(AnnotationExportScope.allCases) { scope in
+                        Button("\(scope.displayTitle) (\(documentStore.annotationsForExport(scope: scope).count))") {
+                            documentStore.exportAnnotationsMarkdown(scope: scope, trigger: .pointer)
+                        }
+                        .disabled(documentStore.annotationsForExport(scope: scope).isEmpty)
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Export Annotations Markdown")
+                .accessibilityLabel("Export Annotations Markdown")
+                .disabled(documentStore.annotations.isEmpty)
+
                 Button {
                     documentStore.selectPreviousFilteredAnnotation()
                 } label: {
@@ -157,27 +191,74 @@ struct AnnotationSidebarView: View {
                 .padding(.top, 8)
             } else {
                 List(documentStore.filteredAnnotations) { annotation in
-                    Button {
-                        documentStore.selectAnnotation(annotation)
-                    } label: {
-                        AnnotationRowView(
-                            annotation: annotation,
-                            isSelected: annotation.id == documentStore.selectedAnnotationID
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        if annotation.kind == .highlight {
-                            Button("Remove Highlight", role: .destructive) {
-                                documentStore.removeAnnotation(annotation, trigger: .pointer)
-                            }
+                    HStack(alignment: .top, spacing: 3) {
+                        Button {
+                            documentStore.selectAnnotation(annotation)
+                        } label: {
+                            AnnotationRowView(
+                                annotation: annotation,
+                                annotationColor: color(for: annotation),
+                                isSelected: annotation.id == documentStore.selectedAnnotationID
+                            )
                         }
+                        .buttonStyle(.plain)
+                        Menu {
+                            annotationActions(annotation)
+                        } label: {
+                            Image(systemName: "ellipsis")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .padding(.top, 10)
+                        .help("Annotation Actions")
+                        .accessibilityLabel("Annotation Actions")
+                    }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .contextMenu {
+                        annotationActions(annotation)
                     }
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func annotationActions(_ annotation: PDFAnnotationItem) -> some View {
+        if annotation.kind == .highlight {
+            Button("Edit Highlight Color and Comment…") {
+                highlightEditDraft = documentStore.highlightEditDraft(for: annotation)
+            }
+            .disabled(!documentStore.canEditDocument)
+        } else if documentStore.freeTextEditDraft(for: annotation) != nil {
+            Button("Edit Free Text…") {
+                freeTextEditDraft = documentStore.freeTextEditDraft(for: annotation)
+            }
+        }
+        Button("Export This Annotation…") {
+            documentStore.selectAnnotation(annotation)
+            documentStore.exportAnnotationsMarkdown(scope: .selected, trigger: .pointer)
+        }
+        Divider()
+        Button(L10n.string(annotation.kind == .highlight ? "Remove Highlight" : "Remove Note"), role: .destructive) {
+            documentStore.removeAnnotation(annotation, trigger: .pointer)
+        }
+        .disabled(!documentStore.canEditDocument)
+    }
+
+    private func color(for item: PDFAnnotationItem) -> Color {
+        guard let document = documentStore.document,
+              let annotation = AnnotationExtractor.annotation(matching: item, in: document)
+        else {
+            return Color(nsColor: .secondaryLabelColor)
+        }
+        // PDF highlights are translucent over paper; the sidebar uses the same
+        // hue as an opaque marker so it remains legible in either appearance.
+        return Color(nsColor: annotation.color.withAlphaComponent(1))
     }
 
     private var aiHighlightGroupSection: some View {
@@ -241,13 +322,32 @@ struct AnnotationSidebarView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            Menu {
+                                deleteGroupButton(group)
+                            } label: {
+                                Image(systemName: "ellipsis")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("AI Highlight Group Actions")
+                            .accessibilityLabel("AI Highlight Group Actions")
                         }
                         .frame(height: aiHighlightGroupRowHeight)
+                        .contextMenu {
+                            deleteGroupButton(group)
+                        }
                     }
                 }
             }
             .frame(height: aiHighlightGroupListHeight)
         }
+    }
+
+    private func deleteGroupButton(_ group: AIHighlightGroup) -> some View {
+        Button("Delete this group…", role: .destructive) {
+            documentStore.confirmRemoveAIHighlightGroup(group.id)
+        }
+        .disabled(!documentStore.canEditDocument || documentStore.aiHighlightCount(in: group.id) == 0)
     }
 
     private var aiHighlightGroupListHeight: CGFloat {
@@ -282,7 +382,7 @@ struct AnnotationSidebarView: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVStack(spacing: ReaderSidebarLayout.dogearRowSpacing) {
                         ForEach(Array(documentStore.dogears.enumerated()), id: \.element.id) { index, marker in
                             DogearIndexRow(
                                 marker: marker,
@@ -293,6 +393,7 @@ struct AnnotationSidebarView: View {
                                 onMove: { documentStore.moveDogear(marker, by: $0) },
                                 onRemove: { documentStore.removeDogear(marker, trigger: .pointer) }
                             )
+                            .frame(height: ReaderSidebarLayout.dogearRowHeight)
                         }
                     }
                 }
@@ -480,43 +581,123 @@ private struct SearchResultRowView: View {
 
 private struct AnnotationRowView: View {
     let annotation: PDFAnnotationItem
+    let annotationColor: Color
     let isSelected: Bool
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text("Page \(annotation.pageNumber)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    @State private var isHovered = false
 
-                Spacer()
-
-                if annotation.isAIGenerated {
-                    Text("AI")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.cyan)
-
-                    if let category = annotation.aiCategory {
-                        Text(category.displayTitle)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Text(annotation.kind.displayTitle)
-                    .font(.caption2)
-                    .foregroundStyle(annotation.kind == .highlight ? .yellow : .blue)
-            }
-
-            Text(annotation.displayText)
-                .font(.callout)
-                .lineLimit(4)
-                .foregroundStyle(.primary)
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+    private var quote: String {
+        annotation.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var comment: String {
+        let note = annotation.note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return note == quote ? "" : note
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            metadata
+
+            if !quote.isEmpty {
+                Text(quote)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineSpacing(3)
+                    .lineLimit(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 10)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(annotationColor)
+                            .frame(width: 3)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 1.5)
+                                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                            }
+                    }
+            }
+
+            if !comment.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "text.bubble")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                        .accessibilityHidden(true)
+
+                    Text(comment)
+                        .font(quote.isEmpty ? .callout : .caption)
+                        .foregroundStyle(quote.isEmpty ? .primary : .secondary)
+                        .lineSpacing(2)
+                        .lineLimit(quote.isEmpty ? 5 : 3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            if quote.isEmpty && comment.isEmpty {
+                Text(annotation.displayText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .textBackgroundColor))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(
+                            isSelected ? Color.accentColor.opacity(0.1)
+                                : Color.primary.opacity(isHovered ? 0.06 : 0.025)
+                        )
+                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(
+                    isSelected ? Color.accentColor.opacity(0.75) : Color.primary.opacity(0.06),
+                    lineWidth: isSelected ? 1.25 : 0.5
+                )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onHover { isHovered = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private var metadata: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Text(annotation.kind.displayTitle)
+                Text("·")
+                    .accessibilityHidden(true)
+                Text("Page \(annotation.pageNumber)")
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityHidden(true)
+                }
+
+                Text(annotation.isAIGenerated ? L10n.string("AI") : L10n.string("Manual"))
+                    .font(.caption2.weight(annotation.isAIGenerated ? .semibold : .regular))
+                    .foregroundStyle(annotation.isAIGenerated ? Color.accentColor : .secondary)
+            }
+
+            if let category = annotation.aiCategory {
+                Text(category.displayTitle)
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+    }
 }

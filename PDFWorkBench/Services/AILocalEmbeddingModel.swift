@@ -172,26 +172,6 @@ actor AICoreMLEmbedder: AITextEmbedding {
     }
 }
 
-nonisolated struct AIEmbeddingIndexCache: Codable, Sendable {
-    let key: String
-    let ids: [[AISegmentID]]
-    let vectors: [[Float]]
-
-    static func key(registry: AISegmentRegistry, packageID: String, chunks: [AIEmbeddingChunk]) throws -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
-        let chunkHash = AIRetrievalHash.data(try encoder.encode(chunks))
-        return AIRetrievalHash.data(Data("index-v3|adjacent-3-254-lossless-split-510|\(registry.indexIdentity)|\(registry.segmenterVersion)|\(packageID)|\(chunkHash)".utf8))
-    }
-
-    func isValid(key expected: String, chunks: [AIEmbeddingChunk], dimensions: Int) -> Bool {
-        key == expected && ids == chunks.map(\.ids) && vectors.count == chunks.count
-            && vectors.allSatisfy { vector in
-                vector.count == dimensions && vector.allSatisfy(\.isFinite)
-                    && abs(vector.reduce(0) { $0 + $1 * $1 } - 1) < 0.01
-            }
-    }
-}
-
 nonisolated enum AIEvidenceRetrievalFactory {
     static func makeSources(
         selection: AIRetrievalSelection,
@@ -200,35 +180,137 @@ nonisolated enum AIEvidenceRetrievalFactory {
         indexed: (@Sendable (Int, Bool, Double) async -> Void)? = nil,
         sharedEmbedder: (any AITextEmbedding)? = nil,
         cacheRoot: URL? = nil,
-        maximumRequestChunks: Int = 20_000
+        maximumRequestChunks: Int = 20_000,
+        lexicalBackend: (any AILexicalIndexBackend)? = nil,
+        lexicalPreparationBudget: Duration = .seconds(180)
     ) async throws -> AIMultiSourceRetrievalPreparation {
+        // Memory remains the Scheme 1 product default until representative
+        // local libraries establish a material warm benefit. Scheme 2 never
+        // constructs or prepares a lexical backend.
+        let lexicalIndexBackend: (any AILexicalIndexBackend)?
+        let embeddingCache: AISQLiteEmbeddingIndexCache?
+        let started = ContinuousClock.now
+        if selection.mode == .scheme1Lexical {
+            lexicalIndexBackend = lexicalBackend ?? AISharedMemoryBM25IndexBackend.shared
+            embeddingCache = nil
+        } else {
+            lexicalIndexBackend = nil
+            embeddingCache = AISQLiteEmbeddingIndexCache(
+                databaseURL: AISQLiteEmbeddingIndexCache.databaseURL(cacheRoot: cacheRoot)
+            )
+        }
+        if registry.sources.isEmpty {
+            let lexicalPrepared: AILexicalPreparedIndex?
+            if let lexicalIndexBackend {
+                let lexicalSource = singleRegistryLexicalSource(registry)
+                try checkLexicalPreparationStatus(
+                    started: started,
+                    preparationBudget: lexicalPreparationBudget
+                )
+                let prepared = try await lexicalIndexBackend.prepare(
+                    source: lexicalSource
+                )
+                try checkLexicalPreparationStatus(
+                    started: started,
+                    preparationBudget: lexicalPreparationBudget
+                )
+                _ = try validateLexicalPreparedIndex(
+                    prepared,
+                    sources: [lexicalSource]
+                )
+                lexicalPrepared = prepared
+            } else {
+                lexicalPrepared = nil
+            }
+            if registry.records.isEmpty {
+                let retriever: any AIEvidenceRetrieving
+                if let lexicalPrepared {
+                    retriever = try AILexicalEvidenceRetriever(
+                        registry: registry,
+                        preparedIndex: lexicalPrepared.bm25
+                    )
+                } else {
+                    // No authorized text means there is no dense work to do.
+                    // Return an empty Scheme 2 adapter without loading a model,
+                    // writing a vector cache, or embedding the later query.
+                    retriever = try AIMultiSourceEvidenceRetriever(
+                        sources: [],
+                        mode: .scheme2EvidenceRAG,
+                        registry: registry
+                    )
+                }
+                return AIMultiSourceRetrievalPreparation(
+                    retriever: retriever,
+                    coverage: AIMultiSourceCoverage()
+                )
+            }
+            let retriever = try await make(
+                selection: selection,
+                registry: registry,
+                progress: progress,
+                indexed: indexed,
+                cacheRoot: cacheRoot,
+                sharedEmbedder: sharedEmbedder,
+                maximumChunks: maximumRequestChunks,
+                lexicalPreparedIndex: lexicalPrepared?.bm25,
+                embeddingCache: embeddingCache
+            )
+            return AIMultiSourceRetrievalPreparation(
+                retriever: retriever,
+                coverage: AIMultiSourceCoverage()
+            )
+        }
         if registry.records.isEmpty {
-            return AIMultiSourceRetrievalPreparation(retriever: AILexicalEvidenceRetriever(registry: registry),
+            let retriever: any AIEvidenceRetrieving
+            if let lexicalIndexBackend {
+                try checkLexicalPreparationStatus(
+                    started: started,
+                    preparationBudget: lexicalPreparationBudget
+                )
+                let lexicalPrepared = try await lexicalIndexBackend.prepare(sources: [])
+                try checkLexicalPreparationStatus(
+                    started: started,
+                    preparationBudget: lexicalPreparationBudget
+                )
+                _ = try validateLexicalPreparedIndex(lexicalPrepared, sources: [])
+                retriever = try AILexicalEvidenceRetriever(
+                    registry: registry,
+                    preparedIndex: lexicalPrepared.bm25
+                )
+            } else {
+                retriever = try AIMultiSourceEvidenceRetriever(
+                    sources: [],
+                    mode: .scheme2EvidenceRAG,
+                    registry: registry
+                )
+            }
+            return AIMultiSourceRetrievalPreparation(retriever: retriever,
                 coverage: AIMultiSourceCoverage(requestedCount: registry.sources.count, preparedFileIDs: [],
                     skipped: registry.sources.map { .init(documentNumber: $0.documentNumber, fileID: $0.fileID,
                         reason: "No extractable text; no OCR was performed.") }, usedFileIDs: []))
         }
-        guard !registry.sources.isEmpty else {
-            let retriever = try await make(selection: selection, registry: registry, progress: progress, indexed: indexed,
-                cacheRoot: cacheRoot, sharedEmbedder: sharedEmbedder, maximumChunks: maximumRequestChunks)
-            return AIMultiSourceRetrievalPreparation(retriever: retriever, coverage: AIMultiSourceCoverage())
+        if selection.mode == .scheme1Lexical {
+            guard let lexicalIndexBackend else {
+                throw AIRetrievalError.invalidSelection
+            }
+            return try await makeLexicalSources(
+                registry: registry,
+                backend: lexicalIndexBackend,
+                started: started,
+                preparationBudget: lexicalPreparationBudget
+            )
         }
-        let started = ContinuousClock.now
+
         var children: [AIMultiSourceEvidenceRetriever.Source] = []
         var prepared: [UUID] = []
         var skipped: [AIMultiSourceCoverage.Skipped] = []
         var remainingChunks = min(20_000, max(0, maximumRequestChunks))
-        let embedder: (any AITextEmbedding)?
-        let queryEmbedder: (any AIQueryEmbedding)?
-        if selection.mode == .scheme2EvidenceRAG {
-            guard let package = selection.packageID else { throw AIRetrievalError.modelMissing }
-            let loaded: any AITextEmbedding
-            if let sharedEmbedder { loaded = sharedEmbedder }
-            else { loaded = try await AIEmbeddingModelPool.shared.model(
-                packageURL: AILocalEmbeddingModels.packageURL(package), packageID: package) }
-            embedder = loaded
-            queryEmbedder = AICachedQueryEmbedder(base: loaded)
-        } else { embedder = nil; queryEmbedder = nil }
+        guard let package = selection.packageID else { throw AIRetrievalError.modelMissing }
+        let embedder: any AITextEmbedding
+        if let sharedEmbedder { embedder = sharedEmbedder }
+        else { embedder = try await AIEmbeddingModelPool.shared.model(
+            packageURL: AILocalEmbeddingModels.packageURL(package), packageID: package) }
+        let queryEmbedder: any AIQueryEmbedding = AICachedQueryEmbedder(base: embedder)
         for source in registry.sources {
             try Task.checkCancellation()
             let local = registry.registry(forDocument: source.documentNumber, canonicalIDs: true)
@@ -246,7 +328,8 @@ nonisolated enum AIEvidenceRetrievalFactory {
                 let child = try await make(selection: selection, registry: local,
                     progress: progress, indexed: indexed, cacheRoot: cacheRoot,
                     sharedEmbedder: embedder, queryEmbedder: queryEmbedder,
-                    preparationDeadline: started.advanced(by: .seconds(180)), maximumChunks: remainingChunks)
+                    preparationDeadline: started.advanced(by: .seconds(180)), maximumChunks: remainingChunks,
+                    lexicalPreparedIndex: nil, embeddingCache: embeddingCache)
                 if let hybrid = child as? AIHybridEvidenceRetriever { remainingChunks -= hybrid.indexedChunkCount }
                 children.append(.init(documentNumber: source.documentNumber, retriever: child))
                 prepared.append(source.fileID)
@@ -256,9 +339,217 @@ nonisolated enum AIEvidenceRetrievalFactory {
                     reason: error.localizedDescription))
             }
         }
-        return AIMultiSourceRetrievalPreparation(retriever: AIMultiSourceEvidenceRetriever(sources: children, registry: registry),
+        return AIMultiSourceRetrievalPreparation(retriever: try AIMultiSourceEvidenceRetriever(
+            sources: children,
+            mode: selection.mode,
+            registry: registry,
+            globalLexicalIndex: nil
+        ),
             coverage: AIMultiSourceCoverage(requestedCount: registry.sources.count,
                 preparedFileIDs: prepared, skipped: skipped, usedFileIDs: []))
+    }
+
+    private struct LexicalSourceCandidate {
+        let descriptor: AIWorkflowSourceDescriptor
+        let registry: AISegmentRegistry
+        let indexSource: AILexicalIndexSource
+    }
+
+    private static func makeLexicalSources(
+        registry: AISegmentRegistry,
+        backend: any AILexicalIndexBackend,
+        started: ContinuousClock.Instant,
+        preparationBudget: Duration
+    ) async throws -> AIMultiSourceRetrievalPreparation {
+        var candidates: [LexicalSourceCandidate] = []
+        var skipped: [AIMultiSourceCoverage.Skipped] = []
+        candidates.reserveCapacity(registry.sources.count)
+        skipped.reserveCapacity(registry.sources.count)
+
+        for source in registry.sources {
+            try Task.checkCancellation()
+            let local = registry.registry(forDocument: source.documentNumber, canonicalIDs: true)
+            if local.records.isEmpty {
+                skipped.append(.init(
+                    documentNumber: source.documentNumber,
+                    fileID: source.fileID,
+                    reason: "No extractable text; no OCR was performed."
+                ))
+                continue
+            }
+            candidates.append(LexicalSourceCandidate(
+                descriptor: source,
+                registry: local,
+                indexSource: AILexicalIndexSource(
+                    descriptor: AIBM25IndexDescriptor(
+                        fileID: source.fileID,
+                        // Retrieval artifacts follow extracted page text. Broad
+                        // source versions still protect final publication, but
+                        // annotation-only PDF rewrites must not rebuild BM25.
+                        contentVersion: source.snapshotFingerprint,
+                        snapshotFingerprint: source.snapshotFingerprint,
+                        segmenterVersion: AIRetrievalWindow.indexVersion(
+                            segmenterVersion: registry.segmenterVersion
+                        )
+                    ),
+                    // Persist canonical D001 records while retaining the real
+                    // request ordinal for the merged request-wide index.
+                    documentNumber: source.documentNumber,
+                    records: AIRetrievalWindow.indexRecords(from: local.records)
+                )
+            ))
+        }
+
+        // Lexical preparation is one atomic request. Cancellation remains
+        // cooperative inside each backend. A batch that completes within the
+        // budget is accepted as a whole; an over-budget batch fails as a whole,
+        // so request-wide statistics and reported coverage cannot disagree.
+        let orderedCandidates = candidates.sorted {
+            $0.descriptor.documentNumber < $1.descriptor.documentNumber
+        }
+        try checkLexicalPreparationStatus(
+            started: started,
+            preparationBudget: preparationBudget
+        )
+        let preparedIndex = try await backend.prepare(
+            sources: orderedCandidates.map(\.indexSource)
+        )
+        try checkLexicalPreparationStatus(
+            started: started,
+            preparationBudget: preparationBudget
+        )
+        let shardsByDocument = try validateLexicalPreparedIndex(
+            preparedIndex,
+            sources: orderedCandidates.map(\.indexSource)
+        )
+
+        var children: [AIMultiSourceEvidenceRetriever.Source] = []
+        var preparedFileIDs: [UUID] = []
+        children.reserveCapacity(orderedCandidates.count)
+        preparedFileIDs.reserveCapacity(orderedCandidates.count)
+        for candidate in orderedCandidates {
+            try Task.checkCancellation()
+            guard let shard = shardsByDocument[candidate.descriptor.documentNumber],
+                  shard.sourceIdentity == candidate.indexSource.descriptor.canonicalIdentity else {
+                throw AIBM25IndexError.invalidIndexData
+            }
+            children.append(.init(
+                documentNumber: candidate.descriptor.documentNumber,
+                retriever: try AILexicalEvidenceRetriever(
+                    registry: candidate.registry,
+                    preparedIndex: shard.bm25
+                )
+            ))
+            preparedFileIDs.append(candidate.descriptor.fileID)
+        }
+
+        return AIMultiSourceRetrievalPreparation(
+            retriever: try AIMultiSourceEvidenceRetriever(
+                sources: children,
+                mode: .scheme1Lexical,
+                registry: registry,
+                globalLexicalIndex: preparedIndex.bm25
+            ),
+            coverage: AIMultiSourceCoverage(
+                requestedCount: registry.sources.count,
+                preparedFileIDs: preparedFileIDs,
+                skipped: skipped,
+                usedFileIDs: []
+            )
+        )
+    }
+
+    private static func checkLexicalPreparationStatus(
+        started: ContinuousClock.Instant,
+        preparationBudget: Duration
+    ) throws {
+        try Task.checkCancellation()
+        guard started.duration(to: .now) < preparationBudget else {
+            throw AIRetrievalError.preparationTimedOut
+        }
+    }
+
+    private static func validateLexicalPreparedIndex(
+        _ preparedIndex: AILexicalPreparedIndex,
+        sources: [AILexicalIndexSource]
+    ) throws -> [Int: AILexicalPreparedSource] {
+        let orderedSources = sources.sorted { $0.documentNumber < $1.documentNumber }
+        let expectedDocumentNumbers = orderedSources.map(\.documentNumber)
+        let expectedIdentities = orderedSources.map(\.descriptor.canonicalIdentity)
+        guard preparedIndex.sourceIdentities == expectedIdentities,
+              preparedIndex.preparedSources.map(\.documentNumber) == expectedDocumentNumbers,
+              preparedIndex.preparedSources.map(\.sourceIdentity) == expectedIdentities else {
+            throw AIBM25IndexError.invalidIndexData
+        }
+
+        var shardsByDocument: [Int: AILexicalPreparedSource] = [:]
+        shardsByDocument.reserveCapacity(preparedIndex.preparedSources.count)
+        var shardValues: [(documentNumber: Int, data: AIBM25IndexData)] = []
+        shardValues.reserveCapacity(preparedIndex.preparedSources.count)
+        for (source, shard) in zip(orderedSources, preparedIndex.preparedSources) {
+            let expectedIDs = Set(source.records.map { record in
+                AISegmentID(
+                    document: 1,
+                    page: record.id.page,
+                    block: record.id.block,
+                    sentence: record.id.sentence
+                )
+            })
+            guard source.descriptor.tokenizerVersion == preparedIndex.bm25.tokenizer.version,
+                  Set(shard.bm25.data.segmentLengths.keys) == expectedIDs,
+                  expectedIDs.allSatisfy({ $0.document == 1 }),
+                  shard.bm25.tokenizer.version == preparedIndex.bm25.tokenizer.version,
+                  shard.bm25.parameters == preparedIndex.bm25.parameters,
+                  shardsByDocument.updateValue(shard, forKey: shard.documentNumber) == nil else {
+                throw AIBM25IndexError.invalidIndexData
+            }
+            shardValues.append((shard.documentNumber, shard.bm25.data))
+        }
+        let mergedShardData = try AILexicalIndexSupport.merge(
+            shardValues,
+            tokenizer: preparedIndex.bm25.tokenizer
+        )
+        guard mergedShardData == preparedIndex.bm25.data,
+              shardsByDocument.count == orderedSources.count else {
+            throw AIBM25IndexError.invalidIndexData
+        }
+        return shardsByDocument
+    }
+
+    private static func singleRegistryLexicalSource(
+        _ registry: AISegmentRegistry
+    ) -> AILexicalIndexSource {
+        let documentNumbers = Set(registry.records.map(\.id.document))
+        let documentNumber = documentNumbers.count == 1
+            ? documentNumbers.first ?? 1
+            : 1
+        let digest = AIRetrievalHash.data(
+            Data("single-lexical-source-slot-v2|document=\(documentNumber)".utf8)
+        )
+        let prefix = String(digest.prefix(32))
+        let uuidText = [
+            String(prefix.prefix(8)),
+            String(prefix.dropFirst(8).prefix(4)),
+            String(prefix.dropFirst(12).prefix(4)),
+            String(prefix.dropFirst(16).prefix(4)),
+            String(prefix.dropFirst(20).prefix(12))
+        ].joined(separator: "-")
+        // SHA-256 hex always forms a valid UUID spelling. Keep an explicit
+        // fallback so malformed future hash implementations remain fail-safe.
+        let fileID = UUID(uuidString: uuidText)
+            ?? UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        return AILexicalIndexSource(
+            descriptor: AIBM25IndexDescriptor(
+                fileID: fileID,
+                contentVersion: registry.snapshotFingerprint,
+                snapshotFingerprint: registry.snapshotFingerprint,
+                segmenterVersion: AIRetrievalWindow.indexVersion(
+                    segmenterVersion: registry.segmenterVersion
+                )
+            ),
+            documentNumber: documentNumber,
+            records: AIRetrievalWindow.indexRecords(from: registry.records)
+        )
     }
 
     static func make(
@@ -271,9 +562,16 @@ nonisolated enum AIEvidenceRetrievalFactory {
         sharedEmbedder: (any AITextEmbedding)? = nil,
         queryEmbedder: (any AIQueryEmbedding)? = nil,
         preparationDeadline: ContinuousClock.Instant? = nil,
-        maximumChunks: Int = 20_000
+        maximumChunks: Int = 20_000,
+        lexicalPreparedIndex: AIBM25PreparedIndex? = nil,
+        embeddingCache: AISQLiteEmbeddingIndexCache? = nil
     ) async throws -> any AIEvidenceRetrieving {
-        guard selection.mode == .scheme2EvidenceRAG else { return AILexicalEvidenceRetriever(registry: registry) }
+        guard selection.mode == .scheme2EvidenceRAG else {
+            return try AILexicalEvidenceRetriever(
+                registry: registry,
+                preparedIndex: lexicalPreparedIndex
+            )
+        }
         let started = Date()
         guard let packageID = selection.packageID else { throw AIRetrievalError.modelMissing }
         await progress?(0, 0)
@@ -285,18 +583,22 @@ nonisolated enum AIEvidenceRetrievalFactory {
         let chunks = try AIEmbeddingChunk.make(registry: registry, tokenizer: embedder.tokenizer,
             maximumChunks: maximumChunks)
         if let preparationDeadline, ContinuousClock.now >= preparationDeadline { throw AIRetrievalError.preparationTimedOut }
-        let key = try AIEmbeddingIndexCache.key(registry: registry, packageID: packageID, chunks: chunks)
-        let root = cacheRoot ?? AILocalEmbeddingModels.root.appendingPathComponent("Indexes", isDirectory: true)
-        let url = root.appendingPathComponent("\(key).json")
-        let manager = FileManager.default
+        let descriptor = try AIEmbeddingCacheDescriptor(
+            registry: registry,
+            packageID: packageID,
+            dimensions: 384,
+            chunks: chunks
+        )
+        let cache = embeddingCache ?? AISQLiteEmbeddingIndexCache(
+            databaseURL: AISQLiteEmbeddingIndexCache.databaseURL(cacheRoot: cacheRoot)
+        )
         var vectors: [[Float]] = []
         var cacheHit = false
-        if let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
-           values.isSymbolicLink != true, (values.fileSize ?? Int.max) < 200_000_000,
-           let data = try? Data(contentsOf: url),
-           let cached = try? JSONDecoder().decode(AIEmbeddingIndexCache.self, from: data),
-           cached.isValid(key: key, chunks: chunks, dimensions: 384) {
-            vectors = cached.vectors
+        if let cached = try await cache.loadBestEffort(
+            descriptor: descriptor,
+            chunks: chunks
+        ) {
+            vectors = cached
             cacheHit = true
             await progress?(chunks.count, chunks.count)
         } else {
@@ -309,29 +611,24 @@ nonisolated enum AIEvidenceRetrievalFactory {
                 await progress?(index + 1, chunks.count)
             }
             try Task.checkCancellation()
-            let cache = AIEmbeddingIndexCache(key: key, ids: chunks.map(\.ids), vectors: vectors)
-            try manager.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let data = try JSONEncoder().encode(cache)
-            // Complete cache only; write with restrictive mode before atomic rename.
-            let temp = root.appendingPathComponent("\(UUID().uuidString).partial")
-            defer { try? manager.removeItem(at: temp) }
-            guard manager.createFile(atPath: temp.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
-            try Task.checkCancellation()
-            if manager.fileExists(atPath: url.path) {
-                guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
-                    throw AIRetrievalError.invalidModel
-                }
-                _ = try manager.replaceItemAt(url, withItemAt: temp)
-            } else {
-                try manager.moveItem(at: temp, to: url)
-            }
+            // Persistence is a derived optimization. A corrupt, unavailable or
+            // unwritable cache must not discard vectors already computed for
+            // this request; cancellation still propagates.
+            _ = try await cache.storeBestEffort(
+                descriptor: descriptor,
+                chunks: chunks,
+                vectors: vectors
+            )
         }
         try Task.checkCancellation()
         if let preparationDeadline, ContinuousClock.now >= preparationDeadline { throw AIRetrievalError.preparationTimedOut }
         await indexed?(chunks.count, cacheHit, Date().timeIntervalSince(started))
-        return AIHybridEvidenceRetriever(registry: registry, embedder: queryEmbedder ?? AICachedQueryEmbedder(base: embedder), chunks: chunks, vectors: vectors)
+        return try AIHybridEvidenceRetriever(
+            registry: registry,
+            embedder: queryEmbedder ?? AICachedQueryEmbedder(base: embedder),
+            chunks: chunks,
+            vectors: vectors
+        )
     }
 }
 

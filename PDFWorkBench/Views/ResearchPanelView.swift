@@ -19,10 +19,14 @@ struct ResearchPanelView: View {
     @ObservedObject private var configuration = AIConfigurationStore.shared
     @ObservedObject private var languageStore = AppLanguageStore.shared
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.workspaceOpenWindow) private var workspaceOpenWindow
     @State private var showingSources = false
+    @State private var expandedProgressRequestID: UUID?
     @State private var isDropTarget = false
     @State private var attachmentPreview: ResearchAttachment?
     @State private var localError: String?
+    @State private var showingImageImporter = false
+    @State private var imageImportRequest: ResearchImageImportRequest?
 
     init(store: ResearchStore? = nil, runtime: ResearchRuntime? = nil, library: LibraryStore,
          sessionID: Binding<UUID?>, currentFileID: UUID?, mainStore: PDFDocumentStore?, viewID: UUID,
@@ -56,7 +60,6 @@ struct ResearchPanelView: View {
                 sourceBar(session)
                 Divider()
                 conversation(session)
-                Divider()
                 composer(session)
             } else {
                 ContentUnavailableView {
@@ -80,6 +83,14 @@ struct ResearchPanelView: View {
             ResearchAttachmentPreview(attachment: attachment, store: store)
                 .environment(\.locale, languageStore.locale)
         }
+        .fileImporter(isPresented: $showingImageImporter, allowedContentTypes: [.image],
+            allowsMultipleSelection: true, onCompletion: { result in
+                guard let request = imageImportRequest else { return }
+                imageImportRequest = nil
+                if let error = request.complete(result, store: store).last {
+                    localError = error.localizedDescription
+                }
+            }, onCancellation: { imageImportRequest = nil })
         .alert("Research", isPresented: Binding(get: { localError != nil }, set: { if !$0 { localError = nil } })) {
             Button("OK") { localError = nil }
         } message: { Text(LocalizedStringKey(localError ?? "")) }
@@ -99,22 +110,29 @@ struct ResearchPanelView: View {
                 }
             } label: {
                 Label(session?.title ?? L10n.string("Research"), systemImage: "text.bubble")
+                    .font(.subheadline.weight(.medium))
                     .lineLimit(1)
             }
             .menuStyle(.borderlessButton)
             .accessibilityLabel("Choose research session")
             Spacer(minLength: 0)
-            Button(action: onShowLibrary) { Image(systemName: "books.vertical") }
+            Button(action: onShowLibrary) {
+                Image(systemName: "books.vertical").frame(width: 24, height: 24)
+            }
                 .help("Research sessions and notes")
                 .accessibilityLabel("Research sessions and notes")
             if mainStore != nil {
-                Button(action: onToggleWide) { Image(systemName: compact ? "arrow.up.left.and.arrow.down.right" : "xmark") }
+                Button(action: onToggleWide) {
+                    Image(systemName: compact ? "arrow.up.left.and.arrow.down.right" : "xmark")
+                        .frame(width: 24, height: 24)
+                }
                 .help(LocalizedStringKey(compact ? "Show AI workspace" : "Hide AI workspace"))
                 .accessibilityLabel(LocalizedStringKey(compact ? "Show AI workspace" : "Hide AI workspace"))
             }
         }
         .buttonStyle(.borderless)
-        .padding(12)
+        .padding(.horizontal, 12)
+        .frame(height: 44)
     }
 
     private func sourceBar(_ session: ResearchSession) -> some View {
@@ -122,7 +140,13 @@ struct ResearchPanelView: View {
             HStack {
                 Button { showingSources.toggle() } label: {
                     Label("Sources: \(sourceIDs.count)", systemImage: "doc.on.doc")
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.055), in: Capsule())
+                        .contentShape(Capsule())
                 }
+                .buttonStyle(.plain)
                 .popover(isPresented: $showingSources, arrowEdge: .bottom) {
                     sourcePicker(session).environment(\.locale, languageStore.locale)
                 }
@@ -130,6 +154,10 @@ struct ResearchPanelView: View {
                 if let groupID = session.sourceSelection.groupID,
                    let group = library.userGroups.first(where: { $0.id == groupID }) {
                     Label(group.name, systemImage: "folder").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                } else if let fileID = sourceIDs.first,
+                          let file = library.allFiles.first(where: { $0.id == fileID }) {
+                    Text(file.displayName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
             if let previous = session.messages.last, !running {
@@ -189,7 +217,7 @@ struct ResearchPanelView: View {
             // Exact message heights keep scroll offsets stable when long answers
             // enter/leave the viewport; lazy row estimates shift that offset.
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 26) {
                     if session.messages.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Read, ask, keep the evidence.").font(.headline)
@@ -203,7 +231,10 @@ struct ResearchPanelView: View {
                     }
                     ForEach(session.messages) { message in messageCard(message, sessionID: session.id).id(message.id) }
                     Color.clear.frame(height: 1).id("research-bottom")
-                }.padding(12)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .onChange(of: session.messages.count) { _, _ in
                 withAnimation { proxy.scrollTo("research-bottom", anchor: .bottom) }
@@ -212,34 +243,48 @@ struct ResearchPanelView: View {
     }
 
     private func messageCard(_ message: ResearchMessage, sessionID: UUID) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top) {
-                Image(systemName: "person.crop.circle").foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 0) {
+                Spacer(minLength: 24)
                 Text(message.question.isEmpty ? L10n.string("Document outline") : message.question)
-                    .font(.subheadline.weight(.semibold)).textSelection(.enabled)
+                    .font(.subheadline)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11))
             }
             if !message.input.blocks.isEmpty {
                 DisclosureGroup("Included passages and attachments: \(message.input.blocks.count)") {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(message.input.blocks) { block in sentInputBlock(block) }
-                        }
-                    }.frame(maxHeight: 220)
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(message.input.blocks) { block in sentInputBlock(block) }
+                    }
+                    .padding(.top, 6)
                 }.font(.caption).foregroundStyle(.secondary)
             }
             if let answer = message.answer {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles")
+                    Text(verbatim: "Dogear")
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
                 ResearchSelectableText(text: answer,
                     sources: message.sourceSnapshot.filter { $0.fingerprint != "pending" },
                     evidence: message.evidence, onViewEvidence: onViewEvidence) { quote in
                         appendDiscussion(quote, message: message)
                     }
                 HStack(spacing: 12) {
-                    Button("Copy", systemImage: "doc.on.doc") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(answer, forType: .string) }
+                    Button("Copy", systemImage: "doc.on.doc") { PlatformClipboard.copyText(answer) }
                     Button("Save as note", systemImage: "square.and.pencil") { saveNote(message, sessionID: sessionID) }
                     Menu {
                         Button("Quote answer and follow up") { appendDiscussion(answer, message: message) }
                     } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize()
-                }.buttonStyle(.borderless).font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 2)
                 if message.origin == .localOutline {
                     Label("Local outline", systemImage: "leaf").font(.caption).foregroundStyle(.secondary)
                 }
@@ -254,6 +299,7 @@ struct ResearchPanelView: View {
                     }
                 }.font(.caption)
             }
+            ResearchContextSummaryView(message: message)
             if message.status != .accepted && message.status != .running {
                 Label(statusTitle(message.status), systemImage: message.status == .failed ? "exclamationmark.circle" : "pause.circle")
                     .font(.caption).foregroundStyle(.secondary)
@@ -273,12 +319,61 @@ struct ResearchPanelView: View {
                     .font(.caption).buttonStyle(.borderless).disabled(running)
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func composer(_ session: ResearchSession) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !store.saveFailures.isEmpty || !store.loadWarnings.isEmpty
+                || runtime.jobs[session.id] != nil || runtime.errors[session.id] != nil {
+                // Short status messages use only their natural height. Long
+                // provider errors and expanded source details remain readable
+                // in a bounded area without pushing the conversation away.
+                ViewThatFits(in: .vertical) {
+                    composerStatus(session).fixedSize(horizontal: false, vertical: true)
+                    ScrollView(.vertical) {
+                        composerStatus(session).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxHeight: 120, alignment: .top)
+                .id(session.id)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                if !draft.blocks.isEmpty {
+                    ScrollView {
+                        LazyVStack(spacing: 6) {
+                            ForEach(Array(draft.blocks.enumerated()), id: \.element.id) { index, block in inputBlock(block, index: index) }
+                        }
+                    }
+                    .frame(maxHeight: compact ? 115 : 155)
+                    .padding(.horizontal, 6)
+                    .padding(.top, 6)
+                }
+                ResearchComposerLayout(text: draft.text, maximumHeight: compact ? 132 : 164) {
+                    ResearchTextEditor(text: Binding(get: { draft.text }, set: { text in mutateDraft { $0.text = text } }),
+                        placeholder: L10n.string("Ask a question, or leave empty for an outline…"),
+                        onSubmit: { send() }, onPasteImage: importImage)
+                        .id(session.id)
+                }
+                .frame(maxWidth: .infinity)
+                composerActions(session)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 9)
+            }
+            .padding(.top, 3)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.12)))
+            if imagesNeedConfirmation {
+                Label("Image support is unconfirmed or unavailable. Attachments will stay in your draft.", systemImage: "photo.badge.exclamationmark")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+    }
+
+    private func composerStatus(_ session: ResearchSession) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if !store.saveFailures.isEmpty || !store.loadWarnings.isEmpty {
                 HStack(alignment: .top) {
@@ -291,20 +386,12 @@ struct ResearchPanelView: View {
             if let error = runtime.errors[session.id] {
                 Text(LocalizedStringKey(error)).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
-            if !draft.blocks.isEmpty {
-                ScrollView {
-                    LazyVStack(spacing: 6) {
-                        ForEach(Array(draft.blocks.enumerated()), id: \.element.id) { index, block in inputBlock(block, index: index) }
-                    }
-                }.frame(maxHeight: compact ? 155 : 220)
-            }
-            ResearchTextEditor(text: Binding(get: { draft.text }, set: { text in mutateDraft { $0.text = text } }),
-                placeholder: L10n.string("Ask a question, or leave empty for an outline…"),
-                onSubmit: { send() }, onPasteImage: importImage)
-                .id(session.id)
-                .frame(minHeight: compact ? 74 : 100, maxHeight: compact ? 120 : 180)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.12)))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func composerActions(_ session: ResearchSession) -> some View {
+        VStack(spacing: 9) {
             HStack(spacing: 10) {
                 Menu {
                     Button("Add selected passage", systemImage: "text.quote", action: onAddSelection).disabled(currentFileID == nil)
@@ -313,31 +400,38 @@ struct ResearchPanelView: View {
                     Button("Choose image…", systemImage: "photo", action: chooseImage)
                     Button("Paste image", systemImage: "doc.on.clipboard", action: pasteImage)
                 } label: { Label("Add", systemImage: "plus") }
-                .menuStyle(.borderlessButton).fixedSize()
+                .menuStyle(.borderlessButton)
+                .font(.caption)
+                .fixedSize()
                 Spacer(minLength: 0)
                 Toggle("Allow highlights", isOn: Binding(get: { runtime.sessionAllowsAnnotations(session.id) },
                     set: { runtime.setAllowsAnnotations($0, sessionID: session.id) }))
                     .toggleStyle(.checkbox).font(.caption).disabled(running || mainStore == nil)
                     .help("Only the explicit main PDF can receive highlights.")
             }
-            if imagesNeedConfirmation {
-                Label("Image support is unconfirmed or unavailable. Attachments will stay in your draft.", systemImage: "photo.badge.exclamationmark")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            HStack {
+            HStack(spacing: 8) {
                 Text("⌘ Return to send").font(.caption2).foregroundStyle(.tertiary)
-                Spacer()
+                Spacer(minLength: 0)
                 if imagesNeedConfirmation {
-                    Button("Send text only") { send(textOnly: true) }.disabled(running)
+                    Button("Send text only") { send(textOnly: true) }
+                        .buttonStyle(.borderless).font(.caption).disabled(running)
                 }
                 Button(action: { send() }) {
-                    Label(LocalizedStringKey(draft.isEmpty ? (runtime.cloudAvailable ? "Create outline" : "Local outline") : "Send"), systemImage: "arrow.up")
+                    if draft.isEmpty {
+                        Label(LocalizedStringKey(runtime.cloudAvailable ? "Create outline" : "Local outline"), systemImage: "arrow.up")
+                            .font(.caption.weight(.medium))
+                    } else {
+                        Image(systemName: "arrow.up").font(.body.weight(.semibold)).frame(width: 16, height: 18)
+                    }
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .help(LocalizedStringKey(draft.isEmpty ? (runtime.cloudAvailable ? "Create outline" : "Local outline") : "Send"))
+                .accessibilityLabel(LocalizedStringKey(draft.isEmpty ? (runtime.cloudAvailable ? "Create outline" : "Local outline") : "Send"))
                 .disabled(running || imagesNeedConfirmation || (sourceIDs.isEmpty && draft.attachmentIDs.isEmpty))
             }
         }
-        .padding(12)
     }
 
     private func progressView(_ progress: ResearchRequestProgress, sessionID: UUID) -> some View {
@@ -353,7 +447,10 @@ struct ResearchPanelView: View {
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
             }
             if !progress.skippedSources.isEmpty {
-                DisclosureGroup("Skipped sources: \(progress.skippedSources.count)") {
+                DisclosureGroup("Skipped sources: \(progress.skippedSources.count)", isExpanded: Binding(
+                    get: { expandedProgressRequestID == progress.requestID },
+                    set: { expandedProgressRequestID = $0 ? progress.requestID : nil }
+                )) {
                     ForEach(Array(progress.skippedSources.enumerated()), id: \.offset) { _, reason in Text(reason).font(.caption) }
                 }.font(.caption)
             }
@@ -365,9 +462,9 @@ struct ResearchPanelView: View {
             HStack(alignment: .top, spacing: 6) {
                 if let attachmentID = block.attachmentID ?? block.evidence?.attachmentID,
                    let attachment = store.attachments.first(where: { $0.id == attachmentID }),
-                   let url = store.attachmentURL(id: attachmentID), let image = NSImage(contentsOf: url) {
+                   let url = store.attachmentURL(id: attachmentID), let image = LocalImageDecoding.stillImage(at: url) {
                     Button { attachmentPreview = attachment } label: {
-                        Image(nsImage: image).resizable().scaledToFit().frame(width: 52, height: 42).clipShape(RoundedRectangle(cornerRadius: 4))
+                        Image(decorative: image, scale: 1).resizable().scaledToFit().frame(width: 52, height: 42).clipShape(RoundedRectangle(cornerRadius: 4))
                     }.buttonStyle(.plain).accessibilityLabel("Preview image")
                 } else {
                     Image(systemName: block.kind.isDiscussionBackground ? "quote.bubble" : "text.quote").foregroundStyle(.secondary)
@@ -400,9 +497,9 @@ struct ResearchPanelView: View {
             Text(block.evidence?.source?.displayName ?? kindTitle(block.kind)).font(.caption.weight(.semibold))
             if let id = block.attachmentID ?? block.evidence?.attachmentID,
                let attachment = store.attachments.first(where: { $0.id == id }),
-               let url = store.attachmentURL(id: id), let image = NSImage(contentsOf: url) {
+               let url = store.attachmentURL(id: id), let image = LocalImageDecoding.stillImage(at: url) {
                 Button { attachmentPreview = attachment } label: {
-                    Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 130)
+                    Image(decorative: image, scale: 1).resizable().scaledToFit().frame(maxHeight: 130)
                 }.buttonStyle(.plain).accessibilityLabel("Preview image")
             }
             if !block.text.isEmpty { Text(block.text).font(.caption).textSelection(.enabled) }
@@ -455,15 +552,12 @@ struct ResearchPanelView: View {
         let title = String((message.question.isEmpty ? L10n.string("Research note") : message.question).prefix(100))
         let provenance = ResearchNoteProvenance(origin: message.origin, sessionID: sessionID, messageID: message.id, evidence: message.evidence)
         let id = store.createNote(title: title, body: answer, provenance: [provenance], attachmentIDs: message.input.attachmentIDs)
-        openWindow(id: "research-note", value: id)
+        (workspaceOpenWindow ?? openWindow)(id: "research-note", value: id)
     }
     private func chooseImage() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK else { return }
-        for url in panel.urls { importImageURL(url) }
+        guard imageImportRequest == nil, let sessionID, store.session(id: sessionID) != nil else { return }
+        imageImportRequest = ResearchImageImportRequest(sessionID: sessionID)
+        showingImageImporter = true
     }
     private func pasteImage() {
         guard let image = ResearchNativeTextView.image(from: .general) else {
@@ -480,18 +574,9 @@ struct ResearchPanelView: View {
         do { try ResearchImagePipeline.importImage(data: data, displayName: name, sessionID: sessionID, store: store) }
         catch { localError = error.localizedDescription }
     }
-    private func importImageURL(_ url: URL) {
-        guard let sessionID else { return }
-        importImageURL(url, sessionID: sessionID)
-    }
     private func importImageURL(_ url: URL, sessionID: UUID) {
-        let access = url.startAccessingSecurityScopedResource()
-        defer { if access { url.stopAccessingSecurityScopedResource() } }
         do {
-            let values = try url.resourceValues(forKeys: [.contentTypeKey, .fileSizeKey])
-            guard values.contentType?.conforms(to: .image) == true,
-                  (values.fileSize ?? Int.max) <= ResearchInputLimits.maximumImportedImageBytes else { throw ResearchStoreError.invalidAttachment }
-            importImage(try Data(contentsOf: url), url.lastPathComponent, sessionID: sessionID)
+            try ResearchImageImportRequest(sessionID: sessionID).importURL(url, store: store)
         } catch { localError = error.localizedDescription }
     }
     private func receiveDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -569,11 +654,48 @@ struct ResearchAttachmentPreview: View {
                 Spacer()
                 Button("Done") { dismiss() }
             }
-            if let url = store.attachmentURL(id: attachment.id), let image = NSImage(contentsOf: url) {
-                Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let url = store.attachmentURL(id: attachment.id), let image = LocalImageDecoding.stillImage(at: url) {
+                Image(decorative: image, scale: 1).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else { ContentUnavailableView("Image unavailable", systemImage: "photo.badge.exclamationmark") }
             Text("\(attachment.pixelWidth ?? 0) × \(attachment.pixelHeight ?? 0) · \(ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file))")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(20).frame(minWidth: 420, idealWidth: 700, minHeight: 300, idealHeight: 550)
+    }
+}
+
+/// Measure only the draft at its final available width. No deferred height state
+/// feeds back into the conversation scroll view, and the native editor still
+/// owns scrolling, marked text, image paste and Undo after reaching the cap.
+private struct ResearchComposerLayout: Layout {
+    let text: String
+    let maximumHeight: CGFloat
+    private let minimumHeight: CGFloat = 64
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let proposedWidth = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? 300
+        let width = max(1, proposedWidth)
+        let storage = NSTextStorage(string: text.isEmpty ? " " : text,
+                                    attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)])
+        let manager = NSLayoutManager()
+        // Match ResearchTextEditor's 8-point insets and default line padding.
+        // Reserve the legacy scroller width so an always-visible scrollbar
+        // cannot make a last line overflow before the height cap is reached.
+        let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: NSScroller.preferredScrollerStyle)
+        let container = NSTextContainer(size: NSSize(width: max(1, width - 16 - scrollerWidth),
+                                                     height: .greatestFiniteMagnitude))
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        manager.ensureLayout(for: container)
+        let usedHeight = manager.usedRect(for: container).height
+        let trailingLineHeight = text.hasSuffix("\n") ? manager.defaultLineHeight(for: .systemFont(ofSize: NSFont.systemFontSize)) : 0
+        let height = min(maximumHeight, max(minimumHeight, ceil(usedHeight + trailingLineHeight + 16)))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for subview in subviews {
+            subview.place(at: bounds.origin, anchor: .topLeading,
+                          proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+        }
     }
 }

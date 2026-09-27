@@ -1,6 +1,165 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+"File Info" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"文件信息"}}}},
+"File Info…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"文件信息…"}}}},
+"Name" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"名称"}}}},
+"Original location" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"原件位置"}}}},
+"Locate Original…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"重新定位原件…"}}}},
+"Reading position" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"阅读位置"}}}},
+"Organization" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"文件整理"}}}},
+"Groups" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"所属 Group"}}}},
+"Save Tags" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"保存标签"}}}},
+"Your edits are kept in a working copy." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"你的修改保存在工作副本中。"}}}},
+"Save Copy As…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"副本另存为…"}}}},
+"This file is no longer in the Library." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"此文件已不在资料库中。"}}}},
+"Checking original content…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"正在核对原件内容…"}}}},
+"This is not a verified copy of the original" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"无法确认与原件内容一致"}}}},
+"Import as New File" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"作为新文件导入"}}}},
+"The SHA-256 differs, or the original has no saved fingerprint. Import this PDF separately. The old file, working copy and research records will be kept." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"SHA-256 不一致，或原件没有已保存的指纹。请将此 PDF 单独导入，原文件记录、工作副本和研究成果都会保留。"}}}},
+"Original file reconnected." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"已重新关联原件。"}}}},
+"Working Copies" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"工作副本"}}}},
+"Working Copies…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"工作副本…"}}}},
+"Manage Working Copies…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"管理工作副本…"}}}},
+"Storage" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"存储"}}}},
+"Refresh" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"刷新"}}}},
+"Retry Failed Saves" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"重试失败的保存"}}}},
+"Edits stay here until you explicitly discard them. Exporting a copy keeps your working copy." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"修改会一直保留在这里，直到你明确丢弃。导出不会删除工作副本。"}}}},
+"Find a file" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"查找文件"}}}},
+"Discard…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"丢弃…"}}}},
+"Recover to File…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"恢复为文件…"}}}},
+"No working copies found." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"没有找到工作副本。"}}}},
+"Discard all changes?" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"丢弃全部修改？"}}}},
+"Discard Changes" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"丢弃修改"}}}},
+"This deletes the selected working copy and its edits. The original PDF is not changed. If the original is missing, export your work first." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"这会删除所选工作副本及其中的修改，原始 PDF 不会改变。如果原件已丢失，请先导出你的成果。"}}}},
+"This deletes the app-managed working copy. The original file will not be changed." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"这会删除应用管理的工作副本，原始文件不会改变。"}}}},
+"Save failed" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"保存失败"}}}},
+"Saving working copy…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"正在保存工作副本…"}}}},
+"Working copy is missing" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"工作副本已丢失"}}}},
+"Not associated with Library · kept for recovery" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"未关联资料库 · 已保留以供恢复"}}}},
+"In use or waiting to save" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"正在使用或等待保存"}}}},
+"Unavailable storage reference" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"存储引用不可用"}}}},
+"Saved working copy" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"已保存的工作副本"}}}},
+"Original is missing · working copy is available" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"原件已丢失 · 工作副本仍可用"}}}},
+"All Tags" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"全部标签"}}}},
+"Filter by tag" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"按标签筛选"}}}},
+"Clear tag filter" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"清除标签筛选"}}}},
+"%lld selected" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"已选择 %lld 个文件"}}}},
+"Organize" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"整理"}}}},
+"Library operation failed" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"资料库操作失败"}}}},
+"New Group from Selection…" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"用所选文件新建 Group…"}}}},
+"Clear Selection" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"清除选择"}}}},
+"Scanning · %lld PDFs found" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"正在扫描 · 已发现 %lld 个 PDF"}}}},
+"Importing · %lld of %lld" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"正在导入 · %lld / %lld"}}}},
+"Import stopped · %lld files kept" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"导入已停止 · 已保留 %lld 个文件"}}}},
+"Import finished · %lld files · %lld skipped · %lld failed" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"导入完成 · %lld 个文件 · 跳过 %lld 个 · 失败 %lld 个"}}}},
+"Import details" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"导入详情"}}}},
+"Dismiss" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"关闭"}}}},
+"An import is already running in this workspace." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"此工作区已有导入任务正在进行。"}}}},
+"Import PDFs" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"导入 PDF"}}}},
+"The file could not be read. Choose an available PDF and try again." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"无法读取此文件，请选择可用的 PDF 后重试。"}}}},
+"Choose a regular PDF file." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"请选择普通 PDF 文件。"}}}},
+"The file changed during verification. Choose it again before continuing." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"文件在校验期间发生了变化，请重新选择后继续。"}}}},
+"The Library entry changed during this operation. Try again." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"资料库记录在此操作期间发生了变化，请重试。"}}}},
+"This file already belongs to another Library entry. Open that entry instead." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"此文件已关联另一条资料库记录，请打开已有记录。"}}}},
+"The selected file has different contents. Import it as a new file; the existing entry and edits will be kept." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"所选文件的内容不同，请作为新文件导入。已有记录和修改会保留。"}}}},
+"The original file has no verified SHA-256. Import the selected PDF as a new file; the existing entry and edits will be kept." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"原件没有经过验证的 SHA-256，请将所选 PDF 作为新文件导入。已有记录和修改会保留。"}}}},
+"The Library change could not be saved. The previous entry has been kept." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"无法保存资料库修改，原有记录已保留。"}}}},
+"One of the selected Library files is no longer available." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"选中的某个资料库文件已不可用。"}}}},
+"Choose an available, unarchived Group." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"请选择可用且未归档的 Group。"}}}},
+"Enter a Group name." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"请输入 Group 名称。"}}}},
+"A Group with this name already exists." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"已有同名 Group。"}}}},
+"This working-copy reference cannot be managed safely. The file has been kept." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"无法安全处理此工作副本引用，文件已保留。"}}}},
+"Choose a new file name. Existing files are not replaced by this export." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"请选择新的文件名，此导出操作不会替换现有文件。"}}}},
+"The PDF changed while this dialog was open. Run the command again." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"PDF 在此对话框打开期间发生了变化，请重新执行操作。"}}}},
+"This PDF has another active editing session. Close that session before locating the original." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"此 PDF 在另一编辑会话中打开，请先关闭该会话，再重新定位原件。"}}}},
+"Save the working copy successfully before locating its original. Your edits have been retained." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"请先成功保存工作副本，再重新定位原件。你的修改已保留。"}}}},
+"Delete page %lld?" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除第 %lld 页？"}}}},
+"Delete the selected page?" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除所选页面？"}}}},
+"Delete %lld selected pages?" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除选中的 %lld 页？"}}}},
+"Delete from Working Copy" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"从工作副本中删除"}}}},
+"Dogear will update the app-managed working copy. The original PDF will not be changed." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"Dogear 会更新应用管理的工作副本，原始 PDF 不会改变。"}}}},
+"Overwrite original PDF?" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"覆盖原始 PDF？"}}}},
+"This writes the current working copy back to the original file. Export keeps the original unchanged." : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"这会将当前工作副本写回原始文件。使用导出可以保持原件不变。"}}}},
+"Overwrite Original" : {"extractionState":"manual","generatesSymbol":false,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"覆盖原件"}}}},
+
+"Edit Free Text…" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"编辑自由文本批注…"}}}},
+"Enter note text and adjust its size, then save." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"输入批注文本并调整尺寸，然后保存。"}}}},
+"This note has a custom appearance that this editor cannot preserve yet." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"此批注包含当前编辑器无法保留的自定义外观。"}}}},
+"Saving regenerates the PDF appearance from this note’s text and style. Custom artwork in the appearance is not preserved." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"保存会根据批注文本和样式重新生成 PDF 外观，外观流中的自定义图形不会保留。"}}}},
+"Edit Free Text Note" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"编辑文本批注"}}}},
+"Note Text" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"批注文字"}}}},
+"Note Preview" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"批注预览"}}}},
+"Width (pt)" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"宽度（磅）"}}}},
+"Height (pt)" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"高度（磅）"}}}},
+"Font Size (pt)" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"字号（磅）"}}}},
+"Dimensions use PDF points and stay inside the page. Text outside the note box is clipped." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"尺寸以 PDF 磅为单位，限制在页面范围内。超出批注框的文字会被裁切。"}}}},
+"The note could not be saved. It may no longer be present in this document." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"无法保存此批注，它可能已不在当前文档中。"}}}},
+"This note contains rich text formatting that this editor cannot preserve yet." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"此批注包含当前编辑器暂时无法保留的富文本格式。"}}}},
+"Enter note text before saving." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"请输入批注文字后再保存。"}}}},
+"Width and height must be positive numbers." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"宽度和高度必须为正数。"}}}},
+"Font size must be between 4 and 144 points." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"字号必须在 4 到 144 磅之间。"}}}},
+"The page no longer has usable bounds." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"当前页面的尺寸无效。"}}}},
+"The image type or size is not supported. Remove it or attach a supported image before sending." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"不支持此图像类型或大小。请移除它，或添加受支持的图像后再发送。"}}}},
+"A research attachment is missing. Attach the image again before sending. Your draft has been kept." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"研究附件已丢失。请重新添加图像后再发送。你的草稿已保留。"}}}},
+"The PDF changed before the optional highlights could be applied." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"应用可选高亮前，PDF 内容已发生变化。"}}}},
+"Dogear could not validate or apply these highlights. The accepted answer has been kept." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"Dogear 无法验证或应用这些高亮。已通过验证的答案已保留。"}}}},
+"This scope was fixed when you started the request. It does not change with the current Group." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"范围在开始请求时固定，不随当前 Group 变化。"}}}},
+"The source working copy is missing. Locate it or explicitly discard it before retrying." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"来源的工作副本已丢失。请先定位该副本，或明确丢弃后再重试。"}}}},
+"The PDF editing session is no longer available. Reopen the document before adding annotations." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"PDF 编辑会话已不可用。请重新打开文档后再添加批注。"}}}},
+"Dogear could not read the latest source. Your input has been kept." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"Dogear 无法读取来源的最新内容。你的输入已保留。"}}}},
+"The research workspace changed or this operation is unavailable. Your input has been kept." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"研究工作区已变化，或当前操作不可用。你的输入已保留。"}}}},
+"All Annotations" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"全部批注"}}}},
+"Current Filtered Annotations" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"当前筛选的批注"}}}},
+"Selected Annotation" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"所选批注"}}}},
+"Edit Highlight" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"编辑高亮"}}}},
+"Edit Highlight Color and Comment…" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"编辑高亮…"}}}},
+"Quoted Text" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"引用原文"}}}},
+"Highlight Color" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"高亮颜色"}}}},
+"Comment" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"评论"}}}},
+"Annotation Actions" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"批注操作"}}}},
+"AI Highlight Group Actions" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"AI 高亮组操作"}}}},
+"Export This Annotation…" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"导出此批注…"}}}},
+"Remove Note" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除笔记批注"}}}},
+"Delete this AI highlight group?" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除 AI 高亮组？"}}}},
+"Delete AI Highlight Group" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除 AI 高亮组"}}}},
+"Delete this group…" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除 AI 高亮组…"}}}},
+"Delete %lld highlights in “%@”? Other groups and manual annotations stay unchanged. You can undo this deletion." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除“%2$@”中的 %1$lld 条高亮？其他组和手动批注保持不变。此操作可以撤销。"}}}},
+"Choose Markdown Export Range" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"选择 Markdown 导出范围"}}}},
+"All annotations includes hidden AI groups. Current filtered annotations uses the visible list, search and filters. Selected annotation exports the one selected item." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"全部批注包含隐藏的 AI 高亮组。当前筛选的批注遵循列表的可见范围、搜索及筛选条件。所选批注仅导出当前选中的一条。"}}}},
+"No annotations in the selected export range." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"所选导出范围内没有批注。"}}}},
+"Logs from earlier versions may contain document content. Review them before sharing." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"旧版本的日志可能包含文档内容，分享前请先检查。"}}}},
+"Include document content in local logs?" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"要将文档内容写入本地日志吗？"}}}},
+"Enable detailed logs" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"启用详细日志"}}}},
+"Reference scope for this request" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"本次参考范围"}}}},
+"This local outline did not send conversation history or documents to a provider." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"本地大纲没有向服务提供商发送对话历史或文档内容。"}}}},
+"Previous exchanges included: %lld of %lld" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"采用历史问答：%lld / %lld 轮"}}}},
+"Earlier exchanges omitted: %lld" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"未纳入历史问答：%lld 轮"}}}},
+"Only the most recent six complete exchanges are included." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"最多纳入最近六轮完整问答。"}}}},
+"Complete exchanges did not fit the history limit. A long latest exchange can leave no history in this request." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"完整问答超出了历史长度限制。如果最近一轮过长，本次可能不包含任何历史。"}}}},
+"Conversation history is background. Documentary claims still require current source evidence." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"历史对话仅作讨论背景，文档事实仍需本次查阅原文证据。"}}}},
+"Images included: %lld" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"包含图片：%lld 张"}}}},
+"Images excluded by text-only sending: %lld" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"仅发送文字，未包含图片：%lld 张"}}}},
+"This older request did not record its history selection. Its saved sources are shown below." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"这条旧请求没有记录当时采用的历史问答，以下仅显示已保存的来源。"}}}},
+"This scope was fixed when the request was sent. It does not change with the current Group." : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"范围在发送时固定，不随当前 Group 变化。"}}}},
+"Selected source files: %lld" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"选定来源文件：%lld 份"}}}},
+"Skipped" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"已跳过"}}}},
+"Cited in this answer" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"本次回答已引用"}}}},
+"Available for search; not cited" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"可供检索，本次未引用"}}}},
+"Used for the local outline" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"用于本地大纲"}}}},
+"Text prepared; search coverage not recorded" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"已准备文本，未记录检索覆盖"}}}},
+"Preparation not completed" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"未完成准备"}}}},
+"Close Window" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"关闭窗口"}}}},
+"Exit Full Screen" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"退出全屏幕"}}}},
+
+"Enter Full Screen" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"进入全屏幕"}}}},
+
+"Next Workspace" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"下一个工作区"}}}},
+
+"Previous Workspace" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"上一个工作区"}}}},
+
+"Reading actions" : {"extractionState":"manual","localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"阅读操作"}}}},
+
     "Show AI workspace" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1672,10 +1831,7 @@
         }
       }
     },
-    "Archive Group" : {
-      "comment" : "A button that archives a group.",
-      "isCommentAutoGenerated" : true
-    },
+    "Archive Group" : {"comment":"A button that archives a group.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"归档 Group"}}}},
     "Ask a question..." : {
       "localizations" : {
         "zh-Hans" : {
@@ -1825,10 +1981,7 @@
       "comment" : "A confirmation dialog title for deleting a group.",
       "isCommentAutoGenerated" : true
     },
-    "Delete Group..." : {
-      "comment" : "The label of a button that deletes a group.",
-      "isCommentAutoGenerated" : true
-    },
+    "Delete Group..." : {"comment":"The label of a button that deletes a group.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"删除 Group…"}}}},
     "Delete Keychain Key" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2587,10 +2740,7 @@
         }
       }
     },
-    "No working copy; the original is unchanged." : {
-      "comment" : "A description of a document that is not a working copy.",
-      "isCommentAutoGenerated" : true
-    },
+    "No working copy; the original is unchanged." : {"comment":"A description of a document that is not a working copy.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"没有工作副本，原件未被修改。"}}}},
     "None" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2893,10 +3043,7 @@
       "comment" : "A confirmation dialog title.",
       "isCommentAutoGenerated" : true
     },
-    "Remove from Library..." : {
-      "comment" : "A button that removes a file from the library.",
-      "isCommentAutoGenerated" : true
-    },
+    "Remove from Library..." : {"comment":"A button that removes a file from the library.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"从资料库移除…"}}}},
     "Remove from This Group" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2927,10 +3074,7 @@
         }
       }
     },
-    "Rename Group..." : {
-      "comment" : "A button that renames a group.",
-      "isCommentAutoGenerated" : true
-    },
+    "Rename Group..." : {"comment":"A button that renames a group.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"重命名 Group…"}}}},
     "Replace Key" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2941,18 +3085,9 @@
         }
       }
     },
-    "Restore Group" : {
-      "comment" : "A button that restores a group.",
-      "isCommentAutoGenerated" : true
-    },
-    "Reveal" : {
-      "comment" : "A button that reveals the working copy of a document.",
-      "isCommentAutoGenerated" : true
-    },
-    "Reveal Original" : {
-      "comment" : "A button that reveals the original file.",
-      "isCommentAutoGenerated" : true
-    },
+    "Restore Group" : {"comment":"A button that restores a group.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"恢复 Group"}}}},
+    "Reveal" : {"comment":"A button that reveals the working copy of a document.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"在访达中显示"}}}},
+    "Reveal Original" : {"comment":"A button that reveals the original file.","isCommentAutoGenerated":true,"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"在访达中显示原件"}}}},
     "Reveal Workflow Log" : {
       "extractionState" : "stale",
       "localizations" : {

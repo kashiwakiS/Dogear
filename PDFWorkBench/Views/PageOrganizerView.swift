@@ -108,6 +108,7 @@ struct PageOrganizerView: View {
             .padding(12)
         }
         .frame(minWidth: 660, minHeight: 560)
+        .documentInteractions(store: documentStore, scope: .pageOrganizer)
         .onAppear {
             if documentStore.pageCount > 0 {
                 selection = [documentStore.currentPageIndex]
@@ -147,7 +148,7 @@ struct PageOrganizerView: View {
 
     private func deleteSelection() {
         let firstRemainingIndex = min(selection.min() ?? 0, max(0, documentStore.pageCount - selection.count - 1))
-        if documentStore.deletePagesFromWorkingCopy(at: selectedIndexes, trigger: .pointer) {
+        documentStore.deletePagesFromWorkingCopy(at: selectedIndexes, trigger: .pointer) {
             selection = [firstRemainingIndex]
         }
     }

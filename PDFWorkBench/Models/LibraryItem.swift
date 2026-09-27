@@ -2,8 +2,8 @@ import Foundation
 
 typealias LibraryItem = LibraryFile
 
-struct LibraryState: Codable, Equatable {
-    static let currentSchemaVersion = 5
+nonisolated struct LibraryState: Codable, Equatable, Sendable {
+    static let currentSchemaVersion = 6
 
     var schemaVersion: Int
     var files: [LibraryFile]
@@ -36,13 +36,14 @@ struct LibraryState: Codable, Equatable {
     }
 }
 
-struct LibraryFile: Identifiable, Codable, Equatable {
+nonisolated struct LibraryFile: Identifiable, Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id
         case displayName
         case canonicalPath
         case path
         case workingCopyPath
+        case originalSHA256
         case bookmarkData
         case tags
         case lastOpenedAt
@@ -57,6 +58,9 @@ struct LibraryFile: Identifiable, Codable, Equatable {
     var displayName: String
     var canonicalPath: String
     var workingCopyPath: String?
+    /// Identity of the original bytes, never the editable working copy. Older
+    /// records remain unverified until their readable original is fingerprinted.
+    var originalSHA256: String?
     var bookmarkData: Data?
     var tags: [String]
     var lastOpenedAt: Date
@@ -71,6 +75,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         displayName: String,
         canonicalPath: String,
         workingCopyPath: String? = nil,
+        originalSHA256: String? = nil,
         bookmarkData: Data? = nil,
         tags: [String] = [],
         lastOpenedAt: Date = Date(),
@@ -84,6 +89,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         self.displayName = displayName
         self.canonicalPath = canonicalPath
         self.workingCopyPath = workingCopyPath
+        self.originalSHA256 = originalSHA256
         self.bookmarkData = bookmarkData
         self.tags = tags
         self.lastOpenedAt = lastOpenedAt
@@ -102,6 +108,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         canonicalPath = try container.decodeIfPresent(String.self, forKey: .canonicalPath)
             ?? container.decode(String.self, forKey: .path)
         workingCopyPath = try container.decodeIfPresent(String.self, forKey: .workingCopyPath)
+        originalSHA256 = try container.decodeIfPresent(String.self, forKey: .originalSHA256)
         bookmarkData = try container.decodeIfPresent(Data.self, forKey: .bookmarkData)
         tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         lastOpenedAt = try container.decode(Date.self, forKey: .lastOpenedAt)
@@ -122,6 +129,7 @@ struct LibraryFile: Identifiable, Codable, Equatable {
         try container.encode(displayName, forKey: .displayName)
         try container.encode(canonicalPath, forKey: .canonicalPath)
         try container.encodeIfPresent(workingCopyPath, forKey: .workingCopyPath)
+        try container.encodeIfPresent(originalSHA256, forKey: .originalSHA256)
         try container.encodeIfPresent(bookmarkData, forKey: .bookmarkData)
         try container.encode(tags, forKey: .tags)
         try container.encode(lastOpenedAt, forKey: .lastOpenedAt)
@@ -166,13 +174,13 @@ struct LibraryFile: Identifiable, Codable, Equatable {
     }
 }
 
-struct PDFPageOffset: Codable, Equatable {
+nonisolated struct PDFPageOffset: Codable, Equatable, Sendable {
     var x: Double
     var y: Double
 }
 
-struct PDFZoomState: Codable, Equatable {
-    enum Mode: String, Codable {
+nonisolated struct PDFZoomState: Codable, Equatable, Sendable {
+    enum Mode: String, Codable, Sendable {
         case fitWidth
         case fitPage
         case custom
@@ -189,7 +197,7 @@ struct PDFZoomState: Codable, Equatable {
     }
 }
 
-struct LibraryGroup: Identifiable, Codable, Equatable, Hashable {
+nonisolated struct LibraryGroup: Identifiable, Codable, Equatable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id
         case name
@@ -259,18 +267,18 @@ struct LibraryGroup: Identifiable, Codable, Equatable, Hashable {
         try container.encode(isArchived, forKey: .isArchived)
     }
 
-    var localizedName: String {
+    @MainActor var localizedName: String {
         isSystemGroup ? L10n.string(Self.ungroupedLocalizationKey) : name
     }
 
-    func localizedName(language: AppLanguage) -> String {
+    @MainActor func localizedName(language: AppLanguage) -> String {
         isSystemGroup
             ? L10n.string(Self.ungroupedLocalizationKey, language: language)
             : name
     }
 }
 
-struct GroupMembership: Codable, Equatable, Hashable {
+nonisolated struct GroupMembership: Codable, Equatable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case groupID
         case fileID
@@ -314,7 +322,7 @@ struct GroupMembership: Codable, Equatable, Hashable {
     }
 }
 
-struct GroupWindowSession: Identifiable, Codable, Equatable {
+nonisolated struct GroupWindowSession: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     var groupID: UUID
     var openFileIDs: [UUID]
@@ -363,7 +371,7 @@ struct GroupWindowPayload: Codable, Hashable {
     }
 }
 
-struct LibraryPreferences: Codable, Equatable {
+nonisolated struct LibraryPreferences: Codable, Equatable, Sendable {
     var firstOpenAssignment: FirstOpenAssignment
     var launchBehavior: LaunchBehavior
     var defaultLaunchGroupID: UUID?
@@ -379,12 +387,12 @@ struct LibraryPreferences: Codable, Equatable {
     }
 }
 
-enum FirstOpenAssignment: String, Codable {
+nonisolated enum FirstOpenAssignment: String, Codable, Sendable {
     case currentWindowGroup
     case ungrouped
 }
 
-enum LaunchBehavior: String, Codable {
+nonisolated enum LaunchBehavior: String, Codable, Sendable {
     case restoreLastGroupWindows
     case openDefaultGroup
     case openChooser

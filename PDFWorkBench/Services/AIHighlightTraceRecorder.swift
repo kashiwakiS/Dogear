@@ -19,6 +19,7 @@ nonisolated enum AIHighlightTraceEvent: Sendable {
         toolSchemaVersions: [String: String],
         retrievalMode: String = "scheme1",
         embeddingPackage: String? = nil,
+        lexicalBackend: AILexicalIndexBackendKind? = .memory,
         verifiesAnswerEvidence: Bool = false
     )
     case workflow(AIWorkflowEvent)
@@ -35,6 +36,8 @@ nonisolated enum AIHighlightTraceEvent: Sendable {
     case anchorsResolved(count: Int)
     case answerCompleted(status: AIAnswerCompletionStatus, evidenceCount: Int, highlightCount: Int, revision: Int)
     case commitCompleted(appliedCount: Int, skippedDuplicates: Int)
+    /// The Research request owns a wider lifecycle than optional PDF writes.
+    case requestFinished(status: String, cause: String, saved: Bool, cancellationRequested: Bool)
     case cancelled
     case failed(code: String, message: String)
 }
@@ -53,6 +56,12 @@ actor AIHighlightTraceRecorder {
     private let maximumFileBytes: Int
     private let defaults: UserDefaults
     private var nextSequenceByWorkflowID: [UUID: Int] = [:]
+    private var finishedResearchRequests: Set<UUID> = []
+    private var finishedResearchOrder: [UUID] = []
+
+    var hasActiveWorkflows: Bool { !activeWorkflows.isEmpty }
+    var activeWorkflowCount: Int { activeWorkflows.count }
+    var trackedSequenceCount: Int { nextSequenceByWorkflowID.count }
 
     init(
         fileManager: FileManager = .default,
@@ -129,10 +138,27 @@ actor AIHighlightTraceRecorder {
         groupID: UUID,
         event: AIHighlightTraceEvent
     ) {
+        // Cancellation can finish the owning request before a cooperative tool
+        // unwinds. Late nested events must not reopen its sequence or lifecycle.
+        guard !finishedResearchRequests.contains(workflowID) else { return }
         if case .jobStarted = event { activeWorkflows.insert(workflowID) }
+        let isTerminal: Bool
         switch event {
-        case .commitCompleted, .failed, .cancelled: activeWorkflows.remove(workflowID)
-        default: break
+        case .commitCompleted, .failed, .cancelled, .requestFinished:
+            activeWorkflows.remove(workflowID)
+            isTerminal = true
+        default: isTerminal = false
+        }
+        defer {
+            if isTerminal { nextSequenceByWorkflowID.removeValue(forKey: workflowID) }
+        }
+        if case .requestFinished = event {
+            finishedResearchRequests.insert(workflowID)
+            finishedResearchOrder.append(workflowID)
+            // Retain only recent tombstones; normal requests have fresh UUIDs.
+            if finishedResearchOrder.count > 512 {
+                finishedResearchRequests.remove(finishedResearchOrder.removeFirst())
+            }
         }
         guard let fileURL else { return }
         do {
@@ -241,18 +267,44 @@ actor AIHighlightTraceRecorder {
                 "page_count": pageCount,
                 "native_text_characters": characterCount
             ]
-        case .workflowPrepared(let promptVersion, let instructions, let input, let versions, let retrievalMode, let embeddingPackage, let verifiesAnswerEvidence):
-            return [
+        case .workflowPrepared(let promptVersion, let instructions, let input, let versions, let retrievalMode, let embeddingPackage, let lexicalBackend, let verifiesAnswerEvidence):
+            let bm25Identity = AIBM25Parameters.configurationIdentity
+            let bm25Hash = AIRetrievalHash.data(Data(bm25Identity.utf8))
+            let fusion = AIRetrievalFusionConfiguration.frozen
+            let usesLexicalRetrieval = lexicalBackend != nil
+            let usesDenseRetrieval = embeddingPackage != nil
+            let retrievalComponents: String
+            switch (usesDenseRetrieval, usesLexicalRetrieval) {
+            case (false, true): retrievalComponents = "bm25"
+            case (true, false): retrievalComponents = "bge-small-en-dense+weighted-rrf"
+            case (true, true): retrievalComponents = "bge-small-en-dense+bm25+weighted-rrf"
+            case (false, false): retrievalComponents = "none"
+            }
+            return compact([
                 "kind": "workflow_prepared",
                 "retrieval_mode": retrievalMode,
                 "answer_evidence_review": verifiesAnswerEvidence,
                 "embedding_package": embeddingPackage ?? "none",
-                "retrieval_components": embeddingPackage == nil ? "lexical" : "bge-small-en-dense+lexical+rrf",
+                "retrieval_components": retrievalComponents,
+                "retrieval_window_profile": usesDenseRetrieval || usesLexicalRetrieval
+                    ? AIRetrievalWindow.profile
+                    : nil,
+                "lexical_backend": lexicalBackend?.rawValue ?? "none",
+                "bm25_configuration_identity": usesLexicalRetrieval ? bm25Identity : nil,
+                "bm25_configuration_sha256": usesLexicalRetrieval ? bm25Hash : nil,
+                "bm25_tokenizer_version": usesLexicalRetrieval ? AILexicalTokenizer.currentVersion : nil,
+                "bm25_index_schema_version": usesLexicalRetrieval ? AIBM25IndexData.currentSchemaVersion : nil,
+                "weighted_rrf_configuration_identity": embeddingPackage == nil
+                    ? nil
+                    : fusion.canonicalIdentity,
+                "weighted_rrf_configuration_sha256": embeddingPackage == nil
+                    ? nil
+                    : fusion.canonicalHash,
                 "prompt_version": promptVersion,
                 "instructions": detailedContent ? instructions : "<redacted>",
                 "input": detailedContent ? input : "<redacted>",
                 "tool_schema_versions": versions
-            ]
+            ])
         case .workflow(let workflowEvent):
             return workflowEventJSONObject(
                 workflowEvent,
@@ -274,7 +326,7 @@ actor AIHighlightTraceRecorder {
             return compact([
                 "kind": "draft_completed",
                 "revision": revision,
-                "title": title,
+                "title": detailedContent ? title : title.map { _ in "<redacted>" },
                 "staged_count": stagedCount,
                 "provider_turns": providerTurns,
                 "tool_calls": toolCalls,
@@ -297,6 +349,10 @@ actor AIHighlightTraceRecorder {
                 "applied_count": appliedCount,
                 "skipped_duplicates": skippedDuplicates
             ]
+        case .requestFinished(let status, let cause, let saved, let cancellationRequested):
+            return ["kind": "request_finished", "status": status,
+                    "termination_cause": cause, "saved": saved,
+                    "cancellation_requested": cancellationRequested]
         case .cancelled:
             return ["kind": "cancelled"]
         case .failed(let code, let message):
@@ -381,24 +437,45 @@ actor AIHighlightTraceRecorder {
                 ? String(data: data, encoding: .utf8)
                 : "<unparseable payload>"
         }
-        return detailedContent ? object : redactContent(in: object)
+        return detailedContent ? object : projectPayload(object)
     }
 
-    private func redactContent(in value: Any) -> Any {
+    /// Explicitly project diagnostic metadata, rather than attempting to name
+    /// every possible content field. New tool fields default to private.
+    private func projectPayload(_ value: Any) -> Any {
         if let dictionary = value as? [String: Any] {
             return dictionary.reduce(into: [String: Any]()) { result, pair in
                 let key = pair.key
-                if Self.contentKeys.contains(key.lowercased()) {
+                if Self.privatePayloadKeys.contains(key) {
                     result[key] = "<redacted>"
+                } else if Self.containerPayloadKeys.contains(key) {
+                    result[key] = projectPayload(pair.value)
+                } else if Self.numericPayloadKeys.contains(key), pair.value is NSNumber {
+                    result[key] = pair.value
+                } else if Self.identifierPayloadKeys.contains(key) {
+                    result[key] = projectIdentifiers(pair.value)
+                } else if let allowed = Self.enumPayloadValues[key],
+                          let string = pair.value as? String, allowed.contains(string) {
+                    result[key] = string
                 } else {
-                    result[key] = redactContent(in: pair.value)
+                    // Do not echo an unknown key: untrusted JSON can put
+                    // passages in keys as well as in values.
+                    result["_redacted_fields"] = (result["_redacted_fields"] as? Int ?? 0) + 1
                 }
             }
         }
         if let array = value as? [Any] {
-            return array.map(redactContent(in:))
+            return array.map(projectPayload)
         }
-        return value
+        return value is NSNull ? NSNull() : "<redacted>"
+    }
+
+    private func projectIdentifiers(_ value: Any) -> Any {
+        if let array = value as? [Any] { return array.map(projectIdentifiers) }
+        guard let string = value as? String else { return value is NSNull ? NSNull() : "<redacted>" }
+        let isSegmentID = string.range(of: #"^D[0-9]{3,}(\.P[0-9]{3,})?(\.B[0-9]{3,})?(\.S[0-9]{3,})?$"#,
+                                       options: .regularExpression) != nil
+        return UUID(uuidString: string) != nil || isSegmentID ? string : "<redacted>"
     }
 
     private func compact(_ dictionary: [String: Any?]) -> [String: Any] {
@@ -409,14 +486,34 @@ actor AIHighlightTraceRecorder {
         }
     }
 
-    private static let contentKeys: Set<String> = [
-        "text",
-        "note",
-        "query",
-        "contents",
-        "result_markdown",
-        "instructions",
-        "input", "claim", "reason", "review_issues", "candidate_answer", "annotation_notes"
+    private static let privatePayloadKeys: Set<String> = [
+        "text", "note", "query", "contents", "result_markdown", "instructions", "input",
+        "claim", "reason", "review_issues", "candidate_answer", "annotation_notes",
+        "selectedText", "selectedAnnotationText", "body", "title", "name", "displayName",
+        "display_name", "message", "error", "explanation", "excerpt"
+    ]
+    private static let containerPayloadKeys: Set<String> = [
+        "workspace", "allowed_sources", "selected_note", "items", "matches", "segments",
+        "pages", "blocks", "sentences", "results", "publication", "draft", "highlights",
+        "highlightGroups", "claims", "coverage", "sources"
+    ]
+    private static let numericPayloadKeys: Set<String> = [
+        "ok", "accepted", "terminate", "navigation_available", "body_complete", "visible",
+        "wide_ai", "wideAI", "zoom_percent", "zoomPercent", "pageIndex", "page_number",
+        "referencePageIndex", "pageOffsetX", "pageOffsetY", "selectionWasClipped", "highlightGroupsWereClipped",
+        "revision", "draft_revision", "final_draft_revision", "page_count", "count", "total", "limit",
+        "offset", "context_before", "context_after", "read_characters", "input_tokens", "score",
+        "character_count", "returned_count", "staged_count", "highlight_count", "evidence_count"
+    ]
+    private static let identifierPayloadKeys: Set<String> = [
+        "id", "ids", "file_id", "group_id", "note_id", "mainFileID", "referenceFileID",
+        "visibleGroupIDs", "segment_id", "segment_ids", "evidence_segment_ids", "evidence_image_ids", "evidence_ids"
+    ]
+    private static let enumPayloadValues: [String: Set<String>] = [
+        "completion_status": ["answered", "not_found", "notFound", "needs_clarification"],
+        "status": ["supported", "unsupported", "contradicted", "insufficient", "accepted", "rejected"],
+        "content_role": ["untrusted_source", "untrusted_discussion_background", "discussion_background"],
+        "zoom": ["fit", "percent", "unchanged"], "zoomMode": ["fit", "custom"]
     ]
 
     private static func detailedContentEnabled(in defaults: UserDefaults) -> Bool {

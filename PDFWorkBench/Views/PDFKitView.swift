@@ -37,8 +37,10 @@ struct PDFKitView: NSViewRepresentable {
     let onPageChanged: (Int) -> Void
     let onScaleChanged: (CGFloat, PDFZoomState) -> Void
     let onSelectionChanged: (PDFTextSelectionSnapshot?) -> Void
+    var documentUndoManager: UndoManager? = nil
     var onUserInteraction: (() -> Void)? = nil
     var onReadingPositionChanged: ((PDFNavigationTarget) -> Void)? = nil
+    var canCommitFreeText: (PDFDocument) -> Bool = { _ in false }
 
     @Environment(\.locale) private var locale
 
@@ -56,6 +58,8 @@ struct PDFKitView: NSViewRepresentable {
         _ = locale
         let container = PDFReaderContainerView()
         let pdfView = container.pdfView
+        pdfView.workspaceUndoManager = documentUndoManager
+        pdfView.canCommitFreeText = canCommitFreeText
         // PDFKit's data detectors add temporary Link annotations for addresses,
         // URLs, dates, and phone numbers. They duplicate the app's link layer
         // and can add non-interactive dotted menus over wrapped PDF links.
@@ -99,12 +103,20 @@ struct PDFKitView: NSViewRepresentable {
         context.coordinator.observePageChanges(for: pdfView, in: container)
         context.coordinator.observeScaleChanges(for: pdfView, in: container)
         context.coordinator.observeSelectionChanges(for: pdfView)
+        context.coordinator.observeAnnotationChanges(for: pdfView, in: container)
         return container
     }
 
     func updateNSView(_ container: PDFReaderContainerView, context: Context) {
         _ = locale
         let pdfView = container.pdfView
+        context.coordinator.beginViewUpdate()
+        defer { context.coordinator.endViewUpdate(in: container) }
+        pdfView.workspaceUndoManager = documentUndoManager
+        pdfView.canCommitFreeText = canCommitFreeText
+        context.coordinator.onPageChanged = onPageChanged
+        context.coordinator.onScaleChanged = onScaleChanged
+        context.coordinator.onSelectionChanged = onSelectionChanged
         context.coordinator.onReadingPositionChanged = onReadingPositionChanged
         if pdfView.document !== document {
             pdfView.stopQuietLinkPresentation()
@@ -117,10 +129,8 @@ struct PDFKitView: NSViewRepresentable {
                 onSelect: onSelectDogear,
                 onToggleAtPage: onToggleDogearAtPage
             )
-            pdfView.document = document
+            context.coordinator.installDocument(document, targetPageIndex: targetPageIndex, in: container)
             pdfView.hideNativeNoteAnnotations()
-            context.coordinator.resetNavigationState(targetPageIndex: targetPageIndex)
-            pdfView.goToPage(index: targetPageIndex)
             context.coordinator.reportScale(from: pdfView)
             let installedDocument = document
             DispatchQueue.main.async {
@@ -146,12 +156,8 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.onDogearShortcut = onToggleDogear
         pdfView.onShortcutActivated = onShortcutActivated
         pdfView.applyNightMode(isNightMode)
-        pdfView.hideNativeNoteAnnotations()
         container.onSelectMarginAnnotation = onSelectMarginAnnotation
         container.onSelectMarginText = onSelectMarginText
-        context.coordinator.onPageChanged = onPageChanged
-        context.coordinator.onScaleChanged = onScaleChanged
-        context.coordinator.onSelectionChanged = onSelectionChanged
         container.updateOutlineOverlay(
             entries: outlineEntries,
             aiHighlights: aiHighlightRailMarkers,
@@ -199,14 +205,25 @@ struct PDFKitView: NSViewRepresentable {
         if let outlineNavigationRequest,
            context.coordinator.lastOutlineNavigationRequestID != outlineNavigationRequest.id {
             context.coordinator.lastOutlineNavigationRequestID = outlineNavigationRequest.id
-            pdfView.goToOutlineTarget(outlineNavigationRequest.target)
-            context.coordinator.lastTargetPageIndex = outlineNavigationRequest.target.pageIndex
+            context.coordinator.navigate(to: outlineNavigationRequest.target, in: container)
         }
 
         if context.coordinator.lastFreeTextRequestID != freeTextRequestID {
             context.coordinator.lastFreeTextRequestID = freeTextRequestID
             if freeTextRequestID > 0 {
-                pdfView.beginFreeTextEditing()
+                let requestedDocument = document
+                let requestID = freeTextRequestID
+                let coordinator = context.coordinator
+                // beginSheet triggers native layout/animation. Present after
+                // SwiftUI completes updateNSView, not reentrantly inside its
+                // AttributeGraph layout transaction.
+                DispatchQueue.main.async { [weak pdfView, weak coordinator] in
+                    guard let pdfView, let coordinator,
+                          coordinator.lastFreeTextRequestID == requestID,
+                          pdfView.document === requestedDocument,
+                          pdfView.window?.isVisible == true else { return }
+                    pdfView.beginFreeTextEditing()
+                }
             }
         }
 
@@ -231,8 +248,7 @@ struct PDFKitView: NSViewRepresentable {
         } else if context.coordinator.lastTargetPageIndex != targetPageIndex {
             context.coordinator.lastSelectedAnnotationID = nil
             context.coordinator.lastSelectedSearchResultID = nil
-            context.coordinator.lastTargetPageIndex = targetPageIndex
-            pdfView.goToPage(index: targetPageIndex)
+            context.coordinator.navigate(to: targetPageIndex, in: container)
         }
     }
 
@@ -249,6 +265,12 @@ struct PDFKitView: NSViewRepresentable {
         var lastFreeTextRequestID = 0
         var lastHighlightRequestID = 0
         var lastTargetPageIndex: Int
+        // A requested destination is not an acknowledgement that Library has
+        // received the native page change. Keep these two identities separate.
+        private var lastReportedPageIndex: Int?
+        private var pendingPageConfirmationID: UUID?
+        private var isUpdatingView = false
+        private var needsPostUpdatePageReport = false
         var lastSelectedAnnotationID: PDFAnnotationItem.ID?
         var lastSelectedSearchResultID: PDFSearchResult.ID?
         var lastZoomCommandID = 0
@@ -258,6 +280,7 @@ struct PDFKitView: NSViewRepresentable {
         private var scrollBoundsObserver: NSObjectProtocol?
         private var scaleObserver: NSObjectProtocol?
         private var selectionObserver: NSObjectProtocol?
+        private var annotationObserver: NSObjectProtocol?
         private weak var observedClipView: NSClipView?
         private var pendingScaleUpdate: (scaleFactor: CGFloat, zoomState: PDFZoomState)?
         private var isScaleReportScheduled = false
@@ -320,6 +343,21 @@ struct PDFKitView: NSViewRepresentable {
             }
         }
 
+        func observeAnnotationChanges(for pdfView: HighlightingPDFView, in container: PDFReaderContainerView) {
+            annotationObserver = NotificationCenter.default.addObserver(
+                forName: .dogearAnnotationsChanged, object: nil, queue: .main
+            ) { [weak pdfView, weak container] notification in
+                guard let pdfView, let changed = notification.object as? PDFDocument,
+                      pdfView.document === changed else { return }
+                pdfView.hideNativeNoteAnnotations()
+                // Invalidate paint only. Reinstalling the document would reset
+                // reading position, native selection and PDFKit Undo routing.
+                pdfView.documentView?.needsDisplay = true
+                pdfView.needsDisplay = true
+                container?.layoutMarginCanvas()
+            }
+        }
+
         func observePageChanges(for pdfView: HighlightingPDFView, in container: PDFReaderContainerView) {
             pageObserver = NotificationCenter.default.addObserver(
                 forName: Notification.Name.PDFViewPageChanged,
@@ -355,12 +393,12 @@ struct PDFKitView: NSViewRepresentable {
                 return
             }
 
-            container.configurePDFScrollView(scrollView)
             let clipView = scrollView.contentView
-            reportReadingPosition(from: pdfView)
             guard observedClipView !== clipView else {
                 return
             }
+            container.configurePDFScrollView(scrollView)
+            reportReadingPosition(from: pdfView)
 
             if let scrollBoundsObserver {
                 NotificationCenter.default.removeObserver(scrollBoundsObserver)
@@ -391,16 +429,80 @@ struct PDFKitView: NSViewRepresentable {
         }
 
         private func reportPageChange(_ pageIndex: Int, in container: PDFReaderContainerView?) {
-            guard pageIndex != NSNotFound,
-                  lastTargetPageIndex != pageIndex
+            guard pendingPageConfirmationID == nil, pageIndex != NSNotFound,
+                  lastReportedPageIndex != pageIndex
             else {
                 return
             }
 
+            guard !isUpdatingView else {
+                needsPostUpdatePageReport = true
+                return
+            }
+
             container?.updateCurrentPageIndex(pageIndex)
-            container?.layoutOutlineOverlay()
             lastTargetPageIndex = pageIndex
+            lastReportedPageIndex = pageIndex
             onPageChanged(pageIndex)
+        }
+
+        func navigate(to pageIndex: Int, in container: PDFReaderContainerView) {
+            guard let document = container.pdfView.document else { return }
+            lastTargetPageIndex = pageIndex
+            performPageNavigation(for: document, in: container) {
+                container.pdfView.goToPage(index: pageIndex)
+            }
+        }
+
+        func navigate(to target: PDFNavigationTarget, in container: PDFReaderContainerView) {
+            guard let document = container.pdfView.document else { return }
+            lastTargetPageIndex = target.pageIndex
+            performPageNavigation(for: document, in: container) {
+                container.pdfView.goToOutlineTarget(target)
+            }
+        }
+
+        func installDocument(_ document: PDFDocument, targetPageIndex: Int, in container: PDFReaderContainerView) {
+            // PDFKit may announce page 0 while attaching a new document. Its
+            // initial saved destination must be applied before publishing pages.
+            resetNavigationState(targetPageIndex: targetPageIndex)
+            performPageNavigation(for: document, in: container) {
+                container.pdfView.document = document
+                container.pdfView.goToPage(index: targetPageIndex)
+            }
+        }
+
+        func beginViewUpdate() { isUpdatingView = true }
+
+        func endViewUpdate(in container: PDFReaderContainerView) {
+            isUpdatingView = false
+            guard needsPostUpdatePageReport else { return }
+            needsPostUpdatePageReport = false
+            if let document = container.pdfView.document {
+                performPageNavigation(for: document, in: container) {}
+            }
+        }
+
+        private func performPageNavigation(for document: PDFDocument, in container: PDFReaderContainerView,
+                                           action: () -> Void) {
+            let id = UUID()
+            pendingPageConfirmationID = id
+            action()
+            // Native go(to:) may announce intermediate pages synchronously.
+            // Confirm its final current page outside updateNSView, discarding
+            // superseded commands and callbacks belonging to another PDF.
+            DispatchQueue.main.async { [weak self, weak document, weak container] in
+                guard let self, self.pendingPageConfirmationID == id else { return }
+                self.pendingPageConfirmationID = nil
+                guard let document, let container, container.pdfView.document === document else { return }
+                self.reportCurrentPage(in: container)
+            }
+        }
+
+        private func reportCurrentPage(in container: PDFReaderContainerView) {
+            guard let document = container.pdfView.document,
+                  let page = container.pdfView.currentPage else { return }
+            reportPageChange(document.index(for: page), in: container)
         }
 
         func observeScaleChanges(for pdfView: HighlightingPDFView, in container: PDFReaderContainerView) {
@@ -426,7 +528,10 @@ struct PDFKitView: NSViewRepresentable {
         }
 
         func resetNavigationState(targetPageIndex: Int) {
+            pendingPageConfirmationID = nil
+            needsPostUpdatePageReport = false
             lastTargetPageIndex = targetPageIndex
+            lastReportedPageIndex = targetPageIndex
             lastSelectedAnnotationID = nil
             lastSelectedSearchResultID = nil
             lastReportedReadingPosition = nil
@@ -488,13 +593,16 @@ struct PDFKitView: NSViewRepresentable {
         }
 
         func stopObserving() {
-            for observer in [pageObserver, scrollBoundsObserver, scaleObserver, selectionObserver].compactMap({ $0 }) {
+            pendingPageConfirmationID = nil
+            needsPostUpdatePageReport = false
+            for observer in [pageObserver, scrollBoundsObserver, scaleObserver, selectionObserver, annotationObserver].compactMap({ $0 }) {
                 NotificationCenter.default.removeObserver(observer)
             }
             pageObserver = nil
             scrollBoundsObserver = nil
             scaleObserver = nil
             selectionObserver = nil
+            annotationObserver = nil
             observedClipView = nil
             pendingPositionPDFView = nil
             pendingScaleUpdate = nil
@@ -514,6 +622,9 @@ struct PDFKitView: NSViewRepresentable {
             }
             if let selectionObserver {
                 NotificationCenter.default.removeObserver(selectionObserver)
+            }
+            if let annotationObserver {
+                NotificationCenter.default.removeObserver(annotationObserver)
             }
         }
     }
@@ -643,6 +754,18 @@ final class PDFReaderContainerView: NSView {
     private let marginCanvasEdgeInset: CGFloat = 10
     private let marginCanvasContentGap: CGFloat = 12
     private var outlineHostingView: NSHostingView<DocumentOutlineRailView>?
+    private struct OutlinePresentation: Equatable {
+        let entries: [DocumentOutlineEntry]
+        let dogears: [DogearMarker]
+        let aiHighlights: [AIHighlightRailMarker]
+        let pageCount: Int
+        let currentPage: Int
+        let isLoading: Bool
+        let isNightMode: Bool
+        let selectedEntryID: DocumentOutlineEntry.ID?
+    }
+    private var renderedOutline: OutlinePresentation?
+    private(set) var outlineRenderCount = 0
     private var outlineEntries: [DocumentOutlineEntry] = []
     private var aiHighlightRailMarkers: [AIHighlightRailMarker] = []
     private var outlineCurrentPageIndex = 0
@@ -719,6 +842,8 @@ final class PDFReaderContainerView: NSView {
     ) {
         let requiresLayout = requestsMarginCanvas != isVisible
             || supportsMarginCanvas != isSupported
+        let presentationChanged = isMarginCanvasNightMode != isNightMode
+            || selectedMarginAnnotationID != selectedAnnotationID
         requestsMarginCanvas = isVisible
         supportsMarginCanvas = isSupported
         isMarginCanvasNightMode = isNightMode
@@ -726,7 +851,7 @@ final class PDFReaderContainerView: NSView {
         if requiresLayout {
             needsLayout = true
             layoutSubtreeIfNeeded()
-        } else {
+        } else if presentationChanged {
             layoutMarginCanvas()
         }
     }
@@ -735,6 +860,7 @@ final class PDFReaderContainerView: NSView {
         guard isMarginCanvasActive,
               let document = pdfView.document
         else {
+            guard !marginCanvasView.isHidden else { return }
             marginCanvasView.isHidden = true
             marginCanvasView.update(
                 entries: [],
@@ -762,11 +888,6 @@ final class PDFReaderContainerView: NSView {
                 from: pdfView
             )
             visiblePageFrames.append(pageFrame)
-            let contentBounds = estimatedContentBounds(for: page)
-            visibleContentFrames.append(
-                convert(pdfView.convert(contentBounds, from: page), from: pdfView)
-            )
-
             for (annotationIndex, annotation) in page.annotations.enumerated() {
                 guard Self.supportsMarginCard(annotation),
                       let note = annotation.contents?
@@ -803,6 +924,23 @@ final class PDFReaderContainerView: NSView {
                     )
                 )
             }
+        }
+
+        // Most pages have no margin notes. Do not extract all their text just
+        // to place a lane that has nothing to display.
+        guard !entries.isEmpty else {
+            if !marginCanvasView.isHidden {
+                marginCanvasView.isHidden = true
+                marginCanvasView.update(entries: [], laneFrame: .zero,
+                    selectedEntryID: nil, isNightMode: isMarginCanvasNightMode)
+            }
+            return
+        }
+        for page in pdfView.visiblePages {
+            let contentBounds = estimatedContentBounds(for: page)
+            visibleContentFrames.append(
+                convert(pdfView.convert(contentBounds, from: page), from: pdfView)
+            )
         }
 
         let laneFrame = floatingMarginCanvasFrame(
@@ -1014,6 +1152,14 @@ final class PDFReaderContainerView: NSView {
             return
         }
 
+        let presentation = OutlinePresentation(entries: outlineEntries, dogears: dogears,
+            aiHighlights: aiHighlightRailMarkers, pageCount: dogearPageCount,
+            currentPage: outlineCurrentPageIndex, isLoading: isLoadingOutline,
+            isNightMode: isOutlineNightMode, selectedEntryID: selectedOutlineEntryID)
+        guard renderedOutline != presentation else { return }
+        renderedOutline = presentation
+        outlineRenderCount += 1
+
         let rootView = DocumentOutlineRailView(
             entries: outlineEntries,
             dogears: dogears,
@@ -1100,7 +1246,18 @@ final class PDFReaderContainerView: NSView {
 
 }
 
-final class HighlightingPDFView: PDFView {
+final class HighlightingPDFView: PDFView, NSUserInterfaceValidations {
+    weak var workspaceUndoManager: UndoManager?
+    override var undoManager: UndoManager? { workspaceUndoManager ?? super.undoManager }
+
+    @objc func undo(_ sender: Any?) { undoManager?.undo() }
+    @objc func redo(_ sender: Any?) { undoManager?.redo() }
+    func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(undo(_:)) { return undoManager?.canUndo == true }
+        if item.action == #selector(redo(_:)) { return undoManager?.canRedo == true }
+        return true
+    }
+
     var onUserInteraction: (() -> Void)?
     var shortcutSet: PDFReadingShortcutSet = .defaultReading
     var onHighlightCreated: ((FeedbackTrigger) -> Void)?
@@ -1108,12 +1265,13 @@ final class HighlightingPDFView: PDFView {
     var onAnnotationChanged: (() -> Void)?
     var onUndoableAnnotationMutation: ((String) -> Void)?
     var onFreeTextShortcut: (() -> Void)?
+    var canCommitFreeText: (PDFDocument) -> Bool = { _ in false }
     var onDogearShortcut: (() -> Void)?
     var onShortcutActivated: ((PDFReadingShortcutAction, String) -> Void)?
     var onAnnotatedHighlightPressed: ((PDFAnnotation) -> Bool)?
 
     private var freeTextDrag: FreeTextDrag?
-    private var freeTextEditor: FreeTextEditor?
+    private var freeTextEditorPanel: NSPanel?
     private weak var selectedHighlight: PDFAnnotation?
     private var consumedAnnotatedHighlightPress = false
     private var highlightMenuEndTrackingObserver: NSObjectProtocol?
@@ -1127,6 +1285,7 @@ final class HighlightingPDFView: PDFView {
     private var standardBackgroundColor: NSColor?
     private var standardPageShadowsEnabled: Bool?
     private var appliedNightMode: Bool?
+    private let nightSelectionPresentation = PDFNightSelectionPresentation()
     private enum ActiveFitMode {
         case page
         case width
@@ -1159,7 +1318,7 @@ final class HighlightingPDFView: PDFView {
         if isEnabled {
             backgroundColor = .white
             pageShadowsEnabled = false
-            layer?.filters = [CIFilter(name: "CIColorInvert")].compactMap { $0 }
+            layer?.filters = PDFNightSelectionPresentation.nightFilters()
         } else {
             backgroundColor = standardBackgroundColor ?? .windowBackgroundColor
             pageShadowsEnabled = activeFitMode != nil
@@ -1167,6 +1326,7 @@ final class HighlightingPDFView: PDFView {
                 : standardPageShadowsEnabled ?? true
             layer?.filters = nil
         }
+        nightSelectionPresentation.apply(to: self, enabled: isEnabled)
     }
 
     /// PDFKit represents its current viewport as a destination in page space.
@@ -1209,7 +1369,9 @@ final class HighlightingPDFView: PDFView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.makeFirstResponder(self)
+        if !isHiddenOrHasHiddenAncestor {
+            window?.makeFirstResponder(self)
+        }
     }
 
     override func updateTrackingAreas() {
@@ -1248,10 +1410,6 @@ final class HighlightingPDFView: PDFView {
     override func mouseDown(with event: NSEvent) {
         onUserInteraction?()
         window?.makeFirstResponder(self)
-        if freeTextEditor != nil {
-            commitFreeTextEditor()
-            return
-        }
 
         if let drag = freeTextDragContext(for: event) {
             freeTextDrag = drag
@@ -1622,51 +1780,59 @@ final class HighlightingPDFView: PDFView {
     }
 
     func beginFreeTextEditing() {
-        commitFreeTextEditor()
-
-        guard let page = currentPage ?? document?.page(at: 0) else {
+        if let panel = freeTextEditorPanel {
+            panel.makeKeyAndOrderFront(nil)
             return
         }
+        guard let window, window.attachedSheet == nil, let document,
+              canCommitFreeText(document),
+              let page = currentPage ?? document.page(at: 0) else { return }
+        let note = PDFAnnotation(bounds: defaultFreeTextBounds(on: page), forType: .freeText, withProperties: nil)
+        note.font = FreeTextAnnotationEditing.defaultFont
+        note.fontColor = Self.freeTextForegroundColor
+        note.alignment = .left
+        note.shouldDisplay = false
+        note.shouldPrint = true
+        note.border = PDFBorder()
+        note.border?.lineWidth = 0
+        note.removeValue(forAnnotationKey: .color)
+        note.removeValue(forAnnotationKey: .interiorColor)
+        let draft = FreeTextEditDraft(document: document, page: page, annotation: note, isNew: true)
+        let panel = NSPanel(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        panel.title = L10n.string("Add Free Text Note")
+        panel.isReleasedWhenClosed = false
+        panel.contentViewController = NSHostingController(rootView:
+            FreeTextEditorSheet(draft: draft, onSave: { [weak self] values in
+                self?.commitNewFreeText(draft, values: values) ?? false
+            }, onDismiss: { [weak self, weak panel] in
+                guard let panel else { return }
+                panel.sheetParent?.endSheet(panel)
+                panel.orderOut(nil)
+                self?.freeTextEditorPanel = nil
+                self?.window?.makeFirstResponder(self)
+            }).environment(\.locale, AppLanguageStore.shared.locale))
+        freeTextEditorPanel = panel
+        // Attach to this reader's window, never NSApp.keyWindow (which may be
+        // another workspace by the time a SwiftUI update delivers the request).
+        window.beginSheet(panel)
+    }
 
-        let annotationBounds = defaultFreeTextBounds(on: page)
-        let fieldFrame = convert(annotationBounds, from: page)
-        let annotationFont = Self.freeTextAnnotationFont
-        let textField = FreeTextInputField(frame: fieldFrame)
-        textField.cell = FreeTextInputCell(
-            textCell: "",
-            padding: Self.freeTextTextPadding * scaleFactor
+    @discardableResult
+    func commitNewFreeText(_ draft: FreeTextEditDraft, values: FreeTextEditValues) -> Bool {
+        guard draft.isNew, document === draft.document, draft.page.document === document,
+              canCommitFreeText(draft.document),
+              draft.annotation.page == nil,
+              FreeTextAnnotationEditing.validationMessage(values, draft: draft) == nil else { return false }
+        FreeTextAnnotationEditing.apply(values, draft: draft)
+        draft.page.addAnnotation(draft.annotation)
+        registerAnnotationPresenceUndo(
+            [AnnotationUndoRecord(page: draft.page, annotation: draft.annotation)],
+            restoringPresence: false,
+            actionName: "Add Free Text Note"
         )
-        let editorFont = Self.freeTextEditorFont(for: scaleFactor)
-        textField.font = editorFont
-        textField.placeholderAttributedString = NSAttributedString(
-            string: "Type note",
-            attributes: [
-                .font: editorFont,
-                .foregroundColor: Self.freeTextPlaceholderColor
-            ]
-        )
-        textField.textColor = Self.freeTextForegroundColor
-        textField.drawsBackground = false
-        textField.backgroundColor = .clear
-        textField.isBordered = false
-        textField.isEditable = true
-        textField.isSelectable = true
-        textField.focusRingType = .none
-        textField.target = self
-        textField.action = #selector(commitFreeTextEditor)
-        textField.onCancel = { [weak self] in
-            self?.cancelFreeTextEditor()
-        }
-
-        addSubview(textField)
-        freeTextEditor = FreeTextEditor(
-            textField: textField,
-            page: page,
-            initialBounds: annotationBounds,
-            annotationFont: annotationFont
-        )
-        window?.makeFirstResponder(textField)
-        textField.selectText(nil)
+        refreshDisplay(for: draft.page)
+        onAnnotationChanged?()
+        return true
     }
 
     @discardableResult
@@ -2030,70 +2196,6 @@ final class HighlightingPDFView: PDFView {
         self.highlightMenuEndTrackingObserver = nil
     }
 
-    @objc private func commitFreeTextEditor() {
-        guard let editor = freeTextEditor else {
-            return
-        }
-
-        let noteText = editor.textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !noteText.isEmpty else {
-            freeTextEditor = nil
-            editor.textField.removeFromSuperview()
-            return
-        }
-
-        let font = editor.annotationFont
-        let pageBounds = editor.page.bounds(for: .cropBox)
-        let noteOrigin = editor.initialBounds.origin
-        let committedTextField = editor.textField
-        freeTextEditor = nil
-
-        let noteBounds = freeTextBounds(
-            for: noteText,
-            near: noteOrigin,
-            in: pageBounds,
-            font: font
-        )
-        let note = PDFAnnotation(bounds: noteBounds, forType: .freeText, withProperties: nil)
-        note.contents = noteText
-        note.font = font
-        note.fontColor = Self.freeTextForegroundColor
-        note.alignment = .left
-        note.shouldDisplay = false
-        note.shouldPrint = true
-        note.border = PDFBorder()
-        note.border?.lineWidth = 0
-        note.removeValue(forAnnotationKey: .color)
-        note.removeValue(forAnnotationKey: .interiorColor)
-        editor.page.addAnnotation(note)
-        registerAnnotationPresenceUndo(
-            [AnnotationUndoRecord(page: editor.page, annotation: note)],
-            restoringPresence: false,
-            actionName: "Add Free Text Note"
-        )
-        refreshDisplay(for: editor.page)
-        onAnnotationChanged?()
-
-        DispatchQueue.main.async { [weak self, weak committedTextField] in
-            committedTextField?.removeFromSuperview()
-            guard let self else {
-                return
-            }
-
-            self.window?.makeFirstResponder(self)
-        }
-    }
-
-    private func cancelFreeTextEditor() {
-        guard let editor = freeTextEditor else {
-            return
-        }
-
-        freeTextEditor = nil
-        editor.textField.removeFromSuperview()
-        window?.makeFirstResponder(self)
-    }
-
     private func freeTextDragContext(for event: NSEvent) -> FreeTextDrag? {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let page = page(for: viewPoint, nearest: false) else {
@@ -2144,48 +2246,9 @@ final class HighlightingPDFView: PDFView {
     }
 
     private func drawFreeTextNote(_ annotation: PDFAnnotation, in context: CGContext) {
-        context.saveGState()
-        defer {
-            context.restoreGState()
-        }
-
-        context.setAllowsAntialiasing(true)
-        context.setShouldAntialias(true)
-        context.setShouldSmoothFonts(true)
-
-        guard let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !contents.isEmpty
-        else {
-            return
-        }
-
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineBreakMode = .byWordWrapping
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: Self.freeTextAnnotationFont,
-            .foregroundColor: Self.freeTextForegroundColor,
-            .paragraphStyle: paragraphStyle
-        ]
-
-        let drawingBounds: NSRect
-        if let freeTextDrag,
-           freeTextDrag.annotation === annotation {
-            drawingBounds = freeTextDrag.currentBounds
-        } else {
-            drawingBounds = annotation.bounds
-        }
-
-        (contents as NSString).draw(
-            with: drawingBounds.insetBy(dx: Self.freeTextTextPadding, dy: Self.freeTextTextPadding),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes
-        )
-
-        NSGraphicsContext.restoreGraphicsState()
+        let drawingBounds = freeTextDrag?.annotation === annotation
+            ? freeTextDrag?.currentBounds : nil
+        FreeTextAnnotationEditing.draw(annotation, bounds: drawingBounds, in: context)
     }
 
     private func clamped(_ bounds: NSRect, to pageBounds: NSRect) -> NSRect {
@@ -2324,8 +2387,8 @@ final class HighlightingPDFView: PDFView {
     private func defaultFreeTextBounds(on page: PDFPage) -> NSRect {
         let pageBounds = page.bounds(for: .cropBox)
         let size = NSSize(
-            width: min(220, pageBounds.width - 72),
-            height: Self.singleLineFreeTextHeight(for: Self.freeTextAnnotationFont)
+            width: min(240, max(24, pageBounds.width)),
+            height: min(120, max(24, pageBounds.height))
         )
         let viewPoint = NSPoint(x: bounds.midX, y: bounds.midY)
         let pointPage = self.page(for: viewPoint, nearest: true) ?? page
@@ -2350,59 +2413,19 @@ final class HighlightingPDFView: PDFView {
         )
     }
 
-    private func freeTextBounds(
-        for text: String,
-        near origin: NSPoint,
-        in pageBounds: NSRect,
-        font: NSFont
-    ) -> NSRect {
-        let horizontalPadding: CGFloat = 10
-        let verticalPadding: CGFloat = 8
-        let maxWidth = min(280, max(80, pageBounds.width - 72))
-        let textBounds = (text as NSString).boundingRect(
-            with: NSSize(
-                width: maxWidth - horizontalPadding * 2,
-                height: .greatestFiniteMagnitude
-            ),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
-        let width = min(
-            max(ceil(textBounds.width) + horizontalPadding * 2, 80),
-            pageBounds.width - 72
-        )
-        let height = min(
-            max(
-                ceil(textBounds.height) + verticalPadding * 2,
-                Self.singleLineFreeTextHeight(for: font)
-            ),
-            pageBounds.height - 72
-        )
-
-        return clamped(
-            NSRect(
-                x: origin.x,
-                y: origin.y,
-                width: width,
-                height: height
-            ),
-            to: pageBounds
-        )
-    }
-
     private func registerAnnotationPresenceUndo(
         _ records: [AnnotationUndoRecord],
         restoringPresence: Bool,
         actionName: String
     ) {
-        window?.undoManager?.registerUndo(withTarget: self) { target in
+        undoManager?.registerUndo(withTarget: self) { target in
             target.applyAnnotationPresence(
                 records,
                 isPresent: restoringPresence,
                 actionName: actionName
             )
         }
-        window?.undoManager?.setActionName(actionName)
+        undoManager?.setActionName(actionName)
     }
 
     private func applyAnnotationPresence(
@@ -2433,7 +2456,7 @@ final class HighlightingPDFView: PDFView {
         restoring bounds: NSRect,
         actionName: String
     ) {
-        window?.undoManager?.registerUndo(withTarget: self) { target in
+        undoManager?.registerUndo(withTarget: self) { target in
             target.restoreAnnotationBounds(
                 annotation,
                 page: page,
@@ -2441,7 +2464,7 @@ final class HighlightingPDFView: PDFView {
                 actionName: actionName
             )
         }
-        window?.undoManager?.setActionName(actionName)
+        undoManager?.setActionName(actionName)
     }
 
     private func restoreAnnotationBounds(
@@ -2476,13 +2499,6 @@ final class HighlightingPDFView: PDFView {
         let annotation: PDFAnnotation
     }
 
-    private struct FreeTextEditor {
-        let textField: FreeTextInputField
-        let page: PDFPage
-        let initialBounds: NSRect
-        let annotationFont: NSFont
-    }
-
     private struct PageHighlightGeometry {
         let page: PDFPage
         var lineBounds: [NSRect]
@@ -2505,121 +2521,7 @@ final class HighlightingPDFView: PDFView {
         NSColor(calibratedRed: 0.84, green: 0.05, blue: 0.07, alpha: 1.0)
     }
 
-    private static var freeTextPlaceholderColor: NSColor {
-        NSColor(calibratedRed: 0.68, green: 0.10, blue: 0.12, alpha: 0.82)
-    }
-
-    private static var freeTextAnnotationFont: NSFont {
-        NSFont.systemFont(ofSize: 14)
-    }
-
-    private static var freeTextTextPadding: CGFloat {
-        8
-    }
-
-    private static func singleLineFreeTextHeight(for font: NSFont) -> CGFloat {
-        let lineBounds = ("Hg" as NSString).boundingRect(
-            with: NSSize(width: 220, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
-        return max(ceil(lineBounds.height) + freeTextTextPadding * 2, 32)
-    }
-
-    private static func freeTextEditorFont(for scaleFactor: CGFloat) -> NSFont {
-        NSFont.systemFont(ofSize: max(14, freeTextAnnotationFont.pointSize * scaleFactor))
-    }
-
     deinit {
         stopObservingHighlightMenu()
-    }
-}
-
-private final class FreeTextInputField: NSTextField {
-    var onCancel: (() -> Void)?
-
-    override var acceptsFirstResponder: Bool {
-        true
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
-        selectText(nil)
-        super.mouseDown(with: event)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 {
-            onCancel?()
-            return
-        }
-
-        super.keyDown(with: event)
-    }
-}
-
-private final class FreeTextInputCell: NSTextFieldCell {
-    private let padding: CGFloat
-
-    init(textCell string: String, padding: CGFloat) {
-        self.padding = padding
-        super.init(textCell: string)
-        isEditable = true
-        isSelectable = true
-        isEnabled = true
-        isScrollable = false
-        wraps = true
-        lineBreakMode = .byWordWrapping
-    }
-
-    required init(coder: NSCoder) {
-        self.padding = 0
-        super.init(coder: coder)
-    }
-
-    override func drawingRect(forBounds rect: NSRect) -> NSRect {
-        textRect(forBounds: rect)
-    }
-
-    override func titleRect(forBounds rect: NSRect) -> NSRect {
-        textRect(forBounds: rect)
-    }
-
-    override func edit(
-        withFrame rect: NSRect,
-        in controlView: NSView,
-        editor textObj: NSText,
-        delegate: Any?,
-        event: NSEvent?
-    ) {
-        super.edit(
-            withFrame: textRect(forBounds: rect),
-            in: controlView,
-            editor: textObj,
-            delegate: delegate,
-            event: event
-        )
-    }
-
-    override func select(
-        withFrame rect: NSRect,
-        in controlView: NSView,
-        editor textObj: NSText,
-        delegate: Any?,
-        start selStart: Int,
-        length selLength: Int
-    ) {
-        super.select(
-            withFrame: textRect(forBounds: rect),
-            in: controlView,
-            editor: textObj,
-            delegate: delegate,
-            start: selStart,
-            length: selLength
-        )
-    }
-
-    private func textRect(forBounds rect: NSRect) -> NSRect {
-        rect.insetBy(dx: padding, dy: padding)
     }
 }

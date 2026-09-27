@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct AISettingsView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var configurationStore: AIConfigurationStore
     @ObservedObject var languageStore: AppLanguageStore
     @State private var apiKey = ""
@@ -45,6 +46,10 @@ struct AISettingsView: View {
                 Text("Document Position merges same-page entries at the same level, then keeps colliding rows at least 6 points apart. Later rows flow downward instead of being redistributed across the rail.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Storage") {
+                Button("Manage Working Copies…") { openWindow(id: "working-copies") }
             }
 
             AIRetrievalSettingsView()
@@ -202,6 +207,8 @@ struct AISettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            AIDiagnosticsSettingsView()
         }
         .formStyle(.grouped)
         .padding(20)

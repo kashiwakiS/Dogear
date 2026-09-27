@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import PDFKit
 
@@ -192,15 +191,15 @@ struct DocumentOutlineService: DocumentOutlineProviding {
             var largestFontSize: CGFloat = 0
             var isBold = false
             attributedText.enumerateAttribute(
-                .font,
+                DocumentFontMetrics.attributeKey,
                 in: lineRange,
                 options: []
             ) { value, _, _ in
-                guard let font = value as? NSFont else {
+                guard let metrics = DocumentFontMetrics(attribute: value) else {
                     return
                 }
-                largestFontSize = max(largestFontSize, font.pointSize)
-                isBold = isBold || font.fontDescriptor.symbolicTraits.contains(.bold)
+                largestFontSize = max(largestFontSize, CGFloat(metrics.pointSize))
+                isBold = isBold || metrics.isBold
             }
 
             guard largestFontSize > 0,

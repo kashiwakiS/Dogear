@@ -47,52 +47,100 @@ nonisolated protocol AIEvidenceRetrieving: Sendable {
 
 nonisolated struct AILexicalEvidenceRetriever: AIEvidenceRetrieving {
     let registry: AISegmentRegistry
+    private let searcher: AISimpleLexicalSearcher
+
+    init(
+        registry: AISegmentRegistry,
+        preparedIndex: AIBM25PreparedIndex? = nil
+    ) throws {
+        self.registry = registry
+        let index: AIBM25PreparedIndex
+        if let preparedIndex {
+            index = preparedIndex
+        } else {
+            index = try AIBM25PreparedIndex(
+                records: AIRetrievalWindow.indexRecords(from: registry.records)
+            )
+        }
+        self.searcher = AISimpleLexicalSearcher(
+            preparedIndex: index
+        )
+    }
+
     func search(_ request: AISegmentSearchRequest) async throws -> [AISegmentSearchResult] {
         try Task.checkCancellation()
-        return AISimpleLexicalSearcher().search(request, in: registry)
+        return searcher.search(request, in: registry)
     }
 }
 
 nonisolated struct AIEmbeddingChunk: Codable, Equatable, Sendable {
+    let anchorID: AISegmentID
     let ids: [AISegmentID]
     let tokens: [Int32]
+
+    init(anchorID: AISegmentID, ids: [AISegmentID], tokens: [Int32]) {
+        // A token-budget split can contain only an edge sentence while still
+        // representing the parent window. The anchor therefore need not occur
+        // in every physical embedding chunk.
+        precondition(!ids.isEmpty)
+        self.anchorID = anchorID
+        self.ids = ids
+        self.tokens = tokens
+    }
+
+    /// Diagnostic convenience for single-sentence chunks. Production window
+    /// construction always supplies the explicit anchor.
+    init(ids: [AISegmentID], tokens: [Int32]) {
+        precondition(!ids.isEmpty)
+        self.init(anchorID: ids[ids.count / 2], ids: ids, tokens: tokens)
+    }
 
     static func make(registry: AISegmentRegistry, tokenizer: AIBertWordPieceTokenizer,
                      maximumChunks: Int = 20_000) throws -> [Self] {
         let limit = min(20_000, max(0, maximumChunks))
         var chunks: [Self] = []
-        var ids: [AISegmentID] = []
-        var tokens: [Int32] = []
         func append(_ chunk: Self) throws {
             guard chunks.count < limit else { throw AIRetrievalError.indexTooLarge }
             chunks.append(chunk)
         }
-        func flush() throws {
-            if !ids.isEmpty { try append(Self(ids: ids, tokens: tokens)); ids = []; tokens = [] }
-        }
-        for record in registry.records {
+
+        for window in AIRetrievalWindow.make(records: registry.records) {
             try Task.checkCancellation()
-            let part = tokenizer.tokens(record.text)
-            if part.count > 510 {
-                try flush()
-                // PDF extraction can produce a page-sized sentence. Embed every token
-                // in order while keeping the immutable sentence and its locator intact.
-                // Retrieval resolves all subchunks back to this one evidence record.
-                for start in stride(from: 0, to: part.count, by: 510) {
-                    try Task.checkCancellation()
-                    try append(Self(ids: [record.id], tokens: Array(part[start..<min(start + 510, part.count)])))
+            var ids: [AISegmentID] = []
+            var tokens: [Int32] = []
+            func flush() throws {
+                if !ids.isEmpty {
+                    try append(Self(anchorID: window.anchorID, ids: ids, tokens: tokens))
+                    ids = []
+                    tokens = []
                 }
-                continue
             }
-            if let previous = ids.last,
-               previous.document != record.id.document || previous.page != record.id.page
-                || previous.block != record.id.block || previous.sentence + 1 != record.id.sentence
-                || tokens.count + part.count > 254 || ids.count >= 3 {
-                try flush()
+
+            for record in window.records {
+                try Task.checkCancellation()
+                let part = tokenizer.tokens(record.text)
+                if part.count > 510 {
+                    try flush()
+                    // PDF extraction can produce a page-sized sentence. Embed every
+                    // token in order and map each subchunk back to the window anchor.
+                    for start in stride(from: 0, to: part.count, by: 510) {
+                        try Task.checkCancellation()
+                        try append(Self(
+                            anchorID: window.anchorID,
+                            ids: [record.id],
+                            tokens: Array(part[start..<min(start + 510, part.count)])
+                        ))
+                    }
+                    continue
+                }
+                if !ids.isEmpty && tokens.count + part.count > 254 {
+                    try flush()
+                }
+                ids.append(record.id)
+                tokens += part
             }
-            ids.append(record.id); tokens += part
+            try flush()
         }
-        try flush()
         return chunks
     }
 }
@@ -117,7 +165,12 @@ actor AIHybridEvidenceRetriever: AIEvidenceRetrieving {
     private let vectors: [[Float]]
     nonisolated let indexedChunkCount: Int
 
-    init(registry: AISegmentRegistry, embedder: any AIQueryEmbedding, chunks: [AIEmbeddingChunk], vectors: [[Float]]) {
+    init(
+        registry: AISegmentRegistry,
+        embedder: any AIQueryEmbedding,
+        chunks: [AIEmbeddingChunk],
+        vectors: [[Float]]
+    ) throws {
         self.registry = registry; self.embedder = embedder; self.chunks = chunks; self.vectors = vectors
         self.indexedChunkCount = chunks.count
     }
@@ -125,22 +178,47 @@ actor AIHybridEvidenceRetriever: AIEvidenceRetrieving {
     func search(_ request: AISegmentSearchRequest) async throws -> [AISegmentSearchResult] {
         try Task.checkCancellation()
         let limit = min(100, max(1, request.topK))
-        let pool = min(100, max(24, limit * 3))
-        let lexical = AISimpleLexicalSearcher().search(AISegmentSearchRequest(
-            query: request.query, scope: request.scope, topK: pool, strategy: request.strategy
-        ), in: registry)
+        let pool = AIRetrievalFusionConfiguration.frozen.candidatePoolSize(forResultLimit: limit)
         let query = request.query.trimmingCharacters(in: .whitespacesAndNewlines)
         let vector = try await embedder.embedQuery(query.isEmpty ? "main findings methods results limitations conclusion" : query)
         let denseIDs = Array(try rankedDenseSegments(vector: vector, scope: request.scope).prefix(pool).map(\.id))
-        let fused = Self.fuse(lexical: lexical.map(\.id), dense: denseIDs)
-        if request.strategy == .overviewSalience {
-            // Preserve first-pass page distribution, then fill by rank.
-            var pages = Set<Int>()
-            let distributed = fused.filter { pages.insert($0.id.page).inserted }
-            let picked = Set(distributed.prefix(limit).map(\.id))
-            return Array((Array(distributed.prefix(limit)) + fused.filter { !picked.contains($0.id) }).prefix(limit))
+        return Self.finalizeDenseResults(
+            denseIDs,
+            limit: limit,
+            strategy: request.strategy
+        )
+    }
+
+    nonisolated static func finalizeDenseResults(
+        _ denseIDs: [AISegmentID],
+        limit: Int,
+        strategy: AISegmentSearchStrategy
+    ) -> [AISegmentSearchResult] {
+        let fused = Self.fuse(lexical: [], dense: denseIDs)
+        if strategy == .overviewSalience {
+            return Self.distributeAcrossPages(fused, limit: limit)
         }
         return Array(fused.prefix(limit))
+    }
+
+    /// Promotes the first candidate from each page while preserving the
+    /// original relative order within both the promoted and deferred groups.
+    nonisolated static func distributeAcrossPages(
+        _ ranked: [AISegmentSearchResult],
+        limit: Int
+    ) -> [AISegmentSearchResult] {
+        guard limit > 0 else { return [] }
+        var pages = Set<Int>()
+        var firstPerPage: [AISegmentSearchResult] = []
+        var remaining: [AISegmentSearchResult] = []
+        for candidate in ranked {
+            if pages.insert(candidate.id.page).inserted {
+                firstPerPage.append(candidate)
+            } else {
+                remaining.append(candidate)
+            }
+        }
+        return Array((firstPerPage + remaining).prefix(limit))
     }
 
     /// Raw cosine scores are comparable across files using the same normalized model.
@@ -154,26 +232,18 @@ actor AIHybridEvidenceRetriever: AIEvidenceRetrieving {
         var scores: [AISegmentID: Double] = [:]
         for (index, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
-            // Filter before ranking. Multiple subchunks must not crowd one sentence
-            // into the candidate pool repeatedly or inflate its fusion score.
+            // Filter before ranking. Multiple subchunks map to one stable window
+            // anchor and contribute at most one candidate to the pool.
             guard chunk.ids.allSatisfy(scope.includes) else { continue }
             let score = Double(vDSP.dot(vector, vectors[index]))
-            for id in chunk.ids { scores[id] = max(scores[id] ?? -.infinity, score) }
+            scores[chunk.anchorID] = max(scores[chunk.anchorID] ?? -.infinity, score)
         }
         return scores.map { AISegmentSearchResult(id: $0.key, score: $0.value) }
             .sorted { $0.score == $1.score ? $0.id < $1.id : $0.score > $1.score }
     }
 
     nonisolated static func fuse(lexical: [AISegmentID], dense: [AISegmentID]) -> [AISegmentSearchResult] {
-        var scores: [AISegmentID: Double] = [:]
-        for ranking in [lexical, dense] {
-            var seen = Set<AISegmentID>()
-            for (rank, id) in ranking.enumerated() where seen.insert(id).inserted {
-                scores[id, default: 0] += 1.0 / Double(60 + rank + 1)
-            }
-        }
-        return scores.map { AISegmentSearchResult(id: $0.key, score: $0.value) }
-            .sorted { $0.score == $1.score ? $0.id < $1.id : $0.score > $1.score }
+        AIRetrievalFusion.fuse(lexical: lexical, dense: dense, configuration: .frozen)
     }
 }
 
@@ -184,7 +254,45 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
         let retriever: any AIEvidenceRetrieving
     }
     let sources: [Source]
+    let mode: AIRetrievalMode
     var registry: AISegmentRegistry? = nil
+    private let globalLexicalSearcher: AISimpleLexicalSearcher?
+
+    init(
+        sources: [Source],
+        mode: AIRetrievalMode,
+        registry: AISegmentRegistry? = nil,
+        globalLexicalIndex: AIBM25PreparedIndex? = nil
+    ) throws {
+        self.sources = sources
+        self.mode = mode
+        self.registry = registry
+        if mode == .scheme2EvidenceRAG {
+            guard globalLexicalIndex == nil,
+                  sources.allSatisfy({ $0.retriever is AIHybridEvidenceRetriever }) else {
+                throw AIRetrievalError.invalidSelection
+            }
+            self.globalLexicalSearcher = nil
+            return
+        }
+        guard let registry else {
+            self.globalLexicalSearcher = nil
+            return
+        }
+        let preparedNumbers = Set(sources.map(\.documentNumber))
+        let records = AIRetrievalWindow.indexRecords(
+            from: registry.records.filter { preparedNumbers.contains($0.id.document) }
+        )
+        let index: AIBM25PreparedIndex
+        if let globalLexicalIndex {
+            index = globalLexicalIndex
+        } else {
+            index = try AIBM25PreparedIndex(records: records)
+        }
+        self.globalLexicalSearcher = AISimpleLexicalSearcher(
+            preparedIndex: index
+        )
+    }
 
     func search(_ request: AISegmentSearchRequest) async throws -> [AISegmentSearchResult] {
         var rankings: [[AISegmentSearchResult]] = []
@@ -199,29 +307,77 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
                 blockIDs: Set(blocks.map { AISegmentID(document: 1, page: $0.page, block: $0.block, sentence: $0.sentence) }))
             let localRequest = AISegmentSearchRequest(query: request.query,
                 scope: localScope, topK: request.topK, strategy: request.strategy)
-            let results = try await source.retriever.search(localRequest)
-            if let hybrid = source.retriever as? AIHybridEvidenceRetriever {
-                denseCandidates += try await hybrid.denseCandidates(localRequest).map { result in
+            if mode == .scheme2EvidenceRAG {
+                guard let hybrid = source.retriever as? AIHybridEvidenceRetriever else {
+                    throw AIRetrievalError.invalidSelection
+                }
+                let localDense = try await hybrid.denseCandidates(localRequest).map { result in
                     AISegmentSearchResult(id: AISegmentID(document: number, page: result.id.page,
                         block: result.id.block, sentence: result.id.sentence), score: result.score)
                 }
+                denseCandidates += localDense
+                let localLimit = min(100, max(1, request.topK))
+                let localPool = AIRetrievalFusionConfiguration.frozen.candidatePoolSize(
+                    forResultLimit: localLimit
+                )
+                rankings.append(AIHybridEvidenceRetriever.finalizeDenseResults(
+                    Array(localDense.prefix(localPool).map(\.id)),
+                    limit: localLimit,
+                    strategy: request.strategy
+                ))
+            } else {
+                let results = try await source.retriever.search(localRequest)
+                rankings.append(results.map { result in
+                    AISegmentSearchResult(id: AISegmentID(document: number, page: result.id.page,
+                        block: result.id.block, sentence: result.id.sentence), score: result.score)
+                })
             }
-            rankings.append(results.map { result in
-                AISegmentSearchResult(id: AISegmentID(document: number, page: result.id.page,
-                    block: result.id.block, sentence: result.id.sentence), score: result.score)
-            })
         }
         let limit = min(100, max(1, request.topK))
         guard let registry else { return Self.balance(rankings, limit: limit) }
-        // Rank across the fixed corpus before distributing candidates by source.
-        // A later selected file must not disappear merely because top_k is small.
-        let preparedNumbers = Set(sources.map(\.documentNumber))
-        let lexical = AISimpleLexicalSearcher().search(AISegmentSearchRequest(query: request.query,
-            scope: request.scope, topK: 100, strategy: request.strategy), in: registry)
-            .filter { preparedNumbers.contains($0.id.document) }
-        denseCandidates.sort { $0.score == $1.score ? $0.id < $1.id : $0.score > $1.score }
-        let ranked = denseCandidates.isEmpty ? lexical : AIHybridEvidenceRetriever.fuse(
-            lexical: lexical.map(\.id), dense: denseCandidates.map(\.id))
+        let pool = AIRetrievalFusionConfiguration.frozen.candidatePoolSize(forResultLimit: limit)
+        let ranked: [AISegmentSearchResult]
+        if mode == .scheme1Lexical {
+            guard let globalLexicalSearcher else {
+                return Self.balance(rankings, limit: limit)
+            }
+            // Rank across the fixed corpus before distributing candidates by source.
+            // A later selected file must not disappear merely because top_k is small.
+            let preparedNumbers = Set(sources.map(\.documentNumber))
+            let scopedNumbers = request.scope.documentNumbers.isEmpty
+                ? preparedNumbers
+                : request.scope.documentNumbers.intersection(preparedNumbers)
+            guard !scopedNumbers.isEmpty else {
+                return Self.balance(rankings, limit: limit)
+            }
+            let scopedBlocks = request.scope.blockIDs.filter {
+                preparedNumbers.contains($0.document)
+            }
+            guard request.scope.blockIDs.isEmpty || !scopedBlocks.isEmpty else {
+                return Self.balance(rankings, limit: limit)
+            }
+            let preparedScope = AISegmentScope(
+                pageRange: request.scope.pageRange,
+                blockIDs: scopedBlocks,
+                documentNumbers: scopedNumbers
+            )
+            ranked = Array(globalLexicalSearcher.rankedCandidates(AISegmentSearchRequest(
+                query: request.query,
+                scope: preparedScope,
+                topK: 100,
+                strategy: request.strategy
+            ), in: registry)
+                .prefix(pool))
+        } else {
+            denseCandidates.sort { $0.score == $1.score ? $0.id < $1.id : $0.score > $1.score }
+            let dense = Array(denseCandidates.prefix(pool))
+            // Scheme 2 constructs and queries only the dense channel. Keeping
+            // fusion here preserves the frozen rank-only scoring identity.
+            ranked = AIHybridEvidenceRetriever.fuse(
+                lexical: [],
+                dense: dense.map(\.id)
+            )
+        }
         var byID = Dictionary(uniqueKeysWithValues: ranked.map { ($0.id, $0) })
         for candidate in rankings.flatMap({ $0 }) where byID[candidate.id] == nil {
             byID[candidate.id] = AISegmentSearchResult(id: candidate.id, score: 0)
@@ -233,7 +389,22 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
             if grouped[candidate.id.document] == nil { order.append(candidate.id.document) }
             grouped[candidate.id.document, default: []].append(candidate)
         }
-        return Self.balance(order.compactMap { grouped[$0] }, limit: limit)
+        let sourceRankings = order.compactMap { documentNumber -> [AISegmentSearchResult]? in
+            guard let candidates = grouped[documentNumber] else { return nil }
+            guard mode == .scheme2EvidenceRAG,
+                  request.strategy == .overviewSalience else {
+                return candidates
+            }
+            // Global dense/RRF scores choose each source's candidate set. Reapply
+            // the overview contract inside each source before round-robin source
+            // balancing so a run of high-scoring segments from one page cannot
+            // erase the child's page distribution.
+            return AIHybridEvidenceRetriever.distributeAcrossPages(
+                candidates,
+                limit: candidates.count
+            )
+        }
+        return Self.balance(sourceRankings, limit: limit)
     }
 
     static func balance(_ rankings: [[AISegmentSearchResult]], limit: Int) -> [AISegmentSearchResult] {

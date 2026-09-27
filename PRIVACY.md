@@ -19,9 +19,14 @@ locally. Closing a PDF does not delete that research. Routine diagnostics redact
 detailed local capture is available only when explicitly enabled in a Debug
 build.
 
-An imported local semantic model and its per-document index caches are also
-kept under local application support. The caches contain segment identifiers
-and numeric vectors, not AI answers or conversation history.
+An imported local semantic model and reusable retrieval caches are kept in
+Dogear's app-private Application Support storage. Depending on the selected
+retrieval mode, these deletable derived caches may contain extracted page text
+and canonical segments, lexical tokens and postings, and Float32 embedding
+vectors. They do not contain research conversations or AI answers, and building
+or refreshing them does not modify original PDFs. If a cache is removed,
+damaged, or invalidated by changes to PDF text or the retrieval format, Dogear
+rebuilds it from the selected source document when needed.
 
 ## Optional cloud AI
 

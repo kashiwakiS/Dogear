@@ -8,6 +8,7 @@ nonisolated enum AISegmentRegistryError: LocalizedError, Equatable {
     case duplicatePage(Int)
     case duplicateID(AISegmentID)
     case pageFingerprintMismatch(AISegmentID)
+    case invalidPreparedRecord(AISegmentID)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,8 @@ nonisolated enum AISegmentRegistryError: LocalizedError, Equatable {
             return "The segment registry contains a duplicate ID: \(id)."
         case .pageFingerprintMismatch(let id):
             return "The segment source does not match its page snapshot: \(id)."
+        case .invalidPreparedRecord(let id):
+            return "The prepared segment does not match its cached text snapshot: \(id)."
         }
     }
 }
@@ -35,12 +38,22 @@ nonisolated struct AIWorkflowSourceSnapshot: Equatable, Sendable {
     let displayName: String
     let snapshot: AIHighlightTextSnapshot
     let version: String
+    /// Canonical D001 records from the derived source cache. They are optional
+    /// so callers that only have a text snapshot keep the normal segmenter path.
+    let preparedRecords: [AISegmentRecord]?
 
-    init(fileID: UUID, displayName: String, snapshot: AIHighlightTextSnapshot, version: String? = nil) {
+    init(
+        fileID: UUID,
+        displayName: String,
+        snapshot: AIHighlightTextSnapshot,
+        version: String? = nil,
+        preparedRecords: [AISegmentRecord]? = nil
+    ) {
         self.fileID = fileID
         self.displayName = displayName
         self.snapshot = snapshot
         self.version = version ?? snapshot.fingerprint
+        self.preparedRecords = preparedRecords
     }
 }
 
@@ -119,15 +132,27 @@ nonisolated struct AISegmentRegistry: Sendable {
                 throw AISegmentRegistryError.duplicateSource(source.fileID)
             }
             let number = offset + 1
-            let part = try AISegmentRegistry(snapshot: source.snapshot, segmenter: segmenter,
-                                            documentNumber: number)
-            combined += part.records
+            if let prepared = source.preparedRecords {
+                combined += try Self.validatePreparedRecords(
+                    prepared,
+                    snapshot: source.snapshot,
+                    documentNumber: number
+                )
+            } else {
+                let part = try AISegmentRegistry(snapshot: source.snapshot, segmenter: segmenter,
+                                                documentNumber: number)
+                combined += part.records
+            }
             descriptors.append(AIWorkflowSourceDescriptor(documentNumber: number, fileID: source.fileID,
                 displayName: source.displayName, version: source.version,
                 snapshotFingerprint: source.snapshot.fingerprint, pageCount: source.snapshot.pages.count))
         }
         self.sources = descriptors
-        self.indexIdentity = descriptors.map { "\($0.fileID)|\($0.version)|\($0.snapshotFingerprint)" }.joined(separator: "|")
+        // Retrieval caches follow the actual text/segmentation input. The
+        // broader source version still travels with the descriptor for final
+        // source validation, but annotation-only changes do not invalidate an
+        // otherwise identical retrieval index.
+        self.indexIdentity = descriptors.map { "\($0.fileID)|\($0.snapshotFingerprint)" }.joined(separator: "|")
         self.snapshotFingerprint = sources.isEmpty ? "empty-sources" : sources[(mainDocumentNumber ?? 1) - 1].snapshot.fingerprint
         self.segmenterVersion = segmenter.version
         self.records = combined
@@ -148,7 +173,7 @@ nonisolated struct AISegmentRegistry: Sendable {
         let source = sources.first { $0.documentNumber == number }
         return AISegmentRegistry(snapshotFingerprint: source?.snapshotFingerprint ?? snapshotFingerprint,
             segmenterVersion: segmenterVersion, records: selected,
-            indexIdentity: source.map { "\($0.fileID)|\($0.version)|\($0.snapshotFingerprint)" } ?? indexIdentity)
+            indexIdentity: source.map { "\($0.fileID)|\($0.snapshotFingerprint)" } ?? indexIdentity)
     }
 
     private init(snapshotFingerprint: String, segmenterVersion: String, records: [AISegmentRecord], indexIdentity: String) {
@@ -159,6 +184,62 @@ nonisolated struct AISegmentRegistry: Sendable {
         self.records = records
         self.recordsByDocument = Dictionary(grouping: records, by: { $0.id.document })
         self.recordsByID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+    }
+
+    private static func validatePreparedRecords(
+        _ records: [AISegmentRecord],
+        snapshot: AIHighlightTextSnapshot,
+        documentNumber: Int
+    ) throws -> [AISegmentRecord] {
+        var pages: [Int: AITextPageSnapshot] = [:]
+        for page in snapshot.pages {
+            guard page.pageNumber > 0 else {
+                throw AISegmentRegistryError.invalidPage(page.pageNumber)
+            }
+            guard pages.updateValue(page, forKey: page.pageNumber) == nil else {
+                throw AISegmentRegistryError.duplicatePage(page.pageNumber)
+            }
+        }
+        var seen = Set<AISegmentID>()
+        var result: [AISegmentRecord] = []
+        result.reserveCapacity(records.count)
+        for record in records.sorted(by: { $0.id < $1.id }) {
+            try Task.checkCancellation()
+            guard record.id.document == 1,
+                  let page = pages[record.id.page],
+                  page.fingerprint == record.pageFingerprint,
+                  page.sourceKind == record.sourceKind,
+                  page.sourceConfidence == record.sourceConfidence,
+                  record.normalizedText == AISegmenter.normalizeForSearch(record.text),
+                  record.sourceRange.location >= 0,
+                  record.sourceRange.length >= 0,
+                  record.sourceRange.upperBound <= (page.text as NSString).length,
+                  (page.text as NSString).substring(
+                    with: NSRange(location: record.sourceRange.location, length: record.sourceRange.length)
+                  ) == record.text
+            else {
+                throw AISegmentRegistryError.invalidPreparedRecord(record.id)
+            }
+            let id = AISegmentID(
+                document: documentNumber,
+                page: record.id.page,
+                block: record.id.block,
+                sentence: record.id.sentence
+            )
+            guard seen.insert(id).inserted else {
+                throw AISegmentRegistryError.duplicateID(id)
+            }
+            result.append(AISegmentRecord(
+                id: id,
+                text: record.text,
+                normalizedText: record.normalizedText,
+                sourceRange: record.sourceRange,
+                pageFingerprint: record.pageFingerprint,
+                sourceKind: record.sourceKind,
+                sourceConfidence: record.sourceConfidence
+            ))
+        }
+        return result
     }
 
     func record(for id: AISegmentID) -> AISegmentRecord? {
@@ -238,42 +319,72 @@ nonisolated protocol AISegmentSearching: Sendable {
 }
 
 nonisolated struct AISimpleLexicalSearcher: AISegmentSearching {
+    private let preparedIndex: AIBM25PreparedIndex?
+
+    init(preparedIndex: AIBM25PreparedIndex? = nil) {
+        self.preparedIndex = preparedIndex
+    }
+
+    init(registry: AISegmentRegistry) {
+        self.preparedIndex = try? AIBM25PreparedIndex(
+            records: AIRetrievalWindow.indexRecords(from: registry.records)
+        )
+    }
+
     func search(
         _ request: AISegmentSearchRequest,
         in registry: AISegmentRegistry
     ) -> [AISegmentSearchResult] {
-        let numbers = Set(registry.records(in: request.scope).map { $0.id.document }).sorted()
-        if numbers.count > 1 {
-            return AIMultiSourceEvidenceRetriever.balance(numbers.map { number in
-                search(request, in: registry.registry(forDocument: number))
-            }, limit: min(max(1, request.topK), 100))
+        let limit = min(max(1, request.topK), 100)
+        let global = rankedCandidates(
+            AISegmentSearchRequest(
+                query: request.query,
+                scope: request.scope,
+                topK: 100,
+                strategy: request.strategy
+            ),
+            in: registry
+        )
+        let numbers = Set(global.map { $0.id.document })
+        guard numbers.count > 1 else { return Array(global.prefix(limit)) }
+
+        // BM25 statistics and ranking are global over the authorized scope.
+        // Preserve the existing product contract by balancing sources only
+        // after that global ranking has been established.
+        var order: [Int] = []
+        var grouped: [Int: [AISegmentSearchResult]] = [:]
+        for candidate in global {
+            if grouped[candidate.id.document] == nil { order.append(candidate.id.document) }
+            grouped[candidate.id.document, default: []].append(candidate)
         }
-        let normalizedQuery = AISegmenter.normalizeForSearch(request.query)
-        let terms = normalizedQuery.split(separator: " ").map(String.init)
-        if request.strategy == .overviewSalience, terms.isEmpty {
+        return AIMultiSourceEvidenceRetriever.balance(
+            order.compactMap { grouped[$0] },
+            limit: limit
+        )
+    }
+
+    /// Returns the channel's global rank without the product's final
+    /// round-robin source distribution. Hybrid fusion must consume this order.
+    func rankedCandidates(
+        _ request: AISegmentSearchRequest,
+        in registry: AISegmentRegistry
+    ) -> [AISegmentSearchResult] {
+        let queryTokens = AILexicalTokenizer().tokens(request.query)
+        if request.strategy == .overviewSalience, queryTokens.isEmpty {
             return overviewCandidates(request, in: registry)
         }
-        guard !terms.isEmpty else { return [] }
-
-        return registry.records(in: request.scope)
-            .compactMap { record -> AISegmentSearchResult? in
-                let phraseScore = record.normalizedText.contains(normalizedQuery) ? 4.0 : 0.0
-                let termScore = terms.reduce(0.0) { score, term in
-                    score + Double(record.normalizedText.components(separatedBy: term).count - 1)
-                }
-                let coverage = Double(
-                    terms.filter { record.normalizedText.contains($0) }.count
-                ) / Double(terms.count)
-                let score = phraseScore + termScore + coverage
-                guard score > 0 else { return nil }
-                return AISegmentSearchResult(id: record.id, score: score)
-            }
-            .sorted {
-                if $0.score == $1.score { return $0.id < $1.id }
-                return $0.score > $1.score
-            }
-            .prefix(min(max(1, request.topK), 100))
-            .map { $0 }
+        guard !queryTokens.isEmpty else { return [] }
+        guard let index = preparedIndex ?? (try? AIBM25PreparedIndex(
+            records: AIRetrievalWindow.indexRecords(from: registry.records)
+        )) else {
+            return []
+        }
+        return index.search(AISegmentSearchRequest(
+            query: request.query,
+            scope: request.scope,
+            topK: min(max(1, request.topK), 100),
+            strategy: request.strategy
+        ))
     }
 
     private func overviewCandidates(

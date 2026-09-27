@@ -44,6 +44,15 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
         let topIDs: [String]
     }
     struct RealMeasurement: Codable, Sendable {
+        static let currentSchemaVersion = 2
+
+        /// Version 2 renamed the Scheme 2 measurements after the frozen
+        /// configuration became dense-only and added the configuration
+        /// identity required to compare runs safely.
+        let measurementSchemaVersion: Int
+        let retrievalComponents: String
+        let retrievalConfigurationIdentity: String
+        let retrievalConfigurationSHA256: String
         let documents: Int
         let pages: Int
         let segments: Int
@@ -51,9 +60,9 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
         let segmentationSeconds: Double
         let tokenizationSeconds: Double
         let lexicalPreparationSeconds: Double
-        let hybridColdPreparationSeconds: Double
-        let hybridWarmPreparationSeconds: Double
-        let hybridReorderedPreparationSeconds: Double
+        let denseColdPreparationSeconds: Double
+        let denseWarmPreparationSeconds: Double
+        let denseReorderedPreparationSeconds: Double
         let coldDocumentInferenceCalls: Int
         let warmAdditionalDocumentInferenceCalls: Int
         let reorderedAdditionalDocumentInferenceCalls: Int
@@ -114,33 +123,40 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
                 let selection = AIRetrievalSelection(mode: .scheme2EvidenceRAG, packageID: String(repeating: "a", count: 64))
                 let root = cacheRoot.appendingPathComponent("\(count)")
                 let indexStart = Date()
-                let hybrid = try await AIEvidenceRetrievalFactory.makeSources(selection: selection, registry: registry,
+                let dense = try await AIEvidenceRetrievalFactory.makeSources(selection: selection, registry: registry,
                     sharedEmbedder: model, cacheRoot: root)
                 let indexCold = Date().timeIntervalSince(indexStart)
                 let documentCalls = await model.documentCalls
                 let searchStart = Date()
-                let coldHybrid = try await hybrid.retriever.search(query)
-                _ = try await hybrid.retriever.search(AISegmentSearchRequest(query: query.query,
+                let coldDense = try await dense.retriever.search(query)
+                _ = try await dense.retriever.search(AISegmentSearchRequest(query: query.query,
                     scope: AISegmentScope(pageRange: 2...2), topK: 10))
                 let searchCold = Date().timeIntervalSince(searchStart)
                 check(await model.queryCalls == 1, "\(count): same query was embedded once per document/scope")
-                check(Set(coldHybrid.prefix(count).map { $0.id.document }).count == count,
-                      "\(count): hybrid lost source balance")
+                check(Set(coldDense.prefix(count).map { $0.id.document }).count == count,
+                      "\(count): dense retrieval lost source balance")
                 let warmStart = Date()
                 let repeated = try await AIEvidenceRetrievalFactory.makeSources(selection: selection, registry: registry,
                     sharedEmbedder: model, cacheRoot: root)
                 let indexWarm = Date().timeIntervalSince(warmStart)
                 check(await model.documentCalls == documentCalls, "\(count): warm cache recomputed source vectors")
                 let warmSearchStart = Date()
-                let warmHybrid = try await repeated.retriever.search(query)
+                let warmDense = try await repeated.retriever.search(query)
                 let searchWarm = Date().timeIntervalSince(warmSearchStart)
-                check(coldHybrid == warmHybrid, "\(count): cached hybrid ranking changed")
+                check(coldDense == warmDense, "\(count): cached dense ranking changed")
                 let reordered = try AISegmentRegistry(sources: Array(sources.reversed()))
                 _ = try await AIEvidenceRetrievalFactory.makeSources(selection: selection, registry: reordered,
                     sharedEmbedder: model, cacheRoot: root)
                 check(await model.documentCalls == documentCalls, "\(count): request ordinal changed persistent cache identity")
-                let cacheFiles = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
-                check(cacheFiles.count == count, "\(count): per-file caches duplicated after reordering")
+                let cache = AISQLiteEmbeddingIndexCache(
+                    databaseURL: AISQLiteEmbeddingIndexCache.databaseURL(cacheRoot: root)
+                )
+                let cacheCounts = try await cache.diagnosticRowCounts()
+                check(
+                    cacheCounts.generations == count,
+                    "\(count): dense generations duplicated after reordering"
+                )
+                await cache.close()
                 measurements.append(Measurement(documents: count, segments: registry.records.count,
                     segmentationSeconds: segmentation, tokenizationSeconds: tokenization,
                     lexicalColdSeconds: lexicalCold, lexicalWarmSeconds: lexicalWarm,
@@ -263,6 +279,19 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
             let loadSeconds = Date().timeIntervalSince(loadStart)
             print("MULTI RAG REAL MODEL: actual_model=\(manifest.model) package=\(packageID) compute=cpuOnly corpus=authored-synthetic-v1 provider_calls=0 load_and_validation_seconds=\(loadSeconds) memory_before_load=\(memoryDescription(memoryBeforeLoad)) memory_after_load=\(memoryDescription(processMemory()))")
             let selection = AIRetrievalSelection(mode: .scheme2EvidenceRAG, packageID: packageID)
+            let retrievalConfiguration = AIRetrievalFusionConfiguration.frozen
+            let retrievalComponents = "bge-small-en-dense+weighted-rrf"
+            let expectedRetrievalIdentity =
+                "dogear.weighted-rrf.v1|dense=3ff0000000000000|lexical=0000000000000000|rrf-k=60|pool-min=24|pool-multiplier=3|pool-cap=100"
+            let expectedRetrievalSHA256 =
+                "ea4643ad74df1c912f28ea67a88108448e47b1b3acdb1a718419f4b071a4ebe1"
+            check(
+                retrievalConfiguration.denseWeight == 1.0
+                    && retrievalConfiguration.lexicalWeight == 0.0
+                    && retrievalConfiguration.canonicalIdentity == expectedRetrievalIdentity
+                    && retrievalConfiguration.canonicalHash == expectedRetrievalSHA256,
+                "Scheme 2 real-model diagnostics require the frozen dense-only configuration identity"
+            )
 
             for count in [1, 5, 20] {
                 let sources = realFixtures(count: count)
@@ -303,7 +332,7 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
                     let tokens = tokenizer.tokens(manifest.queryPrefix + fixture.query)
                     let tokenSeconds = Date().timeIntervalSince(tokenStart)
                     let request = AISegmentSearchRequest(query: fixture.query, topK: max(10, count * 2))
-                    for (mode, retriever) in [("lexical", lexical.retriever), ("actual-small-en-hybrid", cold.retriever)] {
+                    for (mode, retriever) in [("lexical", lexical.retriever), ("actual-small-en-dense", cold.retriever)] {
                         let searchStart = Date()
                         let results = try await retriever.search(request)
                         let searchSeconds = Date().timeIntervalSince(searchStart)
@@ -341,7 +370,7 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
                 let warmQuery = try await warm.retriever.search(AISegmentSearchRequest(query: queries[0].query, topK: max(10, count * 2)))
                 let warmFirstQuerySeconds = Date().timeIntervalSince(warmFirstQueryStart)
                 let originalQuery = try await cold.retriever.search(AISegmentSearchRequest(query: queries[0].query, topK: max(10, count * 2)))
-                check(warmQuery == originalQuery, "\(count): persistent cache changed real hybrid ranking")
+                check(warmQuery == originalQuery, "\(count): persistent cache changed real dense ranking")
 
                 let reorderedRegistry = try AISegmentRegistry(sources: Array(sources.reversed()))
                 let reorderedStats = RealIndexStatistics()
@@ -361,20 +390,30 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
                     check(original.map { localID($0.id) } == reversed.map { localID($0.id) },
                           "\(count): source reordering changed file \(number)'s local ranking")
                 }
+                let cache = AISQLiteEmbeddingIndexCache(
+                    databaseURL: AISQLiteEmbeddingIndexCache.databaseURL(cacheRoot: root)
+                )
+                let cacheCounts = try await cache.diagnosticRowCounts()
+                check(cacheCounts.generations == count,
+                      "\(count): reordering left duplicate or partial real-model generations")
+                await cache.close()
                 let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey])
-                check(files.count == count && files.allSatisfy { $0.pathExtension == "json" },
-                      "\(count): reordering left duplicate or partial real-model caches")
                 let cacheBytes = try files.reduce(0) { $0 + (try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
                 let coldHits = await coldStats.hits
                 let warmHits = await warmStats.hits
                 let reorderedHits = await reorderedStats.hits
                 check(coldHits == 0 && warmHits == count && reorderedHits == count,
                       "\(count): actual cold/warm/reordered cache-hit telemetry disagreed")
-                let measurement = RealMeasurement(documents: count, pages: sources.reduce(0) { $0 + $1.snapshot.pages.count },
+                let measurement = RealMeasurement(
+                    measurementSchemaVersion: RealMeasurement.currentSchemaVersion,
+                    retrievalComponents: retrievalComponents,
+                    retrievalConfigurationIdentity: retrievalConfiguration.canonicalIdentity,
+                    retrievalConfigurationSHA256: retrievalConfiguration.canonicalHash,
+                    documents: count, pages: sources.reduce(0) { $0 + $1.snapshot.pages.count },
                     segments: registry.records.count, chunks: chunks, segmentationSeconds: segmentationSeconds,
                     tokenizationSeconds: tokenizationSeconds, lexicalPreparationSeconds: lexicalPreparation,
-                    hybridColdPreparationSeconds: coldSeconds, hybridWarmPreparationSeconds: warmSeconds,
-                    hybridReorderedPreparationSeconds: reorderedSeconds, coldDocumentInferenceCalls: coldCounts.documents,
+                    denseColdPreparationSeconds: coldSeconds, denseWarmPreparationSeconds: warmSeconds,
+                    denseReorderedPreparationSeconds: reorderedSeconds, coldDocumentInferenceCalls: coldCounts.documents,
                     warmAdditionalDocumentInferenceCalls: warmCounts.documents - coldCounts.documents,
                     reorderedAdditionalDocumentInferenceCalls: reorderedCounts.documents - warmCounts.documents,
                     coldQueryInferenceCalls: afterQueries.queries, coldCacheHits: coldHits, warmCacheHits: warmHits,
@@ -383,7 +422,22 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
                     queries: queryMeasurements)
                 measurements.append(measurement)
                 let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
-                print("MULTI RAG REAL MEASUREMENT " + String(decoding: try encoder.encode(measurement), as: UTF8.self))
+                let encodedMeasurement = try encoder.encode(measurement)
+                let encodedFields = try JSONSerialization.jsonObject(with: encodedMeasurement) as? [String: Any]
+                check(
+                    encodedFields?["measurementSchemaVersion"] as? Int == RealMeasurement.currentSchemaVersion
+                        && encodedFields?["retrievalComponents"] as? String == retrievalComponents
+                        && encodedFields?["retrievalConfigurationIdentity"] as? String == expectedRetrievalIdentity
+                        && encodedFields?["retrievalConfigurationSHA256"] as? String == expectedRetrievalSHA256
+                        && encodedFields?["denseColdPreparationSeconds"] != nil
+                        && encodedFields?["denseWarmPreparationSeconds"] != nil
+                        && encodedFields?["denseReorderedPreparationSeconds"] != nil
+                        && encodedFields?["hybridColdPreparationSeconds"] == nil
+                        && encodedFields?["hybridWarmPreparationSeconds"] == nil
+                        && encodedFields?["hybridReorderedPreparationSeconds"] == nil,
+                    "\(count): real measurement omitted or mislabeled dense-only comparison metadata"
+                )
+                print("MULTI RAG REAL MEASUREMENT " + String(decoding: encodedMeasurement, as: UTF8.self))
             }
 
             let cancelModel = CountedRealEmbedder(base: actualModel)
@@ -405,8 +459,14 @@ nonisolated enum MultiSourceEvidenceDiagnostics {
             let cancellationSeconds = Date().timeIntervalSince(cancelStart)
             let afterCancel = await cancelModel.counts()
             check(beforeCancel.documents > 0, "Cancellation fixture never dispatched a model invocation")
-            let cancelFiles = (try? FileManager.default.contentsOfDirectory(at: cacheRoot.appendingPathComponent("cancelled"), includingPropertiesForKeys: nil)) ?? []
-            check(cancelFiles.allSatisfy { $0.pathExtension == "json" }, "Cancellation left a partial embedding cache")
+            let cancelledCache = AISQLiteEmbeddingIndexCache(
+                databaseURL: AISQLiteEmbeddingIndexCache.databaseURL(
+                    cacheRoot: cacheRoot.appendingPathComponent("cancelled")
+                )
+            )
+            let cancelledCounts = try await cancelledCache.diagnosticRowCounts()
+            check(cancelledCounts.generations == 0, "Cancellation left a partial embedding generation")
+            await cancelledCache.close()
             print("MULTI RAG REAL CANCELLATION seconds=\(cancellationSeconds) document_calls_dispatched=\(beforeCancel.documents) calls_completed_before_cancel=\(beforeCancel.completedDocuments) calls_completed_after_cancel=\(afterCancel.completedDocuments) note=synchronous_CoreML_prediction_is_cooperatively_cancelled_at_its_boundary")
             print("MULTI RAG REAL MODEL: \(checks) invariant checks, \(failures.count) failures; relevance observations use synthetic ground truth and do not evaluate generated answers")
         } catch { check(false, "Evaluation failed: \(error)") }

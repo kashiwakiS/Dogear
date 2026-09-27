@@ -83,6 +83,76 @@ final class PDFDocumentStore: ObservableObject {
     private let accessCoordinator: DocumentAccessCoordinator
     private var editorActivationHandler: (() -> Void)?
     @Published private(set) var workingCopySaveError: String?
+    @Published var pendingConfirmation: DocumentConfirmationRequest?
+    @Published var pendingExportOptions: DocumentExportOptionsRequest?
+    var originalOverwriteHandler: ((UUID) -> Void)?
+
+    private struct InteractionContext {
+        let document: PDFDocument
+        let sessionID: UUID
+        let originalPath: String?
+        let fileID: UUID?
+        let contentVersion: String
+        let mutationGeneration: Int
+    }
+
+    private func interactionContext() -> InteractionContext? {
+        guard let document else { return nil }
+        return InteractionContext(document: document, sessionID: openedDocumentID,
+            originalPath: selectedPDFURL?.libraryComparablePath, fileID: currentLibraryFileID,
+            contentVersion: DocumentAccessCoordinator.contentVersion(of: document), mutationGeneration: saveGeneration)
+    }
+
+    private func validateInteraction(_ context: InteractionContext, action: String, trigger: FeedbackTrigger?) -> Bool {
+        guard document === context.document, openedDocumentID == context.sessionID,
+              currentLibraryFileID == context.fileID,
+              saveGeneration == context.mutationGeneration,
+              selectedPDFURL?.libraryComparablePath == context.originalPath,
+              DocumentAccessCoordinator.contentVersion(of: context.document) == context.contentVersion else {
+            postFeedback("The PDF changed while this dialog was open. Run the command again.",
+                kind: .warning, action: action, trigger: trigger)
+            return false
+        }
+        return true
+    }
+
+    /// UI requests capture their target before presenting. Reopening, changing
+    /// pages/annotations or relinking cannot redirect a delayed confirmation.
+    func requestConfirmation(
+        title: String.LocalizationValue, message: String.LocalizationValue, confirmTitle: String.LocalizationValue,
+        action: String, trigger: FeedbackTrigger? = nil,
+        scope: DocumentInteractionScope = .reader,
+        onConfirm: @escaping (PDFDocumentStore) -> Void
+    ) {
+        guard pendingConfirmation == nil, let context = interactionContext() else { return }
+        var consumed = false
+        pendingConfirmation = DocumentConfirmationRequest(title: L10n.string(title),
+            message: L10n.string(message), confirmTitle: L10n.string(confirmTitle), scope: scope) { [weak self] in
+                guard !consumed else { return }
+                consumed = true
+                guard let self, self.canEditDocument,
+                      self.validateInteraction(context, action: action, trigger: trigger) else { return }
+                onConfirm(self)
+            }
+    }
+
+    private func requestExportOptions(
+        title: String.LocalizationValue, message: String.LocalizationValue,
+        confirmTitle: String.LocalizationValue, allowsMultipleSelection: Bool,
+        options: [DocumentExportOptionsRequest.Option], action: String, trigger: FeedbackTrigger?,
+        onConfirm: @escaping (PDFDocumentStore, Set<String>) -> Void
+    ) {
+        guard pendingExportOptions == nil, let context = interactionContext() else { return }
+        var consumed = false
+        pendingExportOptions = DocumentExportOptionsRequest(title: L10n.string(title),
+            message: L10n.string(message), confirmTitle: L10n.string(confirmTitle),
+            allowsMultipleSelection: allowsMultipleSelection, options: options) { [weak self] selection in
+                guard !consumed else { return }
+                consumed = true
+                guard let self, self.validateInteraction(context, action: action, trigger: trigger) else { return }
+                onConfirm(self, selection)
+            }
+    }
 
     var canEditDocument: Bool {
         guard let selectedPDFURL else { return document != nil }
@@ -95,10 +165,26 @@ final class PDFDocumentStore: ObservableObject {
 
     func activateEditor() { editorActivationHandler?() }
 
+    /// Called by the coordinator only after an exact-content Library relink
+    /// has durably committed. Preserve the document, working copy and Undo.
+    func adoptRelocatedOriginal(_ url: URL, fileID: UUID) {
+        let acquiredAccess = url.startAccessingSecurityScopedResource()
+        closeSecurityScopedAccess()
+        if acquiredAccess { accessedSecurityScopedURL = url }
+        selectedPDFURL = url
+        currentLibraryFileID = fileID
+        openedDocumentID = UUID()
+        saveGeneration += 1
+        pendingConfirmation = nil
+        pendingExportOptions = nil
+    }
+
     func releaseEditorAccess() {
         guard let selectedPDFURL else { return }
         accessCoordinator.release(self, url: selectedPDFURL)
         openedDocumentID = UUID()
+        pendingConfirmation = nil
+        pendingExportOptions = nil
     }
 
     func captureWritePermit(requestID: UUID) -> PDFDocumentWritePermit? {
@@ -454,16 +540,42 @@ final class PDFDocumentStore: ObservableObject {
         return true
     }
 
-    func bindLibraryFile(_ fileID: UUID) {
+    @discardableResult
+    func bindLibraryFile(_ fileID: UUID) -> Bool {
         if let selectedPDFURL, !accessCoordinator.bind(fileID: fileID, to: self, url: selectedPDFURL) {
             releaseEditorAccess()
+            closeSecurityScopedAccess()
+            outlineLoadingTask?.cancel()
+            outlineLoadingTask = nil
+            undoManager?.removeAllActions()
             document = nil
+            self.selectedPDFURL = nil
+            currentWorkingCopyURL = nil
+            currentLibraryFileID = nil
+            hasUnsavedChanges = false
+            workingCopySaveError = nil
+            currentPageIndex = 0
+            annotations = []
+            selectedAnnotationID = nil
+            documentSearchResults = []
+            selectedDocumentSearchResultID = nil
+            outlineEntries = []
+            isLoadingOutline = false
+            outlineNavigationRequest = nil
+            currentTextSelection = nil
+            dogears = []
+            aiHighlightGroups = []
+            visibleAIHighlightGroupIDs = []
+            activeAIHighlightGroupID = nil
+            highlightRequest = nil
+            synchronizeAIMasterVisibility()
             postFeedback("This Library file already has an editing session. Switched to its window.", kind: .warning, action: "Open PDF")
-            return
+            return false
         }
         currentLibraryFileID = fileID
         refreshDogears()
         refreshAIHighlightGroups()
+        return true
     }
 
     var currentPageDogear: DogearMarker? {
@@ -573,6 +685,7 @@ final class PDFDocumentStore: ObservableObject {
         trigger: FeedbackTrigger? = nil
     ) {
         refreshAnnotations()
+        notifyAnnotationDisplayChanged()
         postFeedback(message, action: action, trigger: trigger)
         enqueueCurrentDocumentSave(action: action, trigger: trigger)
     }
@@ -770,10 +883,13 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
+        let popup = annotation.popup.flatMap { $0.page === page ? $0 : nil }
+        if let popup { page.removeAnnotation(popup) }
         page.removeAnnotation(annotation)
         registerUndoForRemovedAnnotation(
             annotation,
             page: page,
+            popup: popup,
             actionName: "Remove \(item.kind.rawValue)"
         )
         selectedAnnotationID = nil
@@ -782,6 +898,159 @@ final class PDFDocumentStore: ObservableObject {
             action: "Remove \(item.kind.rawValue)",
             trigger: trigger
         )
+    }
+
+    func highlightEditDraft(for item: PDFAnnotationItem) -> HighlightEditDraft? {
+        guard canEditDocument, item.kind == .highlight, let document,
+              let annotation = AnnotationExtractor.annotation(matching: item, in: document)
+        else { return nil }
+        return HighlightEditDraft(document: document, annotation: annotation,
+            quote: item.text, color: annotation.color, comment: annotation.contents ?? "")
+    }
+
+    func freeTextEditDraft(for item: PDFAnnotationItem) -> FreeTextEditDraft? {
+        guard canEditDocument, let document,
+              let annotation = AnnotationExtractor.annotation(matching: item, in: document),
+              annotation.type == "FreeText", let page = annotation.page
+        else { return nil }
+        return FreeTextEditDraft(document: document, page: page, annotation: annotation)
+    }
+
+    @discardableResult
+    func updateFreeText(_ draft: FreeTextEditDraft, values: FreeTextEditValues) -> Bool {
+        guard canEditDocument, document === draft.document, draft.page.document === document,
+              draft.annotation.page === draft.page, draft.annotation.type == "FreeText",
+              draft.page.annotations.contains(where: { $0 === draft.annotation }) else {
+            postFeedback("The annotation is no longer present.", kind: .warning, action: "Edit Free Text Note")
+            return false
+        }
+        if let message = FreeTextAnnotationEditing.validationMessage(values, draft: draft) {
+            postFeedback(message, kind: .warning, action: "Edit Free Text Note")
+            return false
+        }
+        let current = FreeTextEditDraft(document: draft.document, page: draft.page, annotation: draft.annotation)
+        guard values != current.values else { return true }
+        let previous = FreeTextAnnotationEditing.Snapshot(draft.annotation)
+        FreeTextAnnotationEditing.apply(values, draft: draft)
+        registerFreeTextUndo(previous, draft: draft)
+        markAnnotationsChanged(action: "Edit Free Text Note", trigger: .pointer)
+        return true
+    }
+
+    private func registerFreeTextUndo(_ snapshot: FreeTextAnnotationEditing.Snapshot, draft: FreeTextEditDraft) {
+        undoManager?.registerUndo(withTarget: self) { target in
+            guard target.canEditDocument, target.document === draft.document,
+                  draft.page.document === draft.document, draft.annotation.page === draft.page else { return }
+            let inverse = FreeTextAnnotationEditing.Snapshot(draft.annotation)
+            snapshot.restore(to: draft.annotation)
+            target.registerFreeTextUndo(inverse, draft: draft)
+            target.markAnnotationsChanged(message: "Undo/redo applied. Saving working copy.", action: "Edit Free Text Note")
+        }
+        undoManager?.setActionName(L10n.string("Edit Free Text Note"))
+    }
+
+    @discardableResult
+    func updateHighlight(_ draft: HighlightEditDraft, color: NSColor, comment: String) -> Bool {
+        guard canEditDocument, document === draft.document,
+              let page = draft.annotation.page, page.document === document,
+              page.annotations.contains(where: { $0 === draft.annotation }),
+              draft.annotation.type == "Highlight" else {
+            postFeedback("The annotation is no longer present.", kind: .warning, action: "Edit Highlight")
+            return false
+        }
+        let annotation = draft.annotation
+        // Choosing a hue must not unexpectedly change the PDF highlight opacity.
+        let newColor = color.withAlphaComponent(draft.color.alphaComponent)
+        guard !annotation.color.isEqual(newColor) || (annotation.contents ?? "") != comment else { return true }
+        setHighlightProperties(annotation, color: newColor, comment: comment, modificationDate: Date())
+        markAnnotationsChanged(action: "Edit Highlight", trigger: .pointer)
+        return true
+    }
+
+    private func setHighlightProperties(
+        _ annotation: PDFAnnotation, color: NSColor, comment: String?, modificationDate: Date?
+    ) {
+        guard canEditDocument, let page = annotation.page, page.document === document else { return }
+        let oldColor = annotation.color
+        let oldComment = annotation.contents
+        let oldDate = annotation.modificationDate
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.setHighlightProperties(annotation, color: oldColor, comment: oldComment, modificationDate: oldDate)
+            target.markAnnotationsChanged(message: "Undo/redo applied. Saving working copy.", action: "Edit Highlight")
+        }
+        undoManager?.setActionName(L10n.string("Edit Highlight"))
+        annotation.color = color
+        annotation.contents = comment
+        annotation.modificationDate = modificationDate
+    }
+
+    func confirmRemoveAIHighlightGroup(_ groupID: UUID) {
+        guard canEditDocument, document != nil,
+              let group = aiHighlightGroups.first(where: { $0.id == groupID }) else { return }
+        let count = aiHighlightCount(in: groupID)
+        guard count > 0 else { return }
+        requestConfirmation(title: "Delete this AI highlight group?",
+            message: "Delete \(count) highlights in “\(group.displayTitle)”? Other groups and manual annotations stay unchanged. You can undo this deletion.",
+            confirmTitle: "Delete Group", action: "Delete Group") { store in
+                guard store.aiHighlightCount(in: groupID) == count else { return }
+                _ = store.removeAIHighlightGroupAnnotations(groupID)
+            }
+    }
+
+    /// The caller presents the group/count confirmation. Operates on native
+    /// provenance, including hidden groups, never on color or current filters.
+    @discardableResult
+    func removeAIHighlightGroupAnnotations(_ groupID: UUID) -> Int {
+        guard canEditDocument, let document,
+              let group = aiHighlightGroups.first(where: { $0.id == groupID }) else { return 0 }
+        let records = (0..<document.pageCount).flatMap { pageIndex -> [AIAnnotationUndoRecord] in
+            guard let page = document.page(at: pageIndex) else { return [] }
+            return page.annotations.compactMap { annotation in
+                guard annotation.type == "Highlight", AIAnnotationProvenance.classify(annotation).isAI,
+                      AIAnnotationProvenance.displayGroupID(of: annotation) == groupID else { return nil }
+                return AIAnnotationUndoRecord(page: page, annotation: annotation)
+            }
+        }
+        guard !records.isEmpty else { return 0 }
+        let snapshot = AIGroupDeletionSnapshot(document: document, group: group, records: records,
+            wasVisible: visibleAIHighlightGroupIDs.contains(groupID),
+            activeGroupID: activeAIHighlightGroupID, selectedAnnotationID: selectedAnnotationID)
+        setDeletedAIGroupPresence(snapshot, present: false)
+        return records.count
+    }
+
+    private struct AIGroupDeletionSnapshot {
+        let document: PDFDocument
+        let group: AIHighlightGroup
+        let records: [AIAnnotationUndoRecord]
+        let wasVisible: Bool
+        let activeGroupID: UUID?
+        let selectedAnnotationID: PDFAnnotationItem.ID?
+    }
+
+    private func setDeletedAIGroupPresence(_ snapshot: AIGroupDeletionSnapshot, present: Bool) {
+        guard canEditDocument, document === snapshot.document else { return }
+        if present {
+            registerAIHighlightGroup(snapshot.group, visible: snapshot.wasVisible)
+            for record in snapshot.records where record.annotation.page == nil {
+                record.annotation.shouldDisplay = snapshot.wasVisible
+                record.page.addAnnotation(record.annotation)
+            }
+            activeAIHighlightGroupID = snapshot.activeGroupID.flatMap { id in
+                visibleAIHighlightGroupIDs.contains(id) ? id : nil
+            }
+            selectedAnnotationID = snapshot.selectedAnnotationID
+        } else {
+            for record in snapshot.records where record.annotation.page === record.page {
+                record.page.removeAnnotation(record.annotation)
+            }
+            removeAIHighlightGroup(snapshot.group.id)
+        }
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.setDeletedAIGroupPresence(snapshot, present: !present)
+        }
+        undoManager?.setActionName(L10n.string("Delete AI Highlight Group"))
+        markAnnotationsChanged(action: "Delete AI Highlight Group", trigger: .pointer)
     }
 
     func selectDocumentSearchResult(_ result: PDFSearchResult) {
@@ -835,7 +1104,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     func isOriginalDocumentURL(_ destinationURL: URL) -> Bool {
-        destinationURL.libraryComparablePath == selectedPDFURL?.libraryComparablePath
+        selectedPDFURL.map { SafeDocumentExport.isSameFile(destinationURL, $0) } ?? false
     }
 
     func requestFreeTextNote(trigger: FeedbackTrigger? = nil) {
@@ -845,7 +1114,7 @@ final class PDFDocumentStore: ObservableObject {
 
         freeTextRequestID += 1
         postFeedback(
-            "Type a free text note on the page, then press Return.",
+            "Enter note text and adjust its size, then save.",
             action: "Add Free Text Note",
             trigger: trigger
         )
@@ -861,25 +1130,22 @@ final class PDFDocumentStore: ObservableObject {
                 AIAnnotationProvenance.classify($0).isAI
             } == true
         }
-        guard let aiSelection = hasAIAnnotations
-            ? requestAIAnnotationExportSelection()
-            : .include
-        else {
-            postFeedback(
-                "Export canceled.",
-                action: "Export Annotated Copy",
-                trigger: trigger
-            )
+        if hasAIAnnotations {
+            requestAIAnnotationExportSelection(trigger: trigger)
             return
         }
+        exportAnnotatedCopy(selection: .include, trigger: trigger)
+    }
 
+    private func exportAnnotatedCopy(selection: AIAnnotationExportSelection, trigger: FeedbackTrigger?) {
+        guard let document else { return }
         writePDF(
             document,
             suggestedName: suggestedFileName(suffix: "annotated"),
             successMessage: "Annotated copy exported",
             action: "Export Annotated Copy",
             trigger: trigger,
-            aiSelection: aiSelection
+            aiSelection: selection
         )
     }
 
@@ -888,7 +1154,7 @@ final class PDFDocumentStore: ObservableObject {
     }
 
     func deleteCurrentPageFromWorkingCopy(trigger: FeedbackTrigger? = nil) {
-        guard canEditDocument, let document else {
+        guard canEditDocument, document != nil else {
             return
         }
 
@@ -902,23 +1168,16 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "Delete page \(currentPageIndex + 1)?"
-        alert.informativeText = "Dogear will update the app-managed working copy. The original PDF will not be changed."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Delete from Working Copy")
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            postFeedback(
-                "Page deletion canceled.",
-                action: "Delete Page",
-                trigger: trigger
-            )
-            return
-        }
-
         let deletedPageIndex = currentPageIndex
+        requestConfirmation(title: "Delete page \(deletedPageIndex + 1)?",
+            message: "Dogear will update the app-managed working copy. The original PDF will not be changed.",
+            confirmTitle: "Delete from Working Copy", action: "Delete Page", trigger: trigger) { store in
+                store.performDeleteCurrentPage(at: deletedPageIndex, trigger: trigger)
+            }
+    }
+
+    private func performDeleteCurrentPage(at deletedPageIndex: Int, trigger: FeedbackTrigger?) {
+        guard canEditDocument, let document, document.pageCount > 1 else { return }
         guard let deletedPage = document.page(at: deletedPageIndex) else { return }
         let dogearsBeforeDeletion = dogears
         document.removePage(at: deletedPageIndex)
@@ -1026,9 +1285,12 @@ final class PDFDocumentStore: ObservableObject {
     @discardableResult
     func deletePagesFromWorkingCopy(
         at indexes: IndexSet,
-        trigger: FeedbackTrigger? = nil
+        trigger: FeedbackTrigger? = nil,
+        onDeleted: @escaping () -> Void = {}
     ) -> Bool {
-        guard canEditDocument, let document, !indexes.isEmpty else { return false }
+        guard canEditDocument, let document, !indexes.isEmpty,
+              indexes.allSatisfy({ $0 >= 0 && $0 < document.pageCount }),
+              pendingConfirmation == nil else { return false }
         guard document.pageCount - indexes.count >= 1 else {
             postFeedback(
                 "A PDF must keep at least one page.",
@@ -1039,21 +1301,18 @@ final class PDFDocumentStore: ObservableObject {
             return false
         }
 
-        let alert = NSAlert()
-        alert.messageText = indexes.count == 1
+        let title: String.LocalizationValue = indexes.count == 1
             ? "Delete the selected page?"
             : "Delete \(indexes.count) selected pages?"
-        alert.informativeText = "Dogear will update the app-managed working copy. The original PDF will not be changed."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Delete from Working Copy")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return false }
-
-        performPageArrangement(actionName: "Delete Pages", trigger: trigger) {
-            for index in indexes.sorted(by: >) {
-                document.removePage(at: index)
+        requestConfirmation(title: title,
+            message: "Dogear will update the app-managed working copy. The original PDF will not be changed.",
+            confirmTitle: "Delete from Working Copy", action: "Delete Pages", trigger: trigger,
+            scope: .pageOrganizer) { store in
+                store.performPageArrangement(actionName: "Delete Pages", trigger: trigger) {
+                    for index in indexes.sorted(by: >) { document.removePage(at: index) }
+                }
+                onDeleted()
             }
-        }
         return true
     }
 
@@ -1116,18 +1375,39 @@ final class PDFDocumentStore: ObservableObject {
         )
     }
 
-    func exportAnnotationsMarkdown(trigger: FeedbackTrigger? = nil) {
-        let markdown = MarkdownExportService.annotationsMarkdown(
-            documentName: selectedDocumentName,
-            annotations: annotations
-        )
+    func annotationsForExport(scope: AnnotationExportScope) -> [PDFAnnotationItem] {
+        switch scope {
+        case .all: return annotations
+        case .filtered: return filteredAnnotations
+        case .selected: return selectedAnnotation.map { [$0] } ?? []
+        }
+    }
 
-        writeMarkdown(
-            markdown,
-            suggestedName: suggestedMarkdownFileName(suffix: "annotations"),
-            action: "Export Annotations Markdown",
-            trigger: trigger
-        )
+    func exportAnnotationsMarkdown(scope: AnnotationExportScope? = nil, trigger: FeedbackTrigger? = nil) {
+        guard document != nil else { return }
+        guard let effectiveScope = scope else {
+            let firstAvailable = AnnotationExportScope.allCases.first { !annotationsForExport(scope: $0).isEmpty }
+            requestExportOptions(title: "Choose Markdown Export Range",
+                message: "All annotations includes hidden AI groups. Current filtered annotations uses the visible list, search and filters. Selected annotation exports the one selected item.",
+                confirmTitle: "Continue", allowsMultipleSelection: false,
+                options: AnnotationExportScope.allCases.map { range in
+                    let count = annotationsForExport(scope: range).count
+                    return .init(id: range.rawValue, title: "\(range.displayTitle) (\(count))",
+                        isEnabled: count > 0, isSelected: range == firstAvailable)
+                }, action: "Export Annotations Markdown", trigger: trigger) { store, selected in
+                    guard let raw = selected.first, let range = AnnotationExportScope(rawValue: raw) else { return }
+                    store.exportAnnotationsMarkdown(scope: range, trigger: trigger)
+                }
+            return
+        }
+        let exported = annotationsForExport(scope: effectiveScope)
+        guard !exported.isEmpty else {
+            postFeedback("No annotations in the selected export range.", kind: .warning, action: "Export Annotations Markdown", trigger: trigger)
+            return
+        }
+        let markdown = MarkdownExportService.annotationsMarkdown(documentName: selectedDocumentName, annotations: exported)
+        writeMarkdown(markdown, suggestedName: suggestedMarkdownFileName(suffix: "annotations-\(effectiveScope.rawValue)"),
+            action: "Export Annotations Markdown", trigger: trigger)
     }
 
     func exportFallbackKeywordOutline(trigger: FeedbackTrigger? = nil) {
@@ -1205,167 +1485,74 @@ final class PDFDocumentStore: ObservableObject {
         trigger: FeedbackTrigger?,
         aiSelection: AIAnnotationExportSelection = .include
     ) {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = suggestedName
-
-        guard panel.runModal() == .OK, let destinationURL = panel.url else {
+        // Capture bytes and the protected original before opening platform UI.
+        // A delayed picker can never export another document after a switch.
+        let originalURL = selectedPDFURL
+        let data: Data
+        do {
+            data = try AIAnnotationSelectiveExporter.dataRepresentation(of: document, selection: aiSelection)
+        } catch {
+            postFeedback("Export failed. Original PDF was not changed.", kind: .error, action: action, trigger: trigger)
+            return
+        }
+        guard let destination = SafeFileExportPicker.chooseDestination(suggestedName: suggestedName, contentType: .pdf) else {
             postFeedback("Export canceled.", action: action, trigger: trigger)
             return
         }
-
-        if isOriginalDocumentURL(destinationURL) {
-            postFeedback(
-                "Choose a different file name. The original PDF is not overwritten by default.",
-                kind: .warning,
-                action: action,
-                trigger: trigger
-            )
-            return
-        }
-
-        let data: Data
         do {
-            data = try AIAnnotationSelectiveExporter.dataRepresentation(
-                of: document,
-                selection: aiSelection
-            )
+            try SafeDocumentExport.write(data: data, to: destination, protecting: originalURL)
+            postFeedback("\(successMessage) to \(destination.lastPathComponent).", kind: .success, action: action, trigger: trigger)
+        } catch SafeDocumentExportError.originalDestination {
+            postFeedback(SafeDocumentExportError.originalDestination.localizedDescription,
+                kind: .warning, action: action, trigger: trigger)
         } catch {
-            postFeedback(
-                "Export failed. Original PDF was not changed.",
-                kind: .error,
-                action: action,
-                trigger: trigger
-            )
-            return
-        }
-
-        do {
-            try data.write(to: destinationURL, options: [.atomic])
-            postFeedback(
-                "\(successMessage) to \(destinationURL.lastPathComponent).",
-                kind: .success,
-                action: action,
-                trigger: trigger
-            )
-        } catch {
-            postFeedback(
-                "Export failed. Original PDF was not changed.",
-                kind: .error,
-                action: action,
-                trigger: trigger
-            )
+            postFeedback("Export failed. Original PDF was not changed.", kind: .error, action: action, trigger: trigger)
         }
     }
 
-    private func requestAIAnnotationExportSelection() -> AIAnnotationExportSelection? {
-        let alert = NSAlert()
-        alert.messageText = String(
-            localized: "Choose AI Highlight groups to export"
-        )
-        alert.informativeText = String(
-            localized: "Only the selected groups are written to the new compatible PDF copy. The open working copy and original PDF are unchanged."
-        )
-
+    private func requestAIAnnotationExportSelection(trigger: FeedbackTrigger?) {
         let groups = aiHighlightGroups.sorted { $0.createdAt > $1.createdAt }
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        var buttonsByGroupID: [UUID: NSButton] = [:]
-
-        for group in groups {
-            let title = "\(group.displayTitle)  (\(aiHighlightCount(in: group.id)))"
-            let button = NSButton(
-                checkboxWithTitle: title,
-                target: nil,
-                action: nil
-            )
-            button.state = visibleAIHighlightGroupIDs.contains(group.id) ? .on : .off
-            button.toolTip = group.question
-            stack.addArrangedSubview(button)
-            buttonsByGroupID[group.id] = button
+        var options = groups.map { group in
+            DocumentExportOptionsRequest.Option(id: group.id.uuidString,
+                title: "\(group.displayTitle)  (\(aiHighlightCount(in: group.id)))", detail: group.question,
+                isSelected: visibleAIHighlightGroupIDs.contains(group.id))
         }
-
-        if groups.isEmpty {
-            let button = NSButton(
-                checkboxWithTitle: String(localized: "Recovered AI Highlights"),
-                target: nil,
-                action: nil
-            )
-            button.state = showsAIGeneratedContent ? .on : .off
-            stack.addArrangedSubview(button)
-            buttonsByGroupID[AIAnnotationProvenance.legacyGroupID] = button
+        if options.isEmpty {
+            options = [.init(id: AIAnnotationProvenance.legacyGroupID.uuidString,
+                title: L10n.string("Recovered AI Highlights"), isSelected: showsAIGeneratedContent)]
         }
-
-        let contentHeight = max(28, CGFloat(buttonsByGroupID.count) * 26)
-        stack.frame = NSRect(
-            x: 0,
-            y: 0,
-            width: 360,
-            height: contentHeight
-        )
-        let scrollView = NSScrollView(
-            frame: NSRect(
-                x: 0,
-                y: 0,
-                width: 376,
-                height: min(contentHeight, 260)
-            )
-        )
-        scrollView.documentView = stack
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = contentHeight > 260
-        scrollView.autohidesScrollers = true
-        alert.accessoryView = scrollView
-        alert.addButton(withTitle: String(localized: "Export Selected Groups"))
-        alert.addButton(withTitle: String(localized: "Cancel"))
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        let selectedGroupIDs = Set(buttonsByGroupID.compactMap { groupID, button in
-            button.state == .on ? groupID : nil
-        })
-        return .selectedGroups(selectedGroupIDs)
+        requestExportOptions(title: "Choose AI Highlight groups to export",
+            message: "Only the selected groups are written to the new compatible PDF copy. The open working copy and original PDF are unchanged.",
+            confirmTitle: "Export Selected Groups", allowsMultipleSelection: true, options: options,
+            action: "Export Annotated Copy", trigger: trigger) { store, selected in
+                store.exportAnnotatedCopy(selection: .selectedGroups(Set(selected.compactMap(UUID.init(uuidString:)))), trigger: trigger)
+            }
     }
 
-    private func writeMarkdown(
-        _ markdown: String,
-        suggestedName: String,
-        action: String,
-        trigger: FeedbackTrigger?
-    ) {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.markdown]
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = suggestedName
-
-        guard panel.runModal() == .OK, let destinationURL = panel.url else {
+    private func writeMarkdown(_ markdown: String, suggestedName: String, action: String, trigger: FeedbackTrigger?) {
+        let data = Data(markdown.utf8)
+        let originalURL = selectedPDFURL
+        guard let destination = SafeFileExportPicker.chooseDestination(suggestedName: suggestedName, contentType: .markdown) else {
             postFeedback("Markdown export canceled.", action: action, trigger: trigger)
             return
         }
-
         do {
-            try markdown.write(to: destinationURL, atomically: true, encoding: .utf8)
-            postFeedback(
-                "Markdown exported to \(destinationURL.lastPathComponent).",
-                kind: .success,
-                action: action,
-                trigger: trigger
-            )
+            // An extension filter alone does not prohibit an original PDF
+            // destination; enforce the same pre-write rule as PDF export.
+            try SafeDocumentExport.write(data: data, to: destination, protecting: originalURL)
+            postFeedback("Markdown exported to \(destination.lastPathComponent).", kind: .success,
+                action: action, trigger: trigger)
+        } catch SafeDocumentExportError.originalDestination {
+            postFeedback(SafeDocumentExportError.originalDestination.localizedDescription,
+                kind: .warning, action: action, trigger: trigger)
         } catch {
-            postFeedback(
-                "Markdown export failed.",
-                kind: .error,
-                action: action,
-                trigger: trigger
-            )
+            postFeedback("Markdown export failed.", kind: .error, action: action, trigger: trigger)
         }
     }
 
     private func overwriteOriginalPDF(trigger: FeedbackTrigger?) {
-        guard canEditDocument, let document,
-              let selectedPDFURL
+        guard canEditDocument, document != nil,
+              selectedPDFURL != nil
         else {
             return
         }
@@ -1380,22 +1567,15 @@ final class PDFDocumentStore: ObservableObject {
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "Overwrite original PDF?"
-        alert.informativeText = "This writes the current working copy back to the original file. Export keeps the original unchanged."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Overwrite Original")
-        alert.addButton(withTitle: "Cancel")
+        requestConfirmation(title: "Overwrite original PDF?",
+            message: "This writes the current working copy back to the original file. Export keeps the original unchanged.",
+            confirmTitle: "Overwrite Original", action: "Save to Original", trigger: trigger) { store in
+                store.performOverwriteOriginalPDF(trigger: trigger)
+            }
+    }
 
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            postFeedback(
-                "Save to original canceled.",
-                action: "Save to Original",
-                trigger: trigger
-            )
-            return
-        }
-
+    private func performOverwriteOriginalPDF(trigger: FeedbackTrigger?) {
+        guard canEditDocument, let document, let selectedPDFURL, currentWorkingCopyURL != nil else { return }
         guard let data = document.dataRepresentationWithAIAnnotationsDisplayed() else {
             postFeedback(
                 "Could not prepare PDF data. Original PDF was not changed.",
@@ -1414,6 +1594,8 @@ final class PDFDocumentStore: ObservableObject {
 
         let documentID = openedDocumentID
         let generation = saveGeneration
+        let overwrittenFileID = currentLibraryFileID
+        let overwriteHandler = originalOverwriteHandler
         let didStartAccessing = selectedPDFURL.startAccessingSecurityScopedResource()
 
         hasUnsavedChanges = true
@@ -1426,6 +1608,9 @@ final class PDFDocumentStore: ObservableObject {
         saveQueue.enqueue(data: data, to: selectedPDFURL) { [weak self] result in
             if didStartAccessing {
                 selectedPDFURL.stopAccessingSecurityScopedResource()
+            }
+            if case .success = result, let overwrittenFileID {
+                overwriteHandler?(overwrittenFileID)
             }
 
             guard let self,
@@ -1472,10 +1657,11 @@ final class PDFDocumentStore: ObservableObject {
     private func registerUndoForRemovedAnnotation(
         _ annotation: PDFAnnotation,
         page: PDFPage,
+        popup: PDFAnnotation? = nil,
         actionName: String
     ) {
         undoManager?.registerUndo(withTarget: self) { target in
-            target.restoreAnnotation(annotation, to: page, actionName: actionName)
+            target.restoreAnnotation(annotation, to: page, popup: popup, actionName: actionName)
         }
         undoManager?.setActionName(actionName)
     }
@@ -1580,6 +1766,7 @@ final class PDFDocumentStore: ObservableObject {
             visibleGroupIDs: visibleAIHighlightGroupIDs,
             in: document
         )
+        notifyAnnotationDisplayChanged()
     }
 
     private func registerAIHighlightGroup(
@@ -1723,12 +1910,14 @@ final class PDFDocumentStore: ObservableObject {
     private func restoreAnnotation(
         _ annotation: PDFAnnotation,
         to page: PDFPage,
+        popup: PDFAnnotation? = nil,
         actionName: String
     ) {
-        guard annotation.page == nil else { return }
+        guard canEditDocument, page.document === document, annotation.page == nil else { return }
         page.addAnnotation(annotation)
+        if let popup, popup.page == nil { page.addAnnotation(popup) }
         undoManager?.registerUndo(withTarget: self) { target in
-            target.removeAnnotationForUndo(annotation, from: page, actionName: actionName)
+            target.removeAnnotationForUndo(annotation, from: page, popup: popup, actionName: actionName)
         }
         undoManager?.setActionName(actionName)
         finishUndoableDocumentMutation(actionName: actionName)
@@ -1737,11 +1926,13 @@ final class PDFDocumentStore: ObservableObject {
     private func removeAnnotationForUndo(
         _ annotation: PDFAnnotation,
         from page: PDFPage,
+        popup: PDFAnnotation? = nil,
         actionName: String
     ) {
-        guard annotation.page === page else { return }
+        guard canEditDocument, page.document === document, annotation.page === page else { return }
+        if let popup, popup.page === page { page.removeAnnotation(popup) }
         page.removeAnnotation(annotation)
-        registerUndoForRemovedAnnotation(annotation, page: page, actionName: actionName)
+        registerUndoForRemovedAnnotation(annotation, page: page, popup: popup, actionName: actionName)
         finishUndoableDocumentMutation(actionName: actionName)
     }
 
@@ -1816,6 +2007,7 @@ final class PDFDocumentStore: ObservableObject {
         selectedAnnotationID = nil
         selectedDocumentSearchResultID = nil
         refreshAnnotations()
+        notifyAnnotationDisplayChanged()
         refreshDocumentSearchResults(selectFirstResult: false)
         refreshDocumentOutlineAfterPageMutation()
         enqueueCurrentDocumentSave(
@@ -1823,6 +2015,11 @@ final class PDFDocumentStore: ObservableObject {
             action: actionName,
             trigger: .command(shortcut: "Command-Z")
         )
+    }
+
+    private func notifyAnnotationDisplayChanged() {
+        guard let document else { return }
+        NotificationCenter.default.post(name: .dogearAnnotationsChanged, object: document)
     }
 
     private struct PageArrangementSnapshot {

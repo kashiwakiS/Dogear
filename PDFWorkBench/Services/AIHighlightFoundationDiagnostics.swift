@@ -51,6 +51,76 @@ nonisolated enum AIHighlightFoundationDiagnostics {
                 "Page boundaries or repeated sentences were not preserved."
             )
 
+            let blockSnapshot = AIHighlightTextSnapshot(
+                fingerprint: "block-diagnostic",
+                pages: [AITextPageSnapshot(
+                    pageNumber: 1,
+                    text: "First block.\n\u{00A0}\nSecond block.",
+                    fingerprint: "block-page"
+                )]
+            )
+            let blockRegistry = try AISegmentRegistry(snapshot: blockSnapshot)
+            check(
+                blockRegistry.records.map(\.id.block) == [1, 2],
+                "Blank-line block splitting rejected the nonbreaking-space form."
+            )
+            let citationSnapshot = AIHighlightTextSnapshot(
+                fingerprint: "citation-diagnostic",
+                pages: [AITextPageSnapshot(
+                    pageNumber: 1,
+                    text: "Evidence sentence.6 Citation sentence.",
+                    fingerprint: "citation-page"
+                )]
+            )
+            let citationRegistry = try AISegmentRegistry(snapshot: citationSnapshot)
+            check(
+                citationRegistry.records.count == 2,
+                "A directly attached numeric citation merged adjacent sentences."
+            )
+            let technicalLabelSnapshot = AIHighlightTextSnapshot(
+                fingerprint: "technical-label-diagnostic",
+                pages: [AITextPageSnapshot(
+                    pageNumber: 1,
+                    text: "We compare model A. Results improve. See equation 2a. The result holds. U.S. policy remains stable.",
+                    fingerprint: "technical-label-page"
+                )]
+            )
+            let technicalLabelRegistry = try AISegmentRegistry(snapshot: technicalLabelSnapshot)
+            check(
+                technicalLabelRegistry.records.map(\.text) == [
+                    "We compare model A.",
+                    "Results improve.",
+                    "See equation 2a.",
+                    "The result holds.",
+                    "U.S. policy remains stable."
+                ],
+                "Single-letter technical labels or dotted abbreviations changed sentence boundaries."
+            )
+            let personInitialSnapshot = AIHighlightTextSnapshot(
+                fingerprint: "person-initial-diagnostic",
+                pages: [AITextPageSnapshot(
+                    pageNumber: 1,
+                    text: "J. Smith reported the result. According to J. Smith it holds. Ada J. Smith confirmed it. J. R. Doe replicated it. We compare model A. Results improve. Model A. Results remain stable. See equation 2a. The result holds.",
+                    fingerprint: "person-initial-page"
+                )]
+            )
+            let personInitialRegistry = try AISegmentRegistry(snapshot: personInitialSnapshot)
+            check(
+                personInitialRegistry.records.map(\.text) == [
+                    "J. Smith reported the result.",
+                    "According to J. Smith it holds.",
+                    "Ada J. Smith confirmed it.",
+                    "J. R. Doe replicated it.",
+                    "We compare model A.",
+                    "Results improve.",
+                    "Model A.",
+                    "Results remain stable.",
+                    "See equation 2a.",
+                    "The result holds."
+                ],
+                "Personal initials or technical-label sentence boundaries regressed."
+            )
+
             let searcher = AISimpleLexicalSearcher()
             let matches = searcher.search(
                 AISegmentSearchRequest(query: "stable", topK: 4),

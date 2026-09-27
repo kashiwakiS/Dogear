@@ -132,6 +132,22 @@ enum AIConfigurationAccessDiagnostics {
             check(missing.state.outcome == .missingKey && !missingStore.isAPIKeyConfigured && !missingStore.hasKeychainAPIKey,
                   "A current missing-key result did not update only its own configured state.")
 
+            let readOnlyReader = BlockingReader(values: [nil])
+            defer { readOnlyReader.releaseAll() }
+            let readOnlyStore = try makeStore(directory: directory, defaults: defaults,
+                reader: readOnlyReader, persistsMissingCredentialStatus: false)
+            let savedConfiguration = try Data(contentsOf: readOnlyStore.configurationURL)
+            readOnlyReader.releaseAll()
+            let readOnlyMissing = begin(readOnlyStore)
+            await readOnlyMissing.task.value
+            let unchangedConfiguration = try Data(contentsOf: readOnlyStore.configurationURL)
+            check(readOnlyMissing.state.outcome == .missingKey && !readOnlyStore.isAPIKeyConfigured
+                    && unchangedConfiguration == savedConfiguration,
+                  "Live acceptance credential resolution rewrote the user's saved configuration.")
+            _ = try? readOnlyStore.toolCallingProvider()
+            check(try Data(contentsOf: readOnlyStore.configurationURL) == savedConfiguration,
+                  "Synchronous credential resolution ignored the read-only availability policy.")
+
             let disabledReader = BlockingReader(values: ["connection-test-fixture"])
             defer { disabledReader.releaseAll() }
             let disabledStore = try makeStore(directory: directory, defaults: defaults, reader: disabledReader)
@@ -249,7 +265,8 @@ enum AIConfigurationAccessDiagnostics {
     }
 
     private static func makeStore(directory: URL, defaults: UserDefaults, mode: AISecretStorageMode = .keychain,
-                                  reader: (any AISecretReading)?, baseURL: String = "https://fixture.invalid/v1") throws -> AIConfigurationStore {
+                                  reader: (any AISecretReading)?, baseURL: String = "https://fixture.invalid/v1",
+                                  persistsMissingCredentialStatus: Bool = true) throws -> AIConfigurationStore {
         let configuration = AIProviderConfiguration(id: UUID(), name: "Credential fixture", baseURL: baseURL,
             model: "fixture", isCloudAIEnabled: true, hasCloudConsent: true, secretStorageMode: mode)
         let url = directory.appendingPathComponent("\(UUID().uuidString).json")
@@ -258,7 +275,8 @@ enum AIConfigurationAccessDiagnostics {
                                    "hasStoredKeychainAPIKey": mode == .keychain]
         try JSONSerialization.data(withJSONObject: object).write(to: url, options: .atomic)
         return AIConfigurationStore(configurationURL: url, legacyUserDefaults: defaults,
-                                    secretStore: MemorySecretStore(), secretReader: reader)
+                                    secretStore: MemorySecretStore(), secretReader: reader,
+                                    persistsMissingCredentialStatus: persistsMissingCredentialStatus)
     }
 
     private static func makeTextPDF() throws -> PDFDocument {
