@@ -483,6 +483,11 @@ private struct PDFWorkBenchCommands: Commands {
             .disabled(!canUseDocumentCommands)
         }
 
+        annotationAndPageCommands
+    }
+
+    @CommandsBuilder
+    private var annotationAndPageCommands: some Commands {
         CommandMenu(L10n.string("Annotation")) {
             Button(L10n.string("Add Highlight")) {
                 commandHandlers?.addHighlight()
