@@ -29,11 +29,17 @@ final class ResearchStore: ObservableObject {
     @Published private(set) var attachments: [ResearchAttachment] = []
     @Published private(set) var saveFailures: [String: String] = [:]
     @Published private(set) var loadWarnings: [String] = []
+    @Published private(set) var composerEditorOwners: [UUID: ResearchComposerLease] = [:]
+    @Published private(set) var composerConflicts: [ResearchComposerConflict] = []
 
     let rootURL: URL?
     private let fileManager: FileManager
     private let atomicWriter: (Data, URL) throws -> Void
     private var noteEditorOwners: [UUID: UUID] = [:]
+    private var composerPreparations: [UUID: () -> Bool] = [:]
+    private var composerTextReplacements: [UUID: () -> Void] = [:]
+    private var preparingComposers: Set<UUID> = []
+    private var draftTextRevisions: [UUID: Int] = [:]
     private enum NoteEditField { case title, body }
     private struct NoteEditBurst {
         var field: NoteEditField
@@ -73,10 +79,27 @@ final class ResearchStore: ObservableObject {
 
     @discardableResult
     func updateSession(_ session: ResearchSession) -> Bool {
+        if let previous = self.session(id: session.id), previous.draft.text != session.draft.text {
+            guard prepareComposerEditor(sessionID: session.id),
+                  self.session(id: session.id)?.draft.text == previous.draft.text else { return false }
+        }
+        return storeSession(session)
+    }
+
+    private func storeSession(_ session: ResearchSession, nativeComposerEdit: Bool = false) -> Bool {
         var value = session
+        if let applied = self.session(id: value.id)?.appliedComposerConflictIDs, !applied.isEmpty {
+            value.appliedComposerConflictIDs = (value.appliedComposerConflictIDs ?? []).union(applied)
+        }
+        let textChanged = self.session(id: value.id)?.draft.text != value.draft.text
+        if textChanged {
+            draftTextRevisions[value.id, default: 0] += 1
+        }
         value.updatedAt = Date()
         replace(value, in: &sessions)
-        return persist(value, category: "sessions", id: value.id)
+        let persisted = persist(value, category: "sessions", id: value.id)
+        if textChanged && !nativeComposerEdit { composerTextReplacements[value.id]?() }
+        return persisted
     }
 
     @discardableResult
@@ -84,6 +107,120 @@ final class ResearchStore: ObservableObject {
         guard var session = session(id: sessionID) else { return false }
         session.draft = draft
         return updateSession(session)
+    }
+
+    func composerSnapshot(sessionID: UUID) -> ResearchComposerSnapshot? {
+        session(id: sessionID).map { .init(text: $0.draft.text, textRevision: draftTextRevisions[sessionID, default: 0]) }
+    }
+
+    func composerOwner(sessionID: UUID) -> ResearchComposerLease? { composerEditorOwners[sessionID] }
+
+    /// Different workspaces must explicitly take over. A remounted workspace
+    /// with the same identity still prepares its old installation first.
+    func claimComposerEditor(sessionID: UUID, editorID: UUID, prepare: @escaping () -> Bool,
+                             didReplaceText: (() -> Void)? = nil) -> ResearchComposerLease? {
+        guard session(id: sessionID) != nil else { return nil }
+        if let existing = composerEditorOwners[sessionID] {
+            guard existing.editorID == editorID else { return nil }
+            guard prepareComposerEditor(sessionID: sessionID), composerEditorOwners[sessionID] == existing else { return nil }
+        }
+        return installComposerEditor(sessionID: sessionID, editorID: editorID, prepare: prepare, didReplaceText: didReplaceText)
+    }
+
+    func takeOverComposerEditor(sessionID: UUID, editorID: UUID, prepare: @escaping () -> Bool,
+                                didReplaceText: (() -> Void)? = nil) -> ResearchComposerLease? {
+        guard session(id: sessionID) != nil else { return nil }
+        if let existing = composerEditorOwners[sessionID] {
+            guard prepareComposerEditor(sessionID: sessionID), composerEditorOwners[sessionID] == existing else { return nil }
+        }
+        return installComposerEditor(sessionID: sessionID, editorID: editorID, prepare: prepare, didReplaceText: didReplaceText)
+    }
+
+    private func installComposerEditor(sessionID: UUID, editorID: UUID, prepare: @escaping () -> Bool,
+                                       didReplaceText: (() -> Void)?) -> ResearchComposerLease {
+        let lease = ResearchComposerLease(sessionID: sessionID, editorID: editorID, registrationID: UUID())
+        composerPreparations[sessionID] = prepare
+        composerTextReplacements[sessionID] = didReplaceText
+        composerEditorOwners[sessionID] = lease
+        return lease
+    }
+
+    @discardableResult
+    func releaseComposerEditor(_ lease: ResearchComposerLease) -> Bool {
+        guard composerEditorOwners[lease.sessionID] == lease,
+              prepareComposerEditor(sessionID: lease.sessionID), composerEditorOwners[lease.sessionID] == lease else { return false }
+        composerPreparations[lease.sessionID] = nil
+        composerTextReplacements[lease.sessionID] = nil
+        composerEditorOwners[lease.sessionID] = nil
+        return true
+    }
+
+    /// Callback capture must be weak. A preparation can publish Store changes,
+    /// so its registration is revalidated before transferring any capability.
+    private func prepareComposerEditor(sessionID: UUID) -> Bool {
+        guard let lease = composerEditorOwners[sessionID] else { return true }
+        guard !preparingComposers.contains(sessionID), let prepare = composerPreparations[sessionID] else { return false }
+        preparingComposers.insert(sessionID)
+        defer { preparingComposers.remove(sessionID) }
+        guard prepare(), composerEditorOwners[sessionID] == lease, session(id: sessionID) != nil else { return false }
+        return saveFailures[recordKey(category: "sessions", id: sessionID)] == nil
+            && !composerConflicts.contains(where: { $0.sessionID == sessionID
+                && saveFailures[recordKey(category: "composer-conflicts", id: $0.id)] != nil })
+    }
+
+    @discardableResult
+    func saveComposerText(_ text: String, lease: ResearchComposerLease,
+                          expectedTextRevision: Int) -> ResearchComposerTextSaveResult {
+        guard composerEditorOwners[lease.sessionID] == lease else { return .notOwner }
+        guard var session = session(id: lease.sessionID) else { return .missingSession }
+        guard draftTextRevisions[lease.sessionID, default: 0] == expectedTextRevision else { return .staleRevision }
+        if session.draft.text == text, saveFailures[recordKey(category: "sessions", id: lease.sessionID)] == nil {
+            return .accepted(revision: expectedTextRevision, persisted: true)
+        }
+        session.draft.text = text
+        // Even equal text retries a failed save; accepting an in-memory value
+        // and making it durable are separate facts.
+        let persisted = storeSession(session, nativeComposerEdit: true)
+        return .accepted(revision: draftTextRevisions[lease.sessionID, default: 0], persisted: persisted)
+    }
+
+    /// Retry canonical content, never an unacknowledged native snapshot.
+    func retryComposerPersistence(_ lease: ResearchComposerLease) -> Bool {
+        guard composerEditorOwners[lease.sessionID] == lease,
+              let session = session(id: lease.sessionID) else { return false }
+        return storeSession(session)
+    }
+
+    /// The recovery ID and merged text use the same atomic session record.
+    /// Auxiliary conflict resolution may fail without making a retry duplicate.
+    @discardableResult
+    func restoreComposerConflict(_ id: UUID, lease: ResearchComposerLease,
+                                 expectedTextRevision: Int) -> ResearchComposerTextSaveResult {
+        guard composerEditorOwners[lease.sessionID] == lease else { return .notOwner }
+        guard var session = session(id: lease.sessionID),
+              let record = composerConflicts.first(where: { $0.id == id && $0.sessionID == lease.sessionID }) else { return .missingSession }
+        guard draftTextRevisions[lease.sessionID, default: 0] == expectedTextRevision else { return .staleRevision }
+        if session.appliedComposerConflictIDs?.contains(id) != true {
+            if !record.text.isEmpty {
+                session.draft.text += (session.draft.text.isEmpty ? "" : "\n\n") + record.text
+            }
+            session.appliedComposerConflictIDs = (session.appliedComposerConflictIDs ?? []).union([id])
+        }
+        let persisted = storeSession(session)
+        return .accepted(revision: draftTextRevisions[lease.sessionID, default: 0], persisted: persisted)
+    }
+
+    @discardableResult
+    func saveComposerConflict(_ conflict: ResearchComposerConflict) -> Bool {
+        replace(conflict, in: &composerConflicts)
+        return persist(conflict, category: "composer-conflicts", id: conflict.id)
+    }
+
+    @discardableResult
+    func resolveComposerConflict(_ id: UUID) -> Bool {
+        guard var record = composerConflicts.first(where: { $0.id == id }) else { return false }
+        record.isResolved = true; record.updatedAt = Date()
+        return saveComposerConflict(record)
     }
 
     /// A nil result forbids starting the provider: the pending request could not be made durable.
@@ -125,11 +262,14 @@ final class ResearchStore: ObservableObject {
         operationResults: [String] = [],
         contextSummary: ResearchContextSummary? = nil
     ) -> Bool {
-        guard status != .running, var session = session(id: sessionID),
-              let index = session.messages.firstIndex(where: { $0.requestID == requestID && $0.status == .running }) else {
+        guard status != .running, let initial = session(id: sessionID),
+              let initialIndex = initial.messages.firstIndex(where: { $0.requestID == requestID && $0.status == .running }) else {
             return false
         }
-        let sentDraft = session.messages[index].input
+        let sentDraft = initial.messages[initialIndex].input
+        let canClear = status != .accepted || initial.draft != sentDraft || prepareComposerEditor(sessionID: sessionID)
+        guard var session = self.session(id: sessionID),
+              let index = session.messages.firstIndex(where: { $0.requestID == requestID && $0.status == .running }) else { return false }
         session.messages[index].answer = answer
         session.messages[index].evidence = evidence
         session.messages[index].status = status
@@ -138,8 +278,8 @@ final class ResearchStore: ObservableObject {
         session.messages[index].operationResults = operationResults
         if let contextSummary { session.messages[index].contextSummary = contextSummary }
         session.messages[index].completedAt = Date()
-        if status == .accepted && session.draft == sentDraft { session.draft = ResearchDraft() }
-        return updateSession(session)
+        if status == .accepted && canClear && session.draft == sentDraft { session.draft = ResearchDraft() }
+        return storeSession(session)
     }
 
     func interruptActiveRequests() {
@@ -245,8 +385,12 @@ final class ResearchStore: ObservableObject {
     /// Deletion is explicit and affects only this record. Notes, PDFs and attachments never cascade.
     @discardableResult
     func deleteSession(id: UUID) -> Bool {
+        guard prepareComposerEditor(sessionID: id) else { return false }
         guard removeRecord(category: "sessions", id: id) else { return false }
         sessions.removeAll { $0.id == id }
+        composerPreparations[id] = nil; composerEditorOwners[id] = nil
+        composerTextReplacements[id] = nil
+        draftTextRevisions[id] = nil
         return true
     }
 
@@ -266,6 +410,9 @@ final class ResearchStore: ObservableObject {
         }
         for note in notes where keys.contains(recordKey(category: "notes", id: note.id)) {
             _ = persist(note, category: "notes", id: note.id)
+        }
+        for conflict in composerConflicts where keys.contains(recordKey(category: "composer-conflicts", id: conflict.id)) {
+            _ = persist(conflict, category: "composer-conflicts", id: conflict.id)
         }
     }
 
@@ -428,6 +575,7 @@ final class ResearchStore: ObservableObject {
         sessions = loadRecords(ResearchSession.self, category: "sessions") { $0.schemaVersion == ResearchSession.currentSchemaVersion }
         notes = loadRecords(ResearchNote.self, category: "notes") { $0.schemaVersion == ResearchNote.currentSchemaVersion }
         attachments = loadRecords(ResearchAttachment.self, category: "attachments", validate: Self.isValid)
+        composerConflicts = loadRecords(ResearchComposerConflict.self, category: "composer-conflicts") { _ in true }
         sessions.sort { $0.updatedAt > $1.updatedAt }
         notes.sort { $0.updatedAt > $1.updatedAt }
         interruptActiveRequests()

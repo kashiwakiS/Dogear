@@ -42,6 +42,14 @@ final class LibraryStore: ObservableObject {
         }
 
         var preparedState = initialState
+        // Refresh app-owned locations before exposing records to PDF, Research
+        // or export callers. This preserves the catalog UUID and original path.
+        for index in preparedState.files.indices {
+            if let recorded = preparedState.files[index].workingCopyURL,
+               let relocated = self.workingCopyStore?.portableManagedCopyURL(for: recorded) {
+                preparedState.files[index].workingCopyPath = relocated.standardizedFileURL.path
+            }
+        }
         preparedState.ensureSystemGroups()
         if preparedState.schemaVersion < 4 {
             Self.migrateOrdering(in: &preparedState)
@@ -273,8 +281,20 @@ final class LibraryStore: ObservableObject {
         }
 
         state.files[index].lastPageIndex = safePageIndex
+        state.files[index].lastPageOffset = nil
         // Page changes do not affect Library ordering. Keep the immediate
         // in-memory update, coalescing only encoding and disk writes.
+        persistenceWriter.saveSoon(state)
+    }
+
+    /// Native PDF destination in page points (including viewport margins), not
+    /// normalized fractions. Uses the existing optional schema-6 offset field.
+    func updateReadingPosition(fileID: UUID, pageIndex: Int, offset: PDFPageOffset) {
+        guard pageIndex >= 0, offset.x.isFinite, offset.y.isFinite,
+              let index = state.files.firstIndex(where: { $0.id == fileID }) else { return }
+        guard state.files[index].lastPageIndex != pageIndex || state.files[index].lastPageOffset != offset else { return }
+        state.files[index].lastPageIndex = pageIndex
+        state.files[index].lastPageOffset = offset
         persistenceWriter.saveSoon(state)
     }
 
@@ -634,18 +654,31 @@ final class LibraryStore: ObservableObject {
     }
 
     func moveFile(_ file: LibraryFile, to targetGroup: LibraryGroup, from sourceGroup: LibraryGroup?) {
-        guard !targetGroup.isSystemGroup, !targetGroup.isArchived else {
+        // Menu actions can hold snapshots across archive/delete operations.
+        // Validate all current identities before removing any source membership.
+        guard let currentFile = state.files.first(where: { $0.id == file.id }),
+              let currentTarget = group(withID: targetGroup.id),
+              !currentTarget.isSystemGroup, !currentTarget.isArchived else {
             return
         }
+        let sourceGroupID: UUID?
+        if let sourceGroup {
+            guard let currentSource = group(withID: sourceGroup.id) else { return }
+            sourceGroupID = currentSource.id
+        } else {
+            sourceGroupID = nil
+        }
+        guard sourceGroupID != currentTarget.id else { return }
 
-        if let sourceGroup,
-           sourceGroup.id != LibraryGroup.ungroupedID {
-            state.memberships.removeAll { membership in
-                membership.fileID == file.id && membership.groupID == sourceGroup.id
+        var next = state
+        if let sourceGroupID, sourceGroupID != LibraryGroup.ungroupedID {
+            next.memberships.removeAll { membership in
+                membership.fileID == currentFile.id && membership.groupID == sourceGroupID
             }
         }
 
-        addFile(file.id, to: targetGroup.id, persistChange: false)
+        Self.addMemberships([currentFile.id], to: currentTarget.id, in: &next)
+        state = next
         persist()
     }
 
@@ -799,7 +832,9 @@ final class LibraryStore: ObservableObject {
     /// Older records may not yet persist their working-copy path. Resolve it
     /// against the stored original path before a bookmark refresh changes it.
     func openingWorkingCopyURL(for file: LibraryFile) -> URL? {
-        if let copy = file.workingCopyURL { return copy }
+        if let copy = file.workingCopyURL {
+            return workingCopyStore?.portableManagedCopyURL(for: copy) ?? copy
+        }
         guard let copy = workingCopyStore?.workingCopyURL(forOriginalURL: file.url),
               FileManager.default.fileExists(atPath: copy.path) else { return nil }
         return copy

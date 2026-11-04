@@ -144,11 +144,3 @@ struct LibraryFileInfoView: View {
         }
     }
 }
-
-/// Retains importer access through async validation and a possible decision alert.
-final class ScopedLibraryFileAccess {
-    let url: URL
-    private let didAccess: Bool
-    init(url: URL) { self.url = url; didAccess = url.startAccessingSecurityScopedResource() }
-    deinit { if didAccess { url.stopAccessingSecurityScopedResource() } }
-}

@@ -1,4 +1,3 @@
-import AppKit
 import Combine
 import Foundation
 import ImageIO
@@ -115,7 +114,7 @@ final class ResearchRuntime: ObservableObject {
         if textOnly { sentDraft.blocks.removeAll { $0.kind == .image } }
         let annotationChoice = sessionAllowsAnnotations(sessionID)
         let question = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let local = !cloudAvailable && question.isEmpty && draft.blocks.isEmpty
+        let local = !cloudAvailable && question.isEmpty && sentDraft.blocks.isEmpty
         let members = session.sourceSelection.groupID.map { library.files(in: $0).map(\.id) } ?? []
         let sourceIDs = session.sourceSelection.expandedFileIDs(groupMembers: members)
         let sourceSet = Set(sourceIDs)
@@ -275,7 +274,7 @@ final class ResearchRuntime: ObservableObject {
                         finishTrace(sessionID: sessionID, requestID: requestID, status: .accepted,
                                     cause: "local_outline", saved: saved)
                     } else {
-                        jobs[sessionID]?.phase = L10n.string("Preparing credentials; check for a macOS Keychain prompt…")
+                        jobs[sessionID]?.phase = AIKeychainPlatformText.preparing
                         let provider: any AIToolCallingProvider
                         if let providerResolver { provider = try await providerResolver(ticket) }
                         else { provider = try await configuration.toolCallingProvider(for: ticket) }

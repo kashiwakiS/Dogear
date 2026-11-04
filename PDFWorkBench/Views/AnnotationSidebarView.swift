@@ -75,10 +75,9 @@ struct AnnotationSidebarView: View {
             }, onDismiss: { freeTextEditDraft = nil })
                 .environment(\.locale, languageStore.locale)
         }
-        .onChange(of: documentStore.document.map(ObjectIdentifier.init)) { _, _ in
-            highlightEditDraft = nil
-            freeTextEditDraft = nil
-        }
+        // Keep the captured sheet and its unsubmitted values if the document
+        // changes externally. Shared commit validation rejects the old target;
+        // only explicit Cancel/Discard releases that editor.
     }
 
     private var annotationSection: some View {

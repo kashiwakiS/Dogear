@@ -9,3 +9,9 @@ extension URL {
         (try? resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
     }
 }
+
+extension URL {
+    var isPDFFileURL: Bool {
+        isFileURL && pathExtension.localizedCaseInsensitiveCompare("pdf") == .orderedSame
+    }
+}

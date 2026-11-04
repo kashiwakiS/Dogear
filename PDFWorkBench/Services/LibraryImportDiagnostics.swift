@@ -168,11 +168,12 @@ enum LibraryImportDiagnostics {
 
             let batchImport = LibraryImportController()
             let batchSessionID = UUID()
+            var openedAfterBatchCancel = false
             let subscription = batchImport.$completed.sink { count in
                 if count >= 24 { batchImport.cancel() }
             }
             batchImport.start(urls: [bulk], library: library, groupID: current.id,
-                              sessionID: batchSessionID, assignToGroup: false) { _, _ in }
+                              sessionID: batchSessionID, assignToGroup: false) { _, _ in openedAfterBatchCancel = true }
             try await waitUntilFinished(batchImport)
             withExtendedLifetime(subscription) {}
             let batchGroup = library.userGroups.first { $0.name == "Bulk" }
@@ -181,6 +182,53 @@ enum LibraryImportDiagnostics {
             check(batchGroup != nil && library.files(in: batchGroup!.id).count == 24,
                   "Batch cancellation discarded completed imports or kept processing the remaining files")
             check(batchImport.failures.isEmpty, "User cancellation was reported as a failed file")
+            check(!openedAfterBatchCancel, "A cancelled import retained its reader-open capability")
+
+            let rejected = LibraryImportController()
+            let stateBeforeRejection = library.state
+            rejected.start(urls: [first], library: library, groupID: current.id,
+                           sessionID: UUID(), assignToGroup: true, mayContinue: { false }) { _, _ in
+                check(false, "A closed import capability opened a reader")
+            }
+            check(!rejected.isVisible && !rejected.isRunning && library.state == stateBeforeRejection,
+                  "A request with a revoked capability scanned or changed the Library")
+            rejected.start(urls: [first], library: library, groupID: UUID(),
+                           sessionID: UUID(), assignToGroup: true) { _, _ in
+                check(false, "An unknown Group import opened a reader")
+            }
+            check(!rejected.isVisible && !rejected.isRunning && library.state == stateBeforeRejection,
+                  "An import into a missing Group created Library records")
+
+            let revoked = LibraryImportController()
+            var capabilityIsLive = true
+            var openedAfterRevocation = false
+            let revokedSubscription = revoked.$completed.sink { count in
+                if count >= 24 { capabilityIsLive = false }
+            }
+            revoked.start(urls: [bulk], library: library, groupID: current.id,
+                          sessionID: UUID(), assignToGroup: true, mayContinue: { capabilityIsLive }) { _, _ in
+                openedAfterRevocation = true
+            }
+            try await waitUntilFinished(revoked)
+            withExtendedLifetime(revokedSubscription) {}
+            check(revoked.cancelled && revoked.completed == 24 && revoked.failures.isEmpty,
+                  "Revoking an import capability did not stop at the completed batch")
+            check(!openedAfterRevocation, "Revoked scene import opened a reader after its batch completed")
+
+            guard let deletedOrigin = library.createGroup(named: "Deleted origin") else { throw FixtureError.group }
+            let deleted = LibraryImportController()
+            var openedAfterGroupDeletion = false
+            let deletedSubscription = deleted.$completed.sink { count in
+                if count >= 24 { _ = library.deleteGroup(deletedOrigin) }
+            }
+            deleted.start(urls: [bulk], library: library, groupID: deletedOrigin.id,
+                          sessionID: UUID(), assignToGroup: true) { _, _ in openedAfterGroupDeletion = true }
+            try await waitUntilFinished(deleted)
+            withExtendedLifetime(deletedSubscription) {}
+            check(deleted.cancelled && deleted.completed == 24 && deleted.failures.isEmpty,
+                  "Deleting the originating Group allowed later folder-import batches")
+            check(!openedAfterGroupDeletion && library.group(withID: deletedOrigin.id) == nil,
+                  "A deleted Group import reopened a reader or recreated the Group")
             let stored = try storage.load()
             check(stored?.files.map(\.id) == library.state.files.map(\.id)
                   && Set(stored?.memberships.map { "\($0.groupID):\($0.fileID):\($0.sortIndex)" } ?? [])

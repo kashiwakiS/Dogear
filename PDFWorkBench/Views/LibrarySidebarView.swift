@@ -162,7 +162,7 @@ struct LibrarySidebarView: View {
     }
 
     private func groupRow(for group: LibraryGroup) -> some View {
-        GroupRow(
+        LibraryNavigatorGroupRow(
             group: group,
             isExpanded: expandedGroupIDs.contains(group.id),
             isSelected: group.id == selectedGroupID,
@@ -231,7 +231,7 @@ struct LibrarySidebarView: View {
     }
 
     private func fileRow(for item: LibraryItem, in group: LibraryGroup) -> some View {
-        LibraryFileRow(
+        LibraryNavigatorFileRow(
             item: item,
             markerColor: duplicateGroupColor(for: item),
             isUnavailable: isUnavailable(item),
@@ -339,22 +339,13 @@ struct LibrarySidebarView: View {
     }
 
     private var filteredSidebarGroups: [LibraryGroup] {
-        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !selectedTag.isEmpty else {
-            return libraryStore.sidebarGroups
-        }
-        return libraryStore.sidebarGroups.filter { !displayedFiles(in: $0).isEmpty }
+        libraryStore.navigatorGroups(selectedGroupID: selectedGroupID, sessionID: sessionID,
+                                     query: query, selectedTag: selectedTag)
     }
 
     private func displayedFiles(in group: LibraryGroup) -> [LibraryItem] {
-        let files = group.id == selectedGroupID
-            ? libraryStore.filesForWindow(in: group.id, sessionID: sessionID)
-            : libraryStore.files(in: group.id)
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return files.filter { file in
-            (selectedTag.isEmpty || file.tags.contains(selectedTag)) &&
-            (needle.isEmpty || file.displayName.localizedCaseInsensitiveContains(needle) ||
-             file.tags.contains(where: { $0.localizedCaseInsensitiveContains(needle) }))
-        }
+        libraryStore.navigatorFiles(in: group.id, selectedGroupID: selectedGroupID, sessionID: sessionID,
+                                    query: query, selectedTag: selectedTag)
     }
 
     private func toggleExpansion(of group: LibraryGroup) {
@@ -447,7 +438,7 @@ struct LibrarySidebarView: View {
     }
 
 
-    private var allTags: [String] { Array(Set(libraryStore.allFiles.flatMap(\.tags))).sorted() }
+    private var allTags: [String] { libraryStore.navigatorTags }
     private var selectedFileIDs: [UUID] {
         libraryStore.allFiles.filter { file in selectedRows.contains(where: { $0.fileID == file.id }) }.map(\.id)
     }
@@ -492,35 +483,13 @@ struct LibrarySidebarView: View {
     }
 
     private func duplicateGroupColor(for item: LibraryItem) -> Color? {
-        let duplicateNames = duplicateDisplayNames()
-        let itemName = normalizedDisplayName(item)
-
-        guard let index = duplicateNames.firstIndex(of: itemName) else {
-            return nil
-        }
-
-        return duplicateMarkerPalette[index % duplicateMarkerPalette.count]
-    }
-
-    private func duplicateDisplayNames() -> [String] {
-        Dictionary(grouping: libraryStore.allFiles, by: normalizedDisplayName)
-            .filter { $0.value.count > 1 }
-            .map(\.key)
-            .sorted()
-    }
-
-    private func normalizedDisplayName(_ item: LibraryItem) -> String {
-        item.displayName.lowercased()
+        LibraryNavigatorFileStyle.markerColor(for: item, in: libraryStore.allFiles)
     }
 
     private func isUnavailable(_ item: LibraryItem) -> Bool {
-        item.isUnavailable
-            || (item.bookmarkData == nil && !FileManager.default.fileExists(atPath: item.path))
+        LibraryNavigatorFileStyle.isUnavailable(item)
     }
 
-    private var duplicateMarkerPalette: [Color] {
-        [.green, .yellow, .orange, .blue, .pink, .purple]
-    }
 }
 
 private struct LibraryScrollerConfigurator: NSViewRepresentable {
@@ -644,52 +613,6 @@ private extension NSView {
     }
 }
 
-private struct GroupRow: View {
-    let group: LibraryGroup
-    let isExpanded: Bool
-    let isSelected: Bool
-    let onToggleExpansion: () -> Void
-
-    @ObservedObject private var languageStore = AppLanguageStore.shared
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Button(action: onToggleExpansion) {
-                Image(systemName: groupIconName)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                    .frame(width: 18, height: 20)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(isExpanded ? "Collapse \(displayName)" : "Expand \(displayName)")
-
-            Text(displayName)
-                .fontWeight(isSelected ? .semibold : .regular)
-                .lineLimit(1)
-
-            Spacer(minLength: 6)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var displayName: String {
-        group.localizedName(language: languageStore.selection)
-    }
-
-    private var groupIconName: String {
-        if group.isSystemGroup {
-            return isExpanded ? "tray.fill" : "tray"
-        }
-
-        if group.isArchived {
-            return "archivebox"
-        }
-
-        return isExpanded ? "folder.fill" : "folder"
-    }
-}
-
 private struct GroupInsertionOverlay: View {
     let isActive: Bool
 
@@ -707,53 +630,6 @@ private struct GroupInsertionOverlay: View {
         .frame(height: 10)
         .contentShape(Rectangle())
         .accessibilityHidden(true)
-    }
-}
-
-private struct LibraryFileRow: View {
-    let item: LibraryItem
-    let markerColor: Color?
-    let isUnavailable: Bool
-    let isTemporary: Bool
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 7) {
-            Image(systemName: "doc")
-                .font(.system(size: 15, weight: .regular))
-                .foregroundStyle(.tertiary)
-                .frame(width: 18, height: 20)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.displayName)
-                    .lineLimit(1)
-                    .foregroundStyle(isUnavailable ? .secondary : .primary)
-
-                if !item.tags.isEmpty {
-                    Text(item.tags.joined(separator: ", "))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Spacer(minLength: 8)
-
-            if isTemporary {
-                Image(systemName: "pin.slash")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .help("Temporary in this window")
-            }
-
-            if let markerColor {
-                DuplicateLibraryMarker(color: markerColor)
-                    .help(item.path)
-                    .padding(.trailing, 2)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .opacity(isUnavailable ? 0.55 : 1)
     }
 }
 
@@ -1124,25 +1000,4 @@ private struct LibraryFileDropDelegate: DropDelegate {
             }
         )
     }
-}
-
-private struct DuplicateLibraryMarker: View {
-    let color: Color
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(color)
-
-            Circle()
-                .stroke(Color.primary.opacity(0.25), lineWidth: 0.5)
-        }
-        .frame(width: 8, height: 8)
-        .accessibilityLabel("Duplicate filename marker")
-    }
-}
-
-private struct LibraryFileSelection: Hashable {
-    let fileID: UUID
-    let groupID: UUID
 }

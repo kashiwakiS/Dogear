@@ -38,7 +38,7 @@ nonisolated enum AIHighlightProgressPhase: Equatable, Sendable {
         case .committingBatch:
             return L10n.string("Applying verified highlights…")
         case .waitingForCredentials:
-            return L10n.string("Preparing credentials; check for a macOS Keychain prompt…")
+            return AIKeychainPlatformText.preparing
         case .waitingForProvider:
             return L10n.string("Waiting for the AI provider…")
         case .retrying:

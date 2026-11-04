@@ -30,7 +30,7 @@ enum ResearchCommandDiagnostics {
             else { state.referenceFileID = fileID; state.referencePageIndex = page }
         }, setZoom: { zoom in
             switch zoom {
-            case .fit: state.zoomMode = "fit"; state.zoomPercent = 100
+            case .fit, .fitWidth: state.zoomMode = "fit"; state.zoomPercent = 100
             case .percent(let value): state.zoomMode = "custom"; state.zoomPercent = value
             }
         }, setWideAI: { state.wideAI = $0 }, setGroupVisible: { fileID, id, visible in

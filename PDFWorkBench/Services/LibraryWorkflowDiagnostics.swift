@@ -7,6 +7,11 @@ enum LibraryWorkflowDiagnostics {
     static func run() async -> (checks: Int, failures: [String]) {
         var checks = 0
         var failures: [String] = []
+        do {
+            let relocation = try WorkingCopyRelocationDiagnostics.run()
+            checks += relocation.checks
+            failures += relocation.failures
+        } catch { checks += 1; failures.append("Sandbox relocation fixture failed: \(error)") }
         func check(_ condition: Bool, _ message: String) {
             checks += 1
             if !condition { failures.append(message) }
@@ -42,6 +47,8 @@ enum LibraryWorkflowDiagnostics {
 
             let copies = try PDFWorkingCopyStore(directoryURL: root.appendingPathComponent("copies"))
             try manager.createDirectory(at: copies.directoryURL, withIntermediateDirectories: true)
+            try exerciseCapturedSingleMove(root: root.appendingPathComponent("single-move"),
+                defaults: defaults, workingCopyStore: copies, check: check)
             let storage = try LibraryJSONStore(stateURL: root.appendingPathComponent("library/state.json"))
             let library = LibraryStore(userDefaults: defaults, storage: storage, workingCopyStore: copies)
             let file = library.upsertOpenedURL(original, refreshBookmark: false)
@@ -255,6 +262,101 @@ enum LibraryWorkflowDiagnostics {
             check(false, "Library workflow fixture failed: \(error.localizedDescription)")
         }
         return (checks, failures)
+    }
+
+    private static func exerciseCapturedSingleMove(root: URL, defaults: UserDefaults,
+                                                   workingCopyStore: PDFWorkingCopyStore,
+                                                   check: (Bool, String) -> Void) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        let original = root.appendingPathComponent("source.pdf")
+        let originalBytes = Data("Membership changes leave this original intact.".utf8)
+        try originalBytes.write(to: original)
+        let storage = try LibraryJSONStore(stateURL: root.appendingPathComponent("state.json"))
+        let library = LibraryStore(userDefaults: defaults, storage: storage, workingCopyStore: workingCopyStore)
+        let file = library.upsertOpenedURL(original, refreshBookmark: false)
+        let existing = library.upsertOpenedURL(root.appendingPathComponent("target-member.pdf"), refreshBookmark: false)
+        let ungrouped = library.upsertOpenedURL(root.appendingPathComponent("ungrouped.pdf"), refreshBookmark: false)
+        let temporary = library.upsertOpenedURL(root.appendingPathComponent("temporary.pdf"), refreshBookmark: false)
+        let removed = library.upsertOpenedURL(root.appendingPathComponent("removed.pdf"), refreshBookmark: false)
+        let source = try library.createGroup(named: "Move source", containing: [file.id])
+        let other = try library.createGroup(named: "Other membership", containing: [file.id, temporary.id])
+        let target = try library.createGroup(named: "Move target", containing: [existing.id])
+        func unchanged(_ message: String, action: () -> Void) throws {
+            let before = library.state
+            let persistedBefore = try storage.load()
+            action()
+            let persistedAfter = try storage.load()
+            check(library.state == before && persistedAfter == persistedBefore && library.isFile(file, in: source), message)
+        }
+
+        let sameGroupPersisted = try storage.load()
+        try unchanged("Move within the same Group changed membership identity/order/time or persisted state.") {
+            library.moveFile(file, to: source, from: source)
+        }
+        let sameGroupReload = LibraryStore(userDefaults: defaults, storage: storage, workingCopyStore: workingCopyStore)
+        check(sameGroupReload.state == sameGroupPersisted,
+              "A same-Group Move changed the exact persisted Library snapshot after reload.")
+        check(library.setGroupArchived(target, archived: true), "Stale-move fixture did not archive its current target.")
+        try unchanged("A captured active target archived before Move removed its source membership or changed persisted state.") {
+            library.moveFile(file, to: target, from: source)
+        }
+        guard let archivedTarget = library.group(withID: target.id) else { throw LibraryWorkflowError.invalidGroup }
+        let deletedTarget = try library.createGroup(named: "Deleted target", containing: [])
+        check(library.deleteGroup(deletedTarget), "Stale-move fixture did not delete its target.")
+        try unchanged("A captured target deleted before Move removed its source membership or changed persisted state.") {
+            library.moveFile(file, to: deletedTarget, from: source)
+        }
+        check(library.setGroupArchived(target, archived: false), "Stale-move fixture did not restore its current target.")
+        let deletedSource = try library.createGroup(named: "Deleted source", containing: [])
+        check(library.deleteGroup(deletedSource), "Stale-move fixture did not delete its source identity.")
+        try unchanged("A captured deleted source unexpectedly assigned a current target.") {
+            library.moveFile(file, to: target, from: deletedSource)
+        }
+        check(library.remove(removed), "Stale-move fixture did not remove its file identity.")
+        try unchanged("A captured removed Library file produced a dangling membership.") {
+            library.moveFile(removed, to: target, from: source)
+        }
+        try unchanged("Move to the system Ungrouped target changed existing membership.") {
+            library.moveFile(file, to: .ungrouped, from: source)
+        }
+
+        // The snapshot says archived, but the actual target has been restored.
+        library.moveFile(file, to: archivedTarget, from: source)
+        check(!library.isFile(file, in: source) && library.isFile(file, in: other)
+                && library.files(in: target.id).map(\.id) == [existing.id, file.id],
+              "Move did not use the restored current target or lost another membership/target order.")
+        let reloaded = LibraryStore(userDefaults: defaults, storage: storage, workingCopyStore: workingCopyStore)
+        check(!reloaded.isFile(file, in: source) && reloaded.isFile(file, in: other)
+                && reloaded.files(in: target.id).map(\.id) == [existing.id, file.id],
+              "A valid single-file Move did not persist its source/target/other membership rules.")
+        library.addFile(file, to: source)
+        let existingTargetMembership = library.state.memberships.first { $0.fileID == file.id && $0.groupID == target.id }
+        library.moveFile(file, to: target, from: source)
+        let targetMemberships = library.state.memberships.filter { $0.fileID == file.id && $0.groupID == target.id }
+        check(!library.isFile(file, in: source)
+                && existingTargetMembership != nil && targetMemberships.count == 1
+                && targetMemberships.first == existingTargetMembership,
+              "Moving an existing target member duplicated or reordered that membership.")
+        library.addFile(file, to: source)
+        check(library.setGroupArchived(source, archived: true), "Move fixture did not archive its source.")
+        library.moveFile(file, to: target, from: source)
+        check(!library.isFile(file, in: source) && library.isFile(file, in: target) && library.isFile(file, in: other),
+              "A legal Mac move out of an archived source lost its existing behavior.")
+        library.moveFile(ungrouped, to: target, from: .ungrouped)
+        check(library.isFile(ungrouped, in: target) && !library.isFile(ungrouped, in: .ungrouped)
+                && !library.state.memberships.contains { $0.groupID == LibraryGroup.ungroupedID },
+              "Moving from virtual Ungrouped created a system membership or failed to assign its target.")
+        let temporarySource = try library.createGroup(named: "Temporary source", containing: [])
+        library.moveFile(temporary, to: target, from: temporarySource)
+        check(library.isFile(temporary, in: target) && library.isFile(temporary, in: other),
+              "Moving a temporary non-member file removed unrelated membership.")
+        library.moveFile(temporary, to: temporarySource, from: nil)
+        check(library.isFile(temporary, in: temporarySource) && library.isFile(temporary, in: target)
+                && library.isFile(temporary, in: other),
+              "Move with no source did not retain its existing add-only behavior.")
+        check((try? Data(contentsOf: original)) == originalBytes,
+              "Group Move rewrote the original PDF bytes.")
     }
 }
 

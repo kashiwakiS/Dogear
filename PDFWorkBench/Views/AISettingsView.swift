@@ -283,7 +283,7 @@ struct AISettingsView: View {
 
     private var privacyDescription: String {
         let storageDescription = configurationStore.configuration.secretStorageMode == .keychain
-            ? L10n.string("The API key is stored in macOS Keychain and cannot be displayed or exported by Dogear.")
+            ? AIKeychainPlatformText.privacy
             : L10n.string("The active API key is stored as plaintext in the local configuration file, protected only by current-user file permissions (0600). Any retained Keychain key is ignored until Keychain storage is selected again.")
         return L10n.string("Research conversations and notes are saved locally. Send shares your question, bounded selected history, source excerpts from the files or Group you choose, and images you explicitly attach with the configured provider. It does not upload complete PDFs. Each request starts a new provider workflow; within that request, provider-stored responses or temporary memory replay may be used. Restoring local history never sends a request automatically. Deleting local history does not delete data retained by the provider under its own policy.") + "\n\n" + storageDescription
     }

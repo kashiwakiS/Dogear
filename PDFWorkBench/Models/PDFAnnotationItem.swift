@@ -15,18 +15,8 @@ enum AnnotationExportScope: String, CaseIterable, Identifiable {
     }
 }
 
-/// Keeps the actual PDF objects so a sheet cannot edit a replacement document
-/// or an unrelated unnamed annotation after its page index changes.
-struct HighlightEditDraft: Identifiable {
-    let id = UUID()
-    let document: PDFDocument
-    let annotation: PDFAnnotation
-    let quote: String
-    let color: PDFPlatformColor
-    let comment: String
-}
-
 extension Notification.Name {
+    static let dogearDocumentStructureChanged = Notification.Name("DogearDocumentStructureChanged")
     static let dogearAnnotationsChanged = Notification.Name("DogearAnnotationsChanged")
 }
 

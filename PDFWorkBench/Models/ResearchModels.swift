@@ -100,6 +100,9 @@ nonisolated struct ResearchSession: Codable, Equatable, Sendable, Identifiable {
     var title: String
     var sourceSelection: ResearchSourceSelection = ResearchSourceSelection()
     var draft: ResearchDraft = ResearchDraft()
+    /// Nil in legacy records. Recovery identity is committed atomically with
+    /// merged input so a failed auxiliary archive cannot append twice.
+    var appliedComposerConflictIDs: Set<UUID>? = nil
     var messages: [ResearchMessage] = []
     var createdAt: Date = Date()
     var updatedAt: Date = Date()

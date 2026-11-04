@@ -148,8 +148,11 @@ enum GroupWorkspacePersistenceDiagnostics {
         secondWindow.contentView = NSView(frame: frame)
         let firstView = HighlightingPDFView(frame: NSRect(x: 0, y: 0, width: 240, height: 300))
         let secondView = HighlightingPDFView(frame: NSRect(x: 250, y: 0, width: 240, height: 300))
-        let firstManager = UndoManager()
-        let secondManager = UndoManager()
+        let groupID = UUID()
+        let firstWorkspace = GroupWorkspaceState(id: UUID(), groupID: groupID)
+        let secondWorkspace = GroupWorkspaceState(id: UUID(), groupID: groupID)
+        let firstManager = firstWorkspace.undoManager
+        let secondManager = secondWorkspace.undoManager
         firstManager.groupsByEvent = false
         secondManager.groupsByEvent = false
         firstView.workspaceUndoManager = firstManager

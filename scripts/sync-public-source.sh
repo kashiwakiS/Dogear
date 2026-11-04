@@ -42,9 +42,11 @@ git -C "$SOURCE_WORKTREE" archive "$source_commit" -- \
   Branding/AppIcon/Dogear-AppIcon-Source.png \
   Config \
   PDFWorkBench \
+  PDFWorkBenchIPad \
   PDFWorkBench.xcodeproj/project.pbxproj \
   PDFWorkBench.xcodeproj/project.xcworkspace/contents.xcworkspacedata \
   PDFWorkBench.xcodeproj/xcshareddata/xcschemes/PDFWorkBench.xcscheme \
+  PDFWorkBench.xcodeproj/xcshareddata/xcschemes/PDFWorkBenchIPad.xcscheme \
   scripts/model-assets/BGE-MIT-LICENSE.txt \
   scripts/prepare-bge-small-en.py \
   scripts/run-ai-diagnostics.sh \
@@ -53,6 +55,7 @@ git -C "$SOURCE_WORKTREE" archive "$source_commit" -- \
 rsync -a --delete "$staging/Branding/" "$PUBLIC_ROOT/Branding/"
 rsync -a --delete "$staging/Config/" "$PUBLIC_ROOT/Config/"
 rsync -a --delete "$staging/PDFWorkBench/" "$PUBLIC_ROOT/PDFWorkBench/"
+rsync -a --delete "$staging/PDFWorkBenchIPad/" "$PUBLIC_ROOT/PDFWorkBenchIPad/"
 rsync -a --delete "$staging/PDFWorkBench.xcodeproj/" "$PUBLIC_ROOT/PDFWorkBench.xcodeproj/"
 
 # Keep source-support files needed to prepare the optional local retrieval
@@ -76,7 +79,7 @@ perl -0pi -e 's{\s*<PostActions>.*?</PostActions>}{}s' "$scheme"
 # Remove Xcode's machine/user attribution header from the public snapshot.
 while IFS= read -r -d '' swift_file; do
   perl -ni -e 'print unless m{^\s*//\s+Created by .+ on .+\.\s*$}' "$swift_file"
-done < <(find "$PUBLIC_ROOT/PDFWorkBench" -type f -name '*.swift' -print0)
+done < <(find "$PUBLIC_ROOT/PDFWorkBench" "$PUBLIC_ROOT/PDFWorkBenchIPad" -type f -name '*.swift' -print0)
 
 "$PUBLIC_ROOT/scripts/set-version.sh" "$version" "$build"
 metadata="$PUBLIC_ROOT/.release-source.tmp"
