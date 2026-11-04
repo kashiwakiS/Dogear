@@ -242,13 +242,14 @@ nonisolated enum AIEvidenceRetrievalFactory {
             Data("single-lexical-source-slot-v2|document=\(documentNumber)".utf8)
         )
         let prefix = String(digest.prefix(32))
-        let uuidText = [
+        let uuidComponents: [String] = [
             String(prefix.prefix(8)),
             String(prefix.dropFirst(8).prefix(4)),
             String(prefix.dropFirst(12).prefix(4)),
             String(prefix.dropFirst(16).prefix(4)),
             String(prefix.dropFirst(20).prefix(12))
-        ].joined(separator: "-")
+        ]
+        let uuidText = uuidComponents.joined(separator: "-")
         // SHA-256 hex always forms a valid UUID spelling. Keep an explicit
         // fallback so malformed future hash implementations remain fail-safe.
         let fileID = UUID(uuidString: uuidText)
