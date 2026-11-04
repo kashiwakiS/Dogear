@@ -272,10 +272,14 @@ nonisolated struct AIBM25PreparedIndex: Sendable {
                 }
             }
         }
-        return scores.map { AISegmentSearchResult(id: $0.key, score: $0.value) }
-            .sorted { $0.score == $1.score ? $0.id < $1.id : $0.score > $1.score }
-            .prefix(min(100, max(1, request.topK)))
-            .map { $0 }
+        let results: [AISegmentSearchResult] = scores.map { entry in
+            AISegmentSearchResult(id: entry.key, score: entry.value)
+        }
+        let rankedResults = results.sorted { lhs, rhs in
+            if lhs.score == rhs.score { return lhs.id < rhs.id }
+            return lhs.score > rhs.score
+        }
+        return Array(rankedResults.prefix(min(100, max(1, request.topK))))
     }
 
     func scopedStatistics(query: String, scope: AISegmentScope = AISegmentScope()) -> AIBM25ScopedStatistics {
