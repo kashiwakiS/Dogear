@@ -504,15 +504,25 @@ enum FreeTextEditingDiagnostics {
     }
 
     private static func bluePixels(_ bytes: [UInt8]) -> Int {
-        stride(from: 0, to: bytes.count, by: 4).filter {
-            Int(bytes[$0 + 2]) > Int(bytes[$0]) + 50 && Int(bytes[$0 + 2]) > Int(bytes[$0 + 1]) + 50
-        }.count
+        var count = 0
+        for index in stride(from: 0, to: bytes.count, by: 4) {
+            let channel = Int(bytes[index + 2])
+            let red = Int(bytes[index])
+            let other = Int(bytes[index + 1])
+            if channel > red + 50 && channel > other + 50 { count += 1 }
+        }
+        return count
     }
 
     private static func greenPixels(_ bytes: [UInt8]) -> Int {
-        stride(from: 0, to: bytes.count, by: 4).filter {
-            Int(bytes[$0 + 1]) > Int(bytes[$0]) + 50 && Int(bytes[$0 + 1]) > Int(bytes[$0 + 2]) + 50
-        }.count
+        var count = 0
+        for index in stride(from: 0, to: bytes.count, by: 4) {
+            let channel = Int(bytes[index + 1])
+            let red = Int(bytes[index])
+            let other = Int(bytes[index + 2])
+            if channel > red + 50 && channel > other + 50 { count += 1 }
+        }
+        return count
     }
 
     private static func require<T>(_ value: T?) throws -> T {
