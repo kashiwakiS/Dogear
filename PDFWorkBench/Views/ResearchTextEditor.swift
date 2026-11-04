@@ -1,6 +1,33 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
+
+/// The platform adapter finishes the exact installed composer before the
+/// shared editing owner grants another window access to its draft.
+@MainActor
+final class ResearchTextEditingCommands: ObservableObject {
+    private weak var editor: ResearchNativeTextView?
+    func register(_ editor: ResearchNativeTextView) { self.editor = editor }
+    var hasMarkedText: Bool { editor?.hasMarkedText() == true }
+    func focus(identity: UUID) {
+        guard let editor, editor.editorIdentity == identity, editor.isEditable,
+              let window = editor.window, window.isKeyWindow else { return }
+        if let current = window.firstResponder as? NSTextView, current !== editor { return }
+        window.makeFirstResponder(editor)
+    }
+    @discardableResult
+    func finishEditing(identity: UUID) -> Bool {
+        guard let editor else { return true }
+        guard editor.editorIdentity == identity else { return false }
+        editor.commitCurrentText()
+        if editor.window?.firstResponder === editor { _ = editor.window?.makeFirstResponder(nil) }
+        return true
+    }
+    func unregister(_ editor: ResearchNativeTextView) {
+        if self.editor === editor { self.editor = nil }
+    }
+}
 
 /// A native text system keeps IME composition, selection, paste and editor Undo independent of PDF editing.
 struct ResearchTextEditor: NSViewRepresentable {
@@ -11,6 +38,11 @@ struct ResearchTextEditor: NSViewRepresentable {
     var onQuote: ((String) -> Void)? = nil
     var onPasteImage: ((Data, String) -> Void)? = nil
     var onEditingBoundary: (() -> Void)? = nil
+    var commands: ResearchTextEditingCommands? = nil
+    var identity: UUID? = nil
+    var composerEditing: ResearchComposerEditingSession? = nil
+    var composerIsActive = true
+    var onExternalTextApplied: ((String) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -25,7 +57,7 @@ struct ResearchTextEditor: NSViewRepresentable {
         let editor = ResearchNativeTextView(frame: .zero)
         editor.delegate = context.coordinator
         editor.isRichText = false
-        editor.isEditable = isEditable
+        editor.isEditable = context.coordinator.isEditable
         editor.isSelectable = true
         editor.allowsUndo = true
         editor.usesFindPanel = true
@@ -40,46 +72,235 @@ struct ResearchTextEditor: NSViewRepresentable {
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
         editor.textContainer?.widthTracksTextView = true
-        editor.string = text
+        editor.string = context.coordinator.initialText
         editor.placeholder = placeholder
         editor.onSubmit = onSubmit
         editor.onQuote = onQuote
         editor.onPasteImage = onPasteImage
+        context.coordinator.install(editor)
         editor.setAccessibilityLabel(placeholder.isEmpty ? L10n.string("Research text") : placeholder)
         scrollView.documentView = editor
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        context.coordinator.parent = self
         guard let editor = scrollView.documentView as? ResearchNativeTextView else { return }
-        editor.isEditable = isEditable
+        guard context.coordinator.matches(self) else {
+            context.coordinator.retire(editor)
+            return
+        }
+        context.coordinator.parent = self
         editor.placeholder = placeholder
         editor.onSubmit = onSubmit
         editor.onQuote = onQuote
         editor.onPasteImage = onPasteImage
-        editor.applyExternalText(text)
+        context.coordinator.install(editor)
+        context.coordinator.applyExternalText(to: editor)
         editor.needsDisplay = true
+    }
+
+    static func dismantleNSView(_ view: NSScrollView, coordinator: Coordinator) {
+        guard let editor = view.documentView as? ResearchNativeTextView else { return }
+        coordinator.dismantle(editor)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ResearchTextEditor
-        init(_ parent: ResearchTextEditor) { self.parent = parent }
+        let identity: UUID?
+        let installationID = UUID()
+        let composerEditing: ResearchComposerEditingSession?
+        private var attachmentTask: Task<Void, Never>?
+        private var attachmentGeneration = UUID()
+        private var isRetired = false
+        private var isDismantled = false
+
+        init(_ parent: ResearchTextEditor) {
+            self.parent = parent
+            identity = parent.identity
+            composerEditing = parent.composerEditing
+            super.init()
+            if let identity, let composerEditing {
+                composerEditing.reserveNativeHost(sessionID: identity, installationID: installationID)
+            }
+        }
+
+        var initialText: String {
+            guard let composerEditing else { return parent.text }
+            guard composerEditing.sessionID == identity else { return "" }
+            return composerEditing.text
+        }
+
+        var isEditable: Bool {
+            guard !isRetired, !isDismantled, parent.isEditable else { return false }
+            guard let composerEditing else { return true }
+            return parent.composerIsActive && hasMatchingAttachment && composerEditing.ownsEditor
+        }
+
+        private var hasMatchingAttachment: Bool {
+            guard let identity, let composerEditing else { return false }
+            return composerEditing.sessionID == identity
+                && composerEditing.nativeInstallationID == installationID
+        }
+
+        func matches(_ value: ResearchTextEditor) -> Bool {
+            identity == value.identity && composerEditing === value.composerEditing
+        }
+
+        func install(_ editor: ResearchNativeTextView) {
+            editor.editorIdentity = identity
+            if editor.commands !== parent.commands { editor.commands?.unregister(editor) }
+            editor.commands = parent.commands
+            editor.isEditable = isEditable && (composerEditing == nil || editor.window != nil)
+            if composerEditing != nil {
+                if let submit = parent.onSubmit {
+                    editor.onSubmit = { [weak self, weak editor] in
+                        guard let self, let editor, self.isEditable, editor.window != nil,
+                              editor.delegate === self, editor.editorIdentity == self.identity else { return }
+                        submit()
+                    }
+                }
+                if let pasteImage = parent.onPasteImage {
+                    editor.onPasteImage = { [weak self, weak editor] data, name in
+                        guard let self, let editor, self.isEditable, editor.window != nil,
+                              editor.delegate === self, editor.editorIdentity == self.identity else { return }
+                        pasteImage(data, name)
+                    }
+                }
+            }
+            editor.onWindowReady = { [weak self, weak editor] in
+                guard let self, let editor else { return }
+                editor.isEditable = self.isEditable && (self.composerEditing == nil || editor.window != nil)
+                self.updateCommandsRegistration(editor)
+                self.scheduleNativeAttach(editor)
+            }
+            if composerEditing != nil || parent.commands != nil {
+                editor.onCommitCurrentText = { [weak self] value in self?.acceptNativeText(value) }
+                updateCommandsRegistration(editor)
+                if composerEditing == nil, !editor.hasMarkedText() {
+                    parent.onExternalTextApplied?(editor.string)
+                }
+            } else { editor.onCommitCurrentText = nil }
+            scheduleNativeAttach(editor)
+        }
+
+        private func updateCommandsRegistration(_ editor: ResearchNativeTextView) {
+            if composerEditing == nil || (hasMatchingAttachment && isEditable
+                && editor.isEditable && editor.window != nil
+                && editor.delegate === self && editor.editorIdentity == identity) {
+                parent.commands?.register(editor)
+            } else { parent.commands?.unregister(editor) }
+        }
+
+        /// Attaching can publish shared ownership. Defer it until AppKit has
+        /// installed this exact native host in a window, outside SwiftUI update.
+        func scheduleNativeAttach(_ editor: ResearchNativeTextView) {
+            cancelScheduledAttach()
+            guard !isRetired, !isDismantled, parent.composerIsActive,
+                  let identity, let composerEditing, editor.window != nil else { return }
+            let generation = attachmentGeneration
+            attachmentTask = Task { @MainActor [weak self, weak editor, weak composerEditing] in
+                guard let self, let editor, let composerEditing, !Task.isCancelled,
+                      self.attachmentGeneration == generation,
+                      !self.isRetired, !self.isDismantled, self.parent.composerIsActive,
+                      editor.delegate === self, editor.editorIdentity == identity,
+                      editor.window != nil, self.composerEditing === composerEditing,
+                      composerEditing.sessionID == identity else { return }
+                // Only the fixed identity and weak native view belong to the
+                // preparation closure retained by the shared editing owner.
+                let attached = composerEditing.attachNativeHost(sessionID: identity,
+                    installationID: self.installationID, prepareNativeInput: { [weak editor] in
+                        guard let editor else { return true }
+                        guard editor.editorIdentity == identity else { return false }
+                        editor.commitCurrentText()
+                        return !editor.hasMarkedText()
+                    })
+                editor.isEditable = attached && self.isEditable
+                self.applyExternalText(to: editor)
+                self.updateCommandsRegistration(editor)
+                if self.attachmentGeneration == generation { self.attachmentTask = nil }
+            }
+        }
+
+        private func cancelScheduledAttach() {
+            attachmentTask?.cancel()
+            attachmentTask = nil
+            attachmentGeneration = UUID()
+        }
+
+        func applyExternalText(to editor: ResearchNativeTextView) {
+            guard !isRetired, !isDismantled, editor.editorIdentity == identity else { return }
+            if let composerEditing, let identity {
+                // The same retained owner can already be bound to another
+                // session. Its current text must never overwrite this host.
+                guard hasMatchingAttachment else { return }
+                let value = composerEditing.text
+                if editor.applyExternalText(value) {
+                    composerEditing.externalTextApplied(value, installationID: installationID, sessionID: identity)
+                }
+            } else if composerEditing == nil, editor.applyExternalText(parent.text) {
+                parent.onExternalTextApplied?(parent.text)
+            }
+        }
+
+        private func acceptNativeText(_ value: String) {
+            if let composerEditing, let identity {
+                // A stale host is archived by the core under its original
+                // session and installation, never through a current Binding.
+                _ = composerEditing.acceptNativeText(value, installationID: installationID, sessionID: identity)
+            } else if composerEditing == nil { parent.text = value }
+        }
+
+        func retire(_ editor: ResearchNativeTextView) {
+            guard !isRetired, !isDismantled else { return }
+            cancelScheduledAttach()
+            if editor.onCommitCurrentText != nil { editor.commitCurrentText() }
+            isRetired = true
+            editor.commands?.unregister(editor)
+            editor.isEditable = false
+            editor.onSubmit = nil
+            editor.onPasteImage = nil
+        }
+
+        func dismantle(_ editor: ResearchNativeTextView) {
+            guard !isDismantled else { return }
+            cancelScheduledAttach()
+            if editor.onCommitCurrentText != nil { editor.commitCurrentText() }
+            if let composerEditing, let identity {
+                _ = composerEditing.detachNativeHost(installationID: installationID, sessionID: identity)
+            }
+            isDismantled = true
+            editor.commands?.unregister(editor)
+            editor.onWindowReady = nil
+            editor.onCommitCurrentText = nil
+            editor.delegate = nil
+            editor.isEditable = false
+        }
 
         func textDidChange(_ notification: Notification) {
-            guard let editor = notification.object as? ResearchNativeTextView else { return }
-            if editor.undoManager?.isUndoing == true || editor.undoManager?.isRedoing == true {
+            guard let editor = notification.object as? ResearchNativeTextView,
+                  editor.delegate === self, editor.editorIdentity == identity else { return }
+            if (composerEditing == nil || hasMatchingAttachment),
+               (editor.undoManager?.isUndoing == true || editor.undoManager?.isRedoing == true) {
                 parent.onEditingBoundary?()
             }
-            parent.text = editor.string
+            acceptNativeText(editor.string)
             editor.needsDisplay = true
         }
 
-        func textDidEndEditing(_ notification: Notification) { parent.onEditingBoundary?() }
+        func textDidEndEditing(_ notification: Notification) {
+            guard let editor = notification.object as? ResearchNativeTextView,
+                  editor.delegate === self, editor.editorIdentity == identity,
+                  composerEditing == nil || hasMatchingAttachment else { return }
+            parent.onEditingBoundary?()
+        }
     }
 }
 
 class ResearchNativeTextView: NSTextView {
+    var editorIdentity: UUID?
+    weak var commands: ResearchTextEditingCommands?
+    var onCommitCurrentText: ((String) -> Void)?
+    var onWindowReady: (() -> Void)?
     var placeholder = ""
     var onSubmit: (() -> Void)?
     var onQuote: ((String) -> Void)?
@@ -87,6 +308,11 @@ class ResearchNativeTextView: NSTextView {
     private let researchUndoManager = UndoManager()
 
     override var undoManager: UndoManager? { researchUndoManager }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onWindowReady?()
+    }
 
     /// NSTextView registers edits with the overridden manager, but AppKit's
     /// standard undo:/redo: responder actions otherwise reach NSWindow's manager.
@@ -111,14 +337,22 @@ class ResearchNativeTextView: NSTextView {
 
     /// Binding echoes of native typing must not clear Undo. A genuine external
     /// replacement (new draft, applied suggestion) establishes a fresh history.
-    func applyExternalText(_ value: String) {
-        guard string != value, !hasMarkedText() else { return }
+    @discardableResult
+    func applyExternalText(_ value: String) -> Bool {
+        guard !hasMarkedText() else { return false }
+        guard string != value else { return true }
         let previousSelection = selectedRange()
         breakUndoCoalescing()
         string = value
         researchUndoManager.removeAllActions()
         let length = (value as NSString).length
         setSelectedRange(NSRange(location: min(previousSelection.location, length), length: 0))
+        return true
+    }
+
+    func commitCurrentText() {
+        if hasMarkedText() { unmarkText() }
+        onCommitCurrentText?(string)
     }
 
     override func draw(_ dirtyRect: NSRect) {

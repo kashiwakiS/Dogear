@@ -13,7 +13,10 @@ struct FreeTextEditorSheet: View {
     @State private var heightText: String
     @State private var fontSizeText: String
     @State private var saveFailed = false
-    @FocusState private var textIsFocused: Bool
+    @State private var fontName: String?
+    @State private var fontColor: PDFColorComponents?
+    @State private var confirmsDiscard = false
+    @StateObject private var textCommands = ResearchTextEditingCommands()
 
     init(draft: FreeTextEditDraft, onSave: @escaping (FreeTextEditValues) -> Bool, onDismiss: @escaping () -> Void) {
         self.draft = draft
@@ -26,7 +29,8 @@ struct FreeTextEditorSheet: View {
     }
 
     private var values: FreeTextEditValues {
-        FreeTextEditValues(text: text, width: number(widthText), height: number(heightText), fontSize: number(fontSizeText))
+        FreeTextEditValues(text: text, width: number(widthText), height: number(heightText), fontSize: number(fontSizeText),
+            fontColor: fontColor, fontName: fontName)
     }
 
     private func number(_ text: String) -> Double {
@@ -43,19 +47,31 @@ struct FreeTextEditorSheet: View {
             Text(draft.isNew ? "Add Free Text Note" : "Edit Free Text Note")
                 .font(.headline)
             Text("Note Text").font(.caption.weight(.semibold))
-            TextEditor(text: $text)
-                .font(.body)
+            ResearchTextEditor(text: $text, placeholder: L10n.string("Note Text"),
+                onSubmit: save, commands: textCommands, identity: draft.id)
                 .frame(height: 140)
                 .padding(6)
                 .background(Color.dogearTextBackground)
                 .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.3)))
                 .accessibilityLabel("Note Text")
-                .focused($textIsFocused)
             HStack(spacing: 12) {
                 dimension("Width (pt)", text: $widthText)
                 dimension("Height (pt)", text: $heightText)
                 dimension("Font Size (pt)", text: $fontSizeText)
             }
+            HStack {
+                Picker("Font", selection: $fontName) {
+                    Text("Default font").tag(nil as String?)
+                    ForEach(FreeTextAnnotationEditing.commonFontNames, id: \.self) { name in
+                        Text(verbatim: name).tag(Optional(name))
+                    }
+                }
+                ColorPicker("Text color", selection: Binding(get: {
+                    Color(pdfColor: FreeTextAnnotationEditing.resolvedTextColor(values, draft: draft))
+                }, set: { fontColor = FreeTextAnnotationEditing.textColorComponents(of: $0.pdfPlatformColor) }), supportsOpacity: false)
+            }
+            Button("Default text color") { fontColor = nil }
+                .help("Restore this annotation’s original text color.")
             Text("Note Preview")
                 .font(.caption.weight(.semibold))
             FreeTextPreview(draft: draft, values: values)
@@ -84,11 +100,9 @@ struct FreeTextEditorSheet: View {
             }
             HStack {
                 Spacer()
-                Button("Cancel", action: onDismiss)
+                Button("Cancel", action: requestCancel)
                     .keyboardShortcut(.cancelAction)
-                Button("Save") {
-                    if onSave(values) { onDismiss() } else { saveFailed = true }
-                }
+                Button("Save", action: save)
                 // Return remains a newline in the multi-line editor.
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(validationMessage != nil)
@@ -96,7 +110,28 @@ struct FreeTextEditorSheet: View {
         }
         .padding(22)
         .frame(width: 440)
-        .onAppear { textIsFocused = true }
+        .task { await Task.yield(); textCommands.focus(identity: draft.id) }
+        .interactiveDismissDisabled(values != draft.values)
+        .background(MacAnnotationEditorLifetime(id: draft.id) {
+            values != draft.values || textCommands.hasMarkedText
+        }.frame(width: 0, height: 0))
+        .confirmationDialog("Discard changes?", isPresented: $confirmsDiscard) {
+            Button("Discard changes", role: .destructive, action: onDismiss)
+            Button("Keep editing", role: .cancel) {}
+        }
+    }
+
+    private func save() {
+        // A keyboard shortcut must not consume a Chinese candidate. The native
+        // field owns Command-Return, text Undo and composition before committing.
+        guard !textCommands.hasMarkedText, textCommands.finishEditing(identity: draft.id), validationMessage == nil else { return }
+        if onSave(values) { onDismiss() }
+        else { saveFailed = true; textCommands.focus(identity: draft.id) }
+    }
+
+    private func requestCancel() {
+        guard !textCommands.hasMarkedText, textCommands.finishEditing(identity: draft.id) else { return }
+        if values != draft.values { confirmsDiscard = true } else { onDismiss() }
     }
 
     private func dimension(_ title: LocalizedStringKey, text: Binding<String>) -> some View {

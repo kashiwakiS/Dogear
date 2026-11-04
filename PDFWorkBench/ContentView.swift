@@ -469,19 +469,19 @@ struct ContentView: View {
         workspaceContext.setLifecycleHandlers(onActivate: { host in
             if let host {
                 bindWindowPresentation(host)
-                WorkspaceCommandRouter.shared.activate(workspace: workspaceContext, handlers: commandHandlers)
+                WorkspaceMacCommandRouter.shared.activate(workspace: workspaceContext, handlers: commandHandlers)
                 bindResearchWindow(host)
                 openPendingExternalPDFIfNeeded()
             } else {
                 flushPendingZoomPersistence()
-                WorkspaceCommandRouter.shared.deactivate(workspaceID: windowSessionID)
+                WorkspaceMacCommandRouter.shared.deactivate(workspaceID: windowSessionID)
                 ResearchCommandService.shared.userDidInteract(viewID: windowSessionID)
             }
         }, onClose: {
             flushPendingZoomPersistence()
             documentStore.releaseEditorAccess()
             ResearchCommandService.shared.unregister(viewID: windowSessionID)
-            WorkspaceCommandRouter.shared.deactivate(workspaceID: windowSessionID)
+            WorkspaceMacCommandRouter.shared.deactivate(workspaceID: windowSessionID)
         })
         workspaceContext.updateMinimumContentSize(NSSize(width: minimumWindowWidth, height: 680))
         documentStore.setUndoManager(workspaceContext.undoManager)
@@ -501,7 +501,7 @@ struct ContentView: View {
         bindWindowPresentation(window)
         window.title = documentStore.displayedDocumentTitle
         if window.isKeyWindow {
-            WorkspaceCommandRouter.shared.activate(workspace: workspaceContext, handlers: commandHandlers)
+            WorkspaceMacCommandRouter.shared.activate(workspace: workspaceContext, handlers: commandHandlers)
         }
         bindResearchWindow(window)
     }
@@ -549,7 +549,7 @@ struct ContentView: View {
             },
             setZoom: { command in
                 switch command {
-                case .fit: runZoomCommand(.fitWidth, trigger: .pointer)
+                case .fit, .fitWidth: runZoomCommand(.fitWidth, trigger: .pointer)
                 case .percent(let value): runZoomCommand(.custom(value), trigger: .pointer)
                 }
             },
@@ -988,13 +988,6 @@ struct ContentView: View {
                             evidence: currentResearchSource().map { ResearchEvidence(source: $0, kind: .annotation,
                                 anchor: ResearchPageAnchor(pageIndex: pageNumber - 1), excerpt: text) })
                     },
-                    onHighlightCreated: { trigger in
-                        documentStore.markAnnotationsChanged(
-                            message: "Highlight added. Saving working copy.",
-                            action: "Add Highlight",
-                            trigger: trigger
-                        )
-                    },
                     onHighlightRemoved: { trigger in
                         documentStore.markAnnotationsChanged(
                             message: "Highlight removed. Saving working copy.",
@@ -1048,6 +1041,16 @@ struct ContentView: View {
                     onReadingPositionChanged: { researchReadingPosition.update($0, for: document) },
                     canCommitFreeText: { [weak documentStore] document in
                         documentStore?.canEditDocument == true && documentStore?.document === document
+                    },
+                    onPrepareFreeTextDraft: { [weak documentStore] document, page, bounds in
+                        guard let documentStore, documentStore.document === document else { return nil }
+                        return documentStore.newFreeTextDraft(page: page, bounds: bounds)
+                    },
+                    onCommitFreeText: { [weak documentStore] draft, values in
+                        documentStore?.saveFreeText(draft, values: values) ?? false
+                    },
+                    onCommitHighlight: { [weak documentStore] document, selection, trigger in
+                        documentStore?.addHighlights(from: selection, in: document, trigger: trigger) ?? false
                     }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

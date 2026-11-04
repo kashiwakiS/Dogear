@@ -12,12 +12,14 @@ struct PDFWorkBenchApp: App {
     @NSApplicationDelegateAdaptor(PDFWorkBenchAppDelegate.self) private var appDelegate
     @StateObject private var libraryStore: LibraryStore
     private let libraryLifecycle: LibraryMacLifecycleAdapter
+    private let languageMenuAdapter: AppLanguageMacMenuAdapter
     @StateObject private var languageStore = AppLanguageStore.shared
 
     init() {
         let library = LibraryStore()
         _libraryStore = StateObject(wrappedValue: library)
         libraryLifecycle = LibraryMacLifecycleAdapter(library: library)
+        languageMenuAdapter = AppLanguageMacMenuAdapter(languageStore: .shared)
     }
 
     var body: some Scene {
@@ -130,49 +132,6 @@ private struct GroupWorkspaceContentRoot: View {
     }
 }
 
-/// SwiftUI's scene-focused values do not cross independent NSHostingController roots.
-/// Keep commands attached to the active workspace of the actual key window.
-@MainActor
-final class WorkspaceCommandRouter: ObservableObject {
-    static let shared = WorkspaceCommandRouter()
-    @Published private var revision = 0
-    private weak var workspace: GroupWorkspaceContext?
-    private var currentHandlers: PDFWorkbenchCommandHandlers?
-    private var observers: [NSObjectProtocol] = []
-
-    private init() {
-        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
-                     NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
-            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.revision += 1 }
-            })
-        }
-    }
-
-    var activeWorkspace: GroupWorkspaceContext? {
-        guard let workspace, workspace.isActive, workspace.window?.isKeyWindow == true,
-              workspace.window?.attachedSheet == nil else { return nil }
-        return workspace
-    }
-    var commandWindow: NSWindow? {
-        guard let window = NSApp.keyWindow, window.attachedSheet == nil, window.sheetParent == nil else { return nil }
-        return window
-    }
-    var handlers: PDFWorkbenchCommandHandlers? { activeWorkspace == nil ? nil : currentHandlers }
-    func activate(workspace: GroupWorkspaceContext, handlers: PDFWorkbenchCommandHandlers) {
-        guard workspace.isActive, workspace.window?.isKeyWindow == true else { return }
-        self.workspace = workspace
-        currentHandlers = handlers
-        revision += 1
-    }
-    func deactivate(workspaceID: UUID) {
-        guard workspace?.workspaceID == workspaceID else { return }
-        workspace = nil
-        currentHandlers = nil
-        revision += 1
-    }
-}
-
 @main
 enum DogearEntryPoint {
     @MainActor static func main() {
@@ -182,6 +141,21 @@ enum DogearEntryPoint {
                 exit(await ResearchLiveAcceptance.run(arguments: CommandLine.arguments))
             }
             RunLoop.main.run()
+        } else if CommandLine.arguments.contains("--run-annotation-ui-diagnostics") {
+            // Exercise production sheets against authored PDFs without loading
+            // the user's Library, windows, documents or preferences.
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            application.finishLaunching()
+            application.activate(ignoringOtherApps: true)
+            Task { @MainActor in
+                let result = await MacAnnotationSheetDiagnostics.run()
+                for observation in result.observations { print("OBSERVATION: \(observation)") }
+                for failure in result.failures { print("FAIL: \(failure)") }
+                print("ANNOTATION UI DIAGNOSTICS: \(result.checks) checks, \(result.failures.count) failures")
+                exit(result.failures.isEmpty ? EXIT_SUCCESS : EXIT_FAILURE)
+            }
+            application.run()
         } else if CommandLine.arguments.contains("--run-native-ui-diagnostics") {
             // Foreground native focus checks run separately from offline fixtures.
             // Neither entry constructs the user's SwiftUI scenes or Library.
@@ -219,6 +193,15 @@ final class PDFWorkBenchAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let editor = MacAnnotationEditorLifecycle.unfinishedWindow {
+            editor.makeKeyAndOrderFront(nil)
+            let alert = NSAlert()
+            alert.messageText = L10n.string("Finish editing the annotation before quitting")
+            alert.informativeText = L10n.string("Your unsubmitted text is still in the editor. Save it or explicitly discard it, then quit again.")
+            alert.addButton(withTitle: L10n.string("Keep editing"))
+            alert.runModal()
+            return .terminateCancel
+        }
         PDFSaveQueue.shared.waitUntilDrained()
         ResearchRuntime.shared.shutdown()
         if DocumentAccessCoordinator.shared.hasUnrecoverableChanges || !ResearchStore.shared.saveFailures.isEmpty {
@@ -282,53 +265,6 @@ final class ExternalPDFOpenCoordinator: ObservableObject {
     }
 }
 
-extension URL {
-    var isPDFFileURL: Bool {
-        isFileURL && pathExtension.localizedCaseInsensitiveCompare("pdf") == .orderedSame
-    }
-}
-
-struct PDFWorkbenchCommandHandlers {
-    let openPDF: () -> Void
-    let savePDF: () -> Void
-    let showFileInfo: () -> Void
-    let createLibraryGroup: () -> Void
-    let toggleLibraryNavigator: () -> Void
-    let toggleAnnotationSidebar: () -> Void
-    let addCurrentDocumentToSelectedGroup: () -> Void
-    let removeCurrentDocumentFromSelectedGroup: () -> Void
-    let addHighlight: () -> Void
-    let addFreeTextNote: () -> Void
-    let showPageOrganizer: () -> Void
-    let toggleDogear: () -> Void
-    let deleteCurrentPage: () -> Void
-    let goToPreviousPage: () -> Void
-    let goToNextPage: () -> Void
-    let goToFirstPage: () -> Void
-    let goToLastPage: () -> Void
-    let zoomIn: () -> Void
-    let zoomOut: () -> Void
-    let actualSize: () -> Void
-    let fitWidth: () -> Void
-    let fitPage: () -> Void
-    let setDisplayStyle: (PDFReadingDisplayStyle) -> Void
-    let showFind: () -> Void
-    let findNext: () -> Void
-    let findPrevious: () -> Void
-    let exportAnnotatedCopy: () -> Void
-    let exportAnnotationsMarkdown: () -> Void
-    let exportKeywordOutline: () -> Void
-    let isLibraryNavigatorVisible: Bool
-    let isAnnotationSidebarVisible: Bool
-    let canUseDocumentCommands: Bool
-    let canAddCurrentDocumentToSelectedGroup: Bool
-    let canRemoveCurrentDocumentFromSelectedGroup: Bool
-    let canAddHighlight: Bool
-    let canGoToPreviousPage: Bool
-    let canGoToNextPage: Bool
-    let canDeleteCurrentPage: Bool
-}
-
 private struct PDFWorkbenchCommandHandlersKey: FocusedValueKey {
     typealias Value = PDFWorkbenchCommandHandlers
 }
@@ -342,7 +278,7 @@ extension FocusedValues {
 
 private struct PDFWorkBenchCommands: Commands {
     @Environment(\.openWindow) private var openWindow
-    @ObservedObject private var workspaceCommands = WorkspaceCommandRouter.shared
+    @ObservedObject private var workspaceCommands = WorkspaceMacCommandRouter.shared
     private var commandHandlers: PDFWorkbenchCommandHandlers? { workspaceCommands.handlers }
     @ObservedObject var languageStore: AppLanguageStore
 

@@ -2,45 +2,37 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// Workspace identity and editing lifetime are independent of the containing window.
+/// macOS presentation adapter for a platform-independent logical workspace.
 @MainActor
 final class GroupWorkspaceContext: ObservableObject, Identifiable {
-    let id: UUID
-    var workspaceID: UUID { id }
-    private(set) var groupID: UUID
-    let undoManager = UndoManager()
+    let objectWillChange = ObservableObjectPublisher()
+    let state: GroupWorkspaceState
+    var id: UUID { state.id }
+    var workspaceID: UUID { state.workspaceID }
+    var groupID: UUID { state.groupID }
+    var undoManager: UndoManager { state.undoManager }
     let titlebarController = GroupWorkspaceTitlebarController()
-    @Published private(set) var isActive = false
+    var isActive: Bool { state.isActive }
+    private var stateObservation: AnyCancellable?
     private weak var host: GroupWorkspaceHostController?
     private weak var boundWindow: NSWindow?
     var window: NSWindow? { boundWindow }
-    private var onActivate: ((NSWindow?) -> Void)?
-    private var onClose: (() -> Void)?
-    private var didClose = false
     fileprivate var minimumContentSize = NSSize(width: 520, height: 680)
 
     init(payload: GroupWindowPayload) {
-        id = payload.sessionID
-        groupID = payload.groupID
+        state = GroupWorkspaceState(id: payload.sessionID, groupID: payload.groupID)
+        stateObservation = state.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         titlebarController.attach(workspace: self)
     }
 
     func setLifecycleHandlers(onActivate: @escaping (NSWindow?) -> Void, onClose: @escaping () -> Void) {
-        guard !didClose else { return }
-        let isInitialRegistration = self.onActivate == nil
-        self.onActivate = onActivate
-        self.onClose = onClose
-        // Registration commonly happens while SwiftUI is attaching its native
-        // view. Deliver after that update, using the current host and selection.
-        if isInitialRegistration {
-            DispatchQueue.main.async { [weak self] in self?.notifyActivation() }
-        }
+        state.setLifecycleHandlers(onActivate: { [weak self] active in
+            onActivate(active ? self?.boundWindow : nil)
+        }, onClose: onClose)
     }
 
     func updateGroupID(_ groupID: UUID) {
-        guard self.groupID != groupID else { return }
-        objectWillChange.send()
-        self.groupID = groupID
+        guard state.updateGroupID(groupID) else { return }
         host?.refreshTitlebar()
         GroupWorkspaceHostRegistry.shared.scheduleSave()
     }
@@ -61,12 +53,13 @@ final class GroupWorkspaceContext: ObservableObject, Identifiable {
     }
 
     fileprivate func bind(to host: GroupWorkspaceHostController?) {
+        guard !state.isClosed else { return }
         self.host = host
         updateWindow(host?.window)
     }
 
     fileprivate func updateWindow(_ window: NSWindow?) {
-        guard boundWindow !== window else { return }
+        guard !state.isClosed, boundWindow !== window else { return }
         objectWillChange.send()
         boundWindow = window
         titlebarController.hostDidChange()
@@ -74,24 +67,15 @@ final class GroupWorkspaceContext: ObservableObject, Identifiable {
     }
 
     fileprivate func setActive(_ active: Bool) {
-        guard isActive != active else { return }
-        isActive = active
-        notifyActivation()
+        state.setActive(active)
     }
 
     fileprivate func notifyActivation() {
-        guard !didClose else { return }
-        onActivate?(isActive ? boundWindow : nil)
+        state.notifyActivation()
     }
 
     fileprivate func finishClosing() {
-        guard !didClose else { return }
-        didClose = true
-        isActive = false
-        onActivate?(nil)
-        onClose?()
-        onActivate = nil
-        onClose = nil
+        guard state.finishClosing() else { return }
         titlebarController.finishClosing()
         host = nil
         boundWindow = nil
@@ -217,6 +201,9 @@ final class GroupWorkspaceHostController: NSViewController {
     func select(workspaceID: UUID, bringToFront: Bool) {
         guard let entry = entries.first(where: { $0.context.id == workspaceID }), !isClosing else { return }
         if selectedWorkspaceID != workspaceID {
+            // Native annotation sheets own unfinished input. Do not hide their
+            // workspace through titlebar/direct actions that bypass menu gating.
+            guard window?.attachedSheet == nil else { return }
             if let previous = entries.first(where: { $0.context.id == selectedWorkspaceID }) {
                 rememberResponder(for: previous)
                 guard relinquishResponder(for: previous) else { return }
@@ -268,6 +255,7 @@ final class GroupWorkspaceHostController: NSViewController {
 
     /// Taking a controller changes presentation ownership, never editor ownership.
     private func take(workspaceID: UUID) -> GroupWorkspaceEntry? {
+        guard window?.attachedSheet == nil else { return nil }
         guard let index = entries.firstIndex(where: { $0.context.id == workspaceID }) else { return nil }
         let entry = entries[index]
         let wasSelected = selectedWorkspaceID == workspaceID

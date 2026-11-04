@@ -70,8 +70,9 @@ final class LibraryImportController: ObservableObject {
     private var generation = UUID()
 
     func start(urls: [URL], library: LibraryStore, groupID: UUID, sessionID: UUID,
-               assignToGroup: Bool, onOpen: @escaping (LibraryFile, UUID) -> Void) {
-        guard !isRunning, !urls.isEmpty else { return }
+               assignToGroup: Bool, mayContinue: @escaping @MainActor () -> Bool = { true },
+               onOpen: @escaping (LibraryFile, UUID) -> Void) {
+        guard !isRunning, !urls.isEmpty, mayContinue(), library.group(withID: groupID) != nil else { return }
         isVisible = true; isRunning = true; isScanning = true
         found = 0; completed = 0; total = 0; skipped = 0; cancelled = false; failures = []
         let token = UUID(); generation = token
@@ -88,6 +89,7 @@ final class LibraryImportController: ObservableObject {
             for url in urls {
                 do {
                     try Task.checkCancellation()
+                    guard mayContinue(), library.group(withID: groupID) != nil else { throw CancellationError() }
                     self.isScanning = true
                     self.found = 0
                     let scanTask = Task.detached(priority: .userInitiated) { [self] in
@@ -102,6 +104,7 @@ final class LibraryImportController: ObservableObject {
                         try await scanTask.value
                     }, onCancel: { scanTask.cancel() })
                     try Task.checkCancellation()
+                    guard mayContinue(), library.group(withID: groupID) != nil else { throw CancellationError() }
                     self.failures.append(contentsOf: scan.failures)
                     self.skipped += scan.skipped
                     for candidate in scan.urls {
@@ -119,6 +122,8 @@ final class LibraryImportController: ObservableObject {
                     } else { destination = groupID }
                     for start in stride(from: 0, to: scan.urls.count, by: 24) {
                         try Task.checkCancellation()
+                        guard mayContinue(), library.group(withID: groupID) != nil,
+                              library.group(withID: destination) != nil else { throw CancellationError() }
                         let batch = Array(scan.urls[start..<min(start + 24, scan.urls.count)])
                         let files = library.upsertOpenedURLs(batch, groupID: nil, sessionID: sessionID)
                         if folder || (assignToGroup && destination != LibraryGroup.ungroupedID) {
@@ -132,6 +137,8 @@ final class LibraryImportController: ObservableObject {
                         if firstOpen == nil, let first = files.first { firstOpen = (first, destination) }
                         for file in newlyCompleted {
                             try Task.checkCancellation()
+                            guard mayContinue(), library.group(withID: groupID) != nil,
+                                  library.group(withID: destination) != nil else { throw CancellationError() }
                             do { try await library.captureOriginalFingerprint(for: file.id) }
                             catch is CancellationError { throw CancellationError() }
                             catch { self.failures.append(.init(url: file.url, reason: error.localizedDescription)) }
@@ -142,7 +149,11 @@ final class LibraryImportController: ObservableObject {
                 catch { self.failures.append(.init(url: url, reason: error.localizedDescription)) }
             }
             if Task.isCancelled { self.cancelled = true }
-            if let (file, group) = firstOpen { onOpen(file, group) }
+            // Completed batches remain durable after cancellation. Opening the
+            // reader is a separate capability and must not survive its request.
+            if !self.cancelled, !Task.isCancelled, mayContinue(), library.group(withID: groupID) != nil,
+               let (file, group) = firstOpen,
+               library.group(withID: group) != nil { onOpen(file, group) }
         }
     }
 

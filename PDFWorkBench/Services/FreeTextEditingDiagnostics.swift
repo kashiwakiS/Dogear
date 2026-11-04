@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import PDFKit
 
 /// Isolated native PDFs, the production editor/store/renderer, and working copies.
@@ -12,6 +13,18 @@ enum FreeTextEditingDiagnostics {
             checks += 1
             if !condition() { failures.append("FreeText: " + message) }
         }
+        let editorWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        editorWindow.isReleasedWhenClosed = false
+        let editorID = UUID()
+        var unfinished = false
+        MacAnnotationEditorLifecycle.register(editorID, window: editorWindow) { unfinished }
+        check(MacAnnotationEditorLifecycle.unfinishedWindow == nil, "unchanged sheet must not block normal Quit")
+        unfinished = true
+        check(MacAnnotationEditorLifecycle.unfinishedWindow === editorWindow, "unfinished annotation must identify its exact native recovery window before Quit")
+        MacAnnotationEditorLifecycle.unregister(editorID)
+        check(MacAnnotationEditorLifecycle.unfinishedWindow == nil, "finished/dismantled editor retained a stale Quit veto")
+        editorWindow.close()
         do {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("DogearFreeText-\(UUID())")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -60,6 +73,14 @@ enum FreeTextEditingDiagnostics {
             check(store.updateFreeText(draft, values: draft.values), "no-op edit was rejected")
             check(!undo.canUndo && !store.hasUnsavedChanges && annotation.modificationDate == original.modificationDate,
                 "no-op edit dirtied or retimestamped the PDF")
+            annotation.contents = "A different editor changed the note"
+            check(!store.updateFreeText(draft, values: cancelled) && annotation.contents == "A different editor changed the note",
+                "stale same-object FreeText editor overwrote a competing text change")
+            annotation.contents = original.contents
+            annotation.fontColor = .blue
+            check(!store.updateFreeText(draft, values: cancelled), "stale FreeText editor overwrote a competing style change")
+            annotation.fontColor = originalColor
+            check(FreeTextAnnotationEditing.isCurrent(draft, in: document), "restored captured FreeText baseline did not match")
             var invalid = draft.values
             invalid.text = "  \n "
             check(!store.updateFreeText(draft, values: invalid), "blank text was accepted")
@@ -175,12 +196,33 @@ enum FreeTextEditingDiagnostics {
             view.canCommitFreeText = { [weak store] document in
                 store?.canEditDocument == true && store?.document === document
             }
-            view.onAnnotationChanged = { store.markAnnotationsChanged() }
-            view.onUndoableAnnotationMutation = { store.markAnnotationsChanged(action: $0) }
-            let newNote = PDFAnnotation(bounds: CGRect(x: 80, y: 150, width: 180, height: 90), forType: .freeText, withProperties: nil)
-            newNote.font = FreeTextAnnotationEditing.defaultFont
-            newNote.removeValue(forAnnotationKey: .color)
-            newNote.removeValue(forAnnotationKey: .interiorColor)
+            var commitCount = 0
+            var legacyMutationCount = 0
+            var storeMutationCount = 0
+            view.onCommitFreeText = { draft, values in
+                let saved = store.saveFreeText(draft, values: values)
+                if saved { commitCount += 1 }
+                return saved
+            }
+            view.onAnnotationChanged = { legacyMutationCount += 1 }
+            view.onUndoableAnnotationMutation = { _ in legacyMutationCount += 1 }
+            let mutationObserver = NotificationCenter.default.publisher(for: .dogearAnnotationsChanged, object: document)
+                .sink { _ in storeMutationCount += 1 }
+            defer { mutationObserver.cancel() }
+            let newDraft = try require(store.newFreeTextDraft(page: page,
+                bounds: CGRect(x: 80, y: 150, width: 180, height: 90)))
+            let newNote = newDraft.annotation
+            // Compare the original calibrated native color itself. Conversion
+            // to deviceRGB depends on the display profile, so its components
+            // cannot be compared to calibrated RGB input components.
+            let originalMacRed = NSColor(calibratedRed: 0.84, green: 0.05, blue: 0.07, alpha: 1)
+            check(newNote.font?.pointSize == 14 && newNote.alignment == .left
+                && newNote.fontColor?.isEqual(originalMacRed) == true
+                && newNote.shouldPrint && newNote.border?.lineWidth == 0,
+                "shared new-note defaults changed the Mac red, font, alignment, or print style")
+            let defaultDraft = try require(store.newFreeTextDraft(page: page))
+            check(defaultDraft.originalBounds.width == 240 && defaultDraft.originalBounds.height == 120,
+                "shared default note placement lost the Mac 240 by 120 size")
             let previewCopy = PDFAnnotation(bounds: newNote.bounds, forType: .freeText, withProperties: nil)
             FreeTextPreviewStyle.copyExplicitColors(from: newNote, to: previewCopy)
             check(previewCopy.value(forAnnotationKey: .color) == nil
@@ -193,7 +235,6 @@ enum FreeTextEditingDiagnostics {
             check(previewCopy.color.isEqual(coloredNote.color)
                 && previewCopy.interiorColor?.isEqual(coloredNote.interiorColor) == true,
                 "preview lost explicitly stored annotation colors")
-            let newDraft = FreeTextEditDraft(document: document, page: page, annotation: newNote, isNew: true)
             check(newNote.page == nil && !undo.canUndo, "opening new-note draft inserted an annotation")
             check(!view.commitNewFreeText(newDraft, values: newDraft.values), "empty new note was saved")
             var newValues = newDraft.values
@@ -201,12 +242,25 @@ enum FreeTextEditingDiagnostics {
             mutation { check(view.commitNewFreeText(newDraft, values: newValues), "multiline new-note save failed") }
             check(newNote.page === page && newNote.bounds == newDraft.originalBounds && newNote.contents == newValues.text,
                 "new note used screen-scale coordinates or lost line breaks")
+            check(commitCount == 1 && storeMutationCount == 1 && legacyMutationCount == 0,
+                "new-note commit did not notify its owning Store exactly once")
             undo.undo()
             check(newNote.page == nil && !undo.canUndo, "new note did not undo in one step")
             undo.redo()
             check(newNote.page === page && newNote.contents == newValues.text, "new-note Redo lost the original object/text")
             undo.undo()
+            check(commitCount == 1 && storeMutationCount == 4 && legacyMutationCount == 0,
+                "new-note Undo/Redo repeated creation or used the old view mutation callback")
             undo.removeAllActions()
+            let otherDocument = PDFDocument()
+            let otherPage = PDFPage()
+            otherDocument.insert(otherPage, at: 0)
+            check(store.newFreeTextDraft(page: otherPage) == nil,
+                "new-note preparation accepted another document's page")
+            view.document = otherDocument
+            check(!view.commitNewFreeText(newDraft, values: newValues) && newNote.page == nil && !undo.canUndo,
+                "new-note commit accepted a reader that switched documents")
+            view.document = document
 
             let richNote = PDFAnnotation(bounds: original.bounds, forType: .freeText, withProperties: nil)
             richNote.contents = "rich"
@@ -230,8 +284,173 @@ enum FreeTextEditingDiagnostics {
             check(!view.commitNewFreeText(newDraft, values: newValues) && newNote.page == nil && !undo.canUndo,
                 "new-note save bypassed a released write lease")
             check(!store.updateFreeText(draft, values: cancelled), "editing bypassed the document write lease")
+            try exerciseTextColor(root: root.appendingPathComponent("text-color"), defaults: defaults,
+                check: { value, message in check(value, message) })
+            try exerciseFontFace(root: root.appendingPathComponent("font-face"), defaults: defaults,
+                check: { value, message in check(value, message) })
         } catch { failures.append("FreeText fixture: \(error.localizedDescription)") }
         return .init(checkCount: checks, failures: failures)
+    }
+
+    private static func exerciseTextColor(root: URL, defaults: UserDefaults,
+                                          check: (Bool, String) -> Void) throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalURL = root.appendingPathComponent("original-color.pdf")
+        let originalBytes = externalFreeTextPDF()
+        try originalBytes.write(to: originalURL)
+        let queue = PDFSaveQueue(recoveryDirectoryURL: root.appendingPathComponent("recovery"))
+        defer { queue.waitUntilDrained() }
+        let copies = try PDFWorkingCopyStore(directoryURL: root.appendingPathComponent("copies"))
+        let access = DocumentAccessCoordinator(saveQueue: queue)
+        let store = PDFDocumentStore(feedbackCenter: OperationFeedbackCenter(userDefaults: defaults),
+            metadataStore: DocumentMetadataStore(stateURL: root.appendingPathComponent("metadata.json")),
+            aiHighlightGroupStore: AIHighlightGroupStore(stateURL: root.appendingPathComponent("groups.json")),
+            workingCopyStore: copies, saveQueue: queue, accessCoordinator: access)
+        defer { store.releaseEditorAccess() }
+        check(store.openPDF(from: originalURL), "text-color fixture could not open its actual external PDF")
+        let document = try require(store.document), page = try require(document.page(at: 0))
+        let annotation = try require(page.annotations.first { $0.type == "FreeText" })
+        let draft = FreeTextEditDraft(document: document, page: page, annotation: annotation)
+        let originalColor = try require(annotation.fontColor)
+        let originalFont = annotation.font, originalBounds = annotation.bounds, originalText = annotation.contents
+        let originalDate = annotation.modificationDate, originalAlignment = annotation.alignment
+        let undo = UndoManager(); undo.groupsByEvent = false; store.setUndoManager(undo)
+        check(draft.values.fontColor == nil
+              && FreeTextAnnotationEditing.resolvedTextColor(draft.values, draft: draft).isEqual(originalColor),
+              "omitting an explicit color failed to preserve the imported native text color")
+
+        let green = PDFColorComponents(red: 0.125, green: 0.625, blue: 0.25, alpha: 1)
+        let invalidColors = [
+            PDFColorComponents(red: .nan, green: 0.5, blue: 0.5, alpha: 1),
+            PDFColorComponents(red: -0.001, green: 0.5, blue: 0.5, alpha: 1),
+            PDFColorComponents(red: 0.5, green: .infinity, blue: 0.5, alpha: 1),
+            PDFColorComponents(red: 0.5, green: 1.001, blue: 0.5, alpha: 1),
+            PDFColorComponents(red: 0.5, green: 0.5, blue: .infinity, alpha: 1),
+            PDFColorComponents(red: 0.5, green: 0.5, blue: -0.001, alpha: 1),
+            PDFColorComponents(red: 0.5, green: 0.5, blue: 0.5, alpha: .nan),
+            PDFColorComponents(red: 0.5, green: 0.5, blue: 0.5, alpha: 1.001)
+        ]
+        for (index, color) in invalidColors.enumerated() {
+            var rejected = draft.values; rejected.fontColor = color
+            check(FreeTextAnnotationEditing.validationMessage(rejected, draft: draft) != nil
+                  && !store.updateFreeText(draft, values: rejected)
+                  && annotation.fontColor?.isEqual(originalColor) == true
+                  && annotation.modificationDate == originalDate && !undo.canUndo && !store.hasUnsavedChanges,
+                  "invalid finite/range RGBA case \(index) changed the standard annotation or its Undo/save state")
+        }
+        var colored = draft.values; colored.fontColor = green
+        undo.beginUndoGrouping(); let saved = store.saveFreeText(draft, values: colored); undo.endUndoGrouping()
+        check(saved && FreeTextAnnotationEditing.matchesTextColor(green, annotation: annotation)
+              && annotation.contents == originalText && annotation.bounds == originalBounds
+              && annotation.font?.isEqual(originalFont) == true && annotation.alignment == originalAlignment
+              && annotation.userName == "External author"
+              && (annotation.value(forAnnotationKey: .name) as? String) == "external-freetext-fixture",
+              "a color-only actual Store save lost its text, geometry, font, alignment or external identity")
+        undo.undo()
+        check(annotation.fontColor?.isEqual(originalColor) == true
+              && annotation.contents == originalText && annotation.bounds == originalBounds
+              && annotation.modificationDate == originalDate && !undo.canUndo && undo.canRedo,
+              "one document Undo failed to restore the original text color and timestamp")
+        undo.redo()
+        check(FreeTextAnnotationEditing.matchesTextColor(green, annotation: annotation)
+              && annotation.contents == originalText && annotation.font?.isEqual(originalFont) == true,
+              "document Redo failed to restore the explicit standard font color")
+        let serialized = try require(document.dataRepresentationWithAIAnnotationsDisplayed())
+        let reopened = try require(PDFDocument(data: serialized))
+        let reopenedPage = try require(reopened.page(at: 0))
+        let reopenedAnnotation = try require(reopenedPage.annotations.first { $0.type == "FreeText" })
+        check(FreeTextAnnotationEditing.matchesTextColor(green, annotation: reopenedAnnotation)
+              && reopenedAnnotation.contents == originalText && reopenedAnnotation.bounds == originalBounds
+              && reopenedAnnotation.value(forAnnotationKey: .defaultAppearance) is String,
+              "explicit text color failed standard PDF serialization and native /DA readback")
+        let greenRendering = try pixels { reopenedPage.draw(with: .mediaBox, to: $0) }
+        check(greenPixels(greenRendering) > 100,
+              "serialized standard FreeText did not render the selected green text natively")
+        let current = FreeTextEditDraft(document: document, page: page, annotation: annotation)
+        var omitted = current.values; omitted.text = "A later edit without a color override"
+        omitted.fontColor = nil
+        undo.beginUndoGrouping(); let omittedSaved = store.saveFreeText(current, values: omitted); undo.endUndoGrouping()
+        check(omittedSaved && FreeTextAnnotationEditing.matchesTextColor(green, annotation: annotation),
+              "a subsequent nil-color edit rewrote the previously selected native font color")
+        undo.undo()
+        queue.waitUntilDrained()
+        let savedCopy = try require(PDFDocument(url: copies.workingCopyURL(forOriginalURL: originalURL)))
+        let savedAnnotation = try require(savedCopy.page(at: 0)?.annotations.first { $0.type == "FreeText" })
+        let finalOriginalBytes = try Data(contentsOf: originalURL)
+        check(FreeTextAnnotationEditing.matchesTextColor(green, annotation: savedAnnotation)
+              && savedAnnotation.contents == originalText && finalOriginalBytes == originalBytes,
+              "the actual working copy lost its selected text color or changed original PDF bytes")
+    }
+
+    private static func exerciseFontFace(root: URL, defaults: UserDefaults,
+                                         check: (Bool, String) -> Void) throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalURL = root.appendingPathComponent("original-font.pdf"), originalBytes = externalFreeTextPDF()
+        try originalBytes.write(to: originalURL)
+        let copies = try PDFWorkingCopyStore(directoryURL: root.appendingPathComponent("copies"))
+        let queue = PDFSaveQueue(recoveryDirectoryURL: root.appendingPathComponent("recovery"))
+        defer { queue.waitUntilDrained() }
+        let access = DocumentAccessCoordinator(saveQueue: queue)
+        let store = PDFDocumentStore(feedbackCenter: OperationFeedbackCenter(userDefaults: defaults),
+            metadataStore: DocumentMetadataStore(stateURL: root.appendingPathComponent("metadata.json")),
+            aiHighlightGroupStore: AIHighlightGroupStore(stateURL: root.appendingPathComponent("groups.json")),
+            workingCopyStore: copies, saveQueue: queue, accessCoordinator: access)
+        defer { store.releaseEditorAccess() }
+        check(store.openPDF(from: originalURL), "font-face fixture could not open its isolated actual PDF")
+        let document = try require(store.document), page = try require(document.page(at: 0))
+        let annotation = try require(page.annotations.first { $0.type == "FreeText" })
+        let originalFont = try require(annotation.font), originalColor = try require(annotation.fontColor)
+        let draft = FreeTextEditDraft(document: document, page: page, annotation: annotation)
+        let expectedFont = try require(NSFont(name: "Georgia", size: originalFont.pointSize))
+        let expectedName = expectedFont.fontName, originalText = annotation.contents
+        let originalBounds = annotation.bounds, originalDate = annotation.modificationDate
+        let undo = UndoManager(); undo.groupsByEvent = false; store.setUndoManager(undo)
+        check(expectedName != originalFont.fontName && draft.originalFontName == originalFont.fontName
+            && draft.values.fontName == nil
+            && FreeTextAnnotationEditing.resizedFont(draft.values, annotation: annotation).fontName == originalFont.fontName,
+            "the font fixture lacks a distinct available canonical face, or omitted face changes the original descriptor")
+        let missingName = "Dogear-Unavailable-Font-\(UUID())"
+        var invalid = draft.values; invalid.fontName = missingName
+        check(NSFont(name: missingName, size: originalFont.pointSize) == nil
+            && FreeTextAnnotationEditing.validationMessage(invalid, draft: draft) != nil
+            && !store.saveFreeText(draft, values: invalid) && annotation.font?.fontName == originalFont.fontName
+            && annotation.modificationDate == originalDate && !undo.canUndo && !store.hasUnsavedChanges,
+            "an unavailable explicit font face was accepted or changed the standard PDF/Undo/save state")
+        var values = draft.values; values.fontName = expectedName
+        undo.beginUndoGrouping(); let saved = store.saveFreeText(draft, values: values); undo.endUndoGrouping()
+        check(saved && annotation.font?.fontName == expectedName && annotation.font?.pointSize == originalFont.pointSize
+            && annotation.fontColor?.isEqual(originalColor) == true && annotation.contents == originalText
+            && annotation.bounds == originalBounds && annotation.userName == "External author"
+            && (annotation.value(forAnnotationKey: .name) as? String) == "external-freetext-fixture",
+            "a font-only actual Store save failed its exact canonical face or changed unrelated PDF values")
+        undo.undo()
+        check(annotation.font?.fontName == originalFont.fontName && annotation.font?.isEqual(originalFont) == true
+            && annotation.modificationDate == originalDate && !undo.canUndo && undo.canRedo,
+            "one document Undo failed to restore the original font face, descriptor and timestamp")
+        undo.redo()
+        check(annotation.font?.fontName == expectedName && annotation.font?.pointSize == expectedFont.pointSize
+            && annotation.contents == originalText && annotation.fontColor?.isEqual(originalColor) == true,
+            "document Redo failed to restore the selected canonical font face exactly")
+        let serialized = try require(document.dataRepresentationWithAIAnnotationsDisplayed())
+        let serializedDocument = try require(PDFDocument(data: serialized))
+        let serializedAnnotation = try require(serializedDocument.page(at: 0)?.annotations.first { $0.type == "FreeText" })
+        check(serializedAnnotation.font?.fontName == expectedName && serializedAnnotation.font?.pointSize == expectedFont.pointSize
+            && serializedAnnotation.contents == originalText && serializedAnnotation.bounds == originalBounds
+            && serializedAnnotation.value(forAnnotationKey: .defaultAppearance) is String,
+            "standard PDF serialization failed exact canonical font-face and /DA native readback")
+        let current = FreeTextEditDraft(document: document, page: page, annotation: annotation)
+        var resized = current.values; resized.fontSize = 24
+        undo.beginUndoGrouping(); let resizedSaved = store.saveFreeText(current, values: resized); undo.endUndoGrouping()
+        check(resized.fontName == nil && resizedSaved && annotation.font?.fontName == expectedName
+            && annotation.font?.pointSize == 24,
+            "a later omitted-face size edit replaced the previously selected canonical font")
+        undo.undo(); queue.waitUntilDrained()
+        let diskDocument = try require(PDFDocument(url: copies.workingCopyURL(forOriginalURL: originalURL)))
+        let diskAnnotation = try require(diskDocument.page(at: 0)?.annotations.first { $0.type == "FreeText" })
+        let originalAfter = try Data(contentsOf: originalURL)
+        check(diskAnnotation.font?.fontName == expectedName && diskAnnotation.font?.pointSize == originalFont.pointSize
+            && diskAnnotation.contents == originalText && originalAfter == originalBytes,
+            "the actual working-copy reload lost the canonical selected face or altered original PDF bytes")
     }
 
     private static func externalFreeTextPDF() -> Data {
@@ -287,6 +506,12 @@ enum FreeTextEditingDiagnostics {
     private static func bluePixels(_ bytes: [UInt8]) -> Int {
         stride(from: 0, to: bytes.count, by: 4).filter {
             Int(bytes[$0 + 2]) > Int(bytes[$0]) + 50 && Int(bytes[$0 + 2]) > Int(bytes[$0 + 1]) + 50
+        }.count
+    }
+
+    private static func greenPixels(_ bytes: [UInt8]) -> Int {
+        stride(from: 0, to: bytes.count, by: 4).filter {
+            Int(bytes[$0 + 1]) > Int(bytes[$0]) + 50 && Int(bytes[$0 + 1]) > Int(bytes[$0 + 2]) + 50
         }.count
     }
 

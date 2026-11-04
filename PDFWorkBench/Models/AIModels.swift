@@ -1,21 +1,5 @@
 import Foundation
 
-struct PDFTextSelectionSnapshot: Equatable {
-    let text: String
-    let pageNumbers: [Int]
-    var passages: [PDFSelectedPassage] = []
-
-    var isEmpty: Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
-
-struct PDFSelectedPassage: Equatable {
-    let pageNumber: Int
-    let text: String
-    let bounds: CGRect
-}
-
 enum AISecretStorageMode: String, Codable, CaseIterable, Identifiable {
     case plaintextFile
     case keychain
@@ -27,7 +11,7 @@ enum AISecretStorageMode: String, Codable, CaseIterable, Identifiable {
         case .plaintextFile:
             return "Local configuration file"
         case .keychain:
-            return "macOS Keychain"
+            return AIKeychainPlatformText.name
         }
     }
 }

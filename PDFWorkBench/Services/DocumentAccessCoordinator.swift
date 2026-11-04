@@ -1,4 +1,3 @@
-import AppKit
 import CryptoKit
 import Foundation
 import PDFKit
@@ -53,34 +52,6 @@ struct PDFSourceRetrievalCandidate {
     let document: PDFDocument
 }
 
-/// The view owns this observation; NotificationCenter never owns the view or
-/// editor through its callback. Closing or dropping the view removes the token.
-@MainActor
-final class DocumentEditorWindowCloseObserver: NSObject {
-    private var observer: NSObjectProtocol?
-    private let onClose: () -> Void
-
-    init(window: NSWindow, onClose: @escaping () -> Void) {
-        self.onClose = onClose
-        super.init()
-        observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
-            object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.stopObserving()
-                    self.onClose()
-                }
-            }
-    }
-
-    private func stopObserving() {
-        if let observer { NotificationCenter.default.removeObserver(observer) }
-        observer = nil
-    }
-
-    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
-}
-
 /// All PDFKit access remains on the main actor. Background research receives an
 /// independent read snapshot; it never acquires an editor or creates a working copy.
 @MainActor
@@ -88,7 +59,7 @@ final class DocumentAccessCoordinator {
     static let shared = DocumentAccessCoordinator()
 
     final class Entry {
-        weak var owner: PDFDocumentStore?
+        weak var owner: (any PDFDocumentEditingOwner)?
         var originalURL: URL
         var fileID: UUID?
         var document: PDFDocument
@@ -98,7 +69,7 @@ final class DocumentAccessCoordinator {
         var generation = UUID()
         var hasPreparedData = true
 
-        init(owner: PDFDocumentStore, originalURL: URL, document: PDFDocument, workingCopyURL: URL?) {
+        init(owner: any PDFDocumentEditingOwner, originalURL: URL, document: PDFDocument, workingCopyURL: URL?) {
             self.owner = owner
             self.originalURL = originalURL
             self.document = document
@@ -207,7 +178,7 @@ final class DocumentAccessCoordinator {
     func notePreparedData(for url: URL) { entries[url.libraryComparablePath]?.hasPreparedData = true }
 
     @discardableResult
-    func activateExistingEditor(for url: URL, excluding store: PDFDocumentStore? = nil) -> Bool {
+    func activateExistingEditor(for url: URL, excluding store: (any PDFDocumentEditingOwner)? = nil) -> Bool {
         guard let owner = entries[url.libraryComparablePath]?.owner, owner !== store else { return false }
         owner.activateEditor()
         return true
@@ -216,7 +187,7 @@ final class DocumentAccessCoordinator {
     /// A security-scoped bookmark may follow a Finder move before the active
     /// editor has a new path. Check stable identity before opening a new store.
     @discardableResult
-    func activateExistingEditor(fileID: UUID, excluding store: PDFDocumentStore? = nil) -> Bool {
+    func activateExistingEditor(fileID: UUID, excluding store: (any PDFDocumentEditingOwner)? = nil) -> Bool {
         guard let path = pathsByFileID[fileID], let owner = entries[path]?.owner,
               owner !== store else { return false }
         owner.activateEditor()
@@ -228,7 +199,7 @@ final class DocumentAccessCoordinator {
         return entry
     }
 
-    func register(_ store: PDFDocumentStore, url: URL, document: PDFDocument, workingCopyURL: URL?) {
+    func register(_ store: any PDFDocumentEditingOwner, url: URL, document: PDFDocument, workingCopyURL: URL?) {
         let path = url.libraryComparablePath
         if let entry = retainedEntry(for: url) {
             precondition(entry.owner == nil || entry.owner === store)
@@ -240,7 +211,7 @@ final class DocumentAccessCoordinator {
         }
     }
 
-    func bind(fileID: UUID, to store: PDFDocumentStore, url: URL) -> Bool {
+    func bind(fileID: UUID, to store: any PDFDocumentEditingOwner, url: URL) -> Bool {
         let path = url.libraryComparablePath
         if let existingPath = pathsByFileID[fileID], existingPath != path,
            let existing = entries[existingPath], existing.owner != nil || existing.dirty {
@@ -253,11 +224,11 @@ final class DocumentAccessCoordinator {
         return true
     }
 
-    func owns(_ store: PDFDocumentStore, url: URL) -> Bool {
+    func owns(_ store: any PDFDocumentEditingOwner, url: URL) -> Bool {
         entries[url.libraryComparablePath]?.owner === store
     }
 
-    func release(_ store: PDFDocumentStore, url: URL) {
+    func release(_ store: any PDFDocumentEditingOwner, url: URL) {
         let path = url.libraryComparablePath
         guard let entry = entries[path], entry.owner === store else { return }
         entry.owner = nil
@@ -265,7 +236,7 @@ final class DocumentAccessCoordinator {
     }
 
     /// Called only after explicit user confirmation by the discard command.
-    func discardRetainedState(for url: URL, owner: PDFDocumentStore) {
+    func discardRetainedState(for url: URL, owner: any PDFDocumentEditingOwner) {
         guard owns(owner, url: url) else { return }
         entries.removeValue(forKey: url.libraryComparablePath)
     }
@@ -427,48 +398,7 @@ final class DocumentAccessCoordinator {
     /// A semantic fingerprint, not PDF serialization bytes (which may contain
     /// changing metadata). Local AI visibility flags are deliberately excluded.
     static func contentVersion(of document: PDFDocument) -> String {
-        var values = ["dogear-source-v1", String(document.pageCount)]
-        for index in 0..<document.pageCount {
-            guard let page = document.page(at: index) else { continue }
-            values += [page.string ?? "", String(page.rotation)]
-            for box in [PDFDisplayBox.mediaBox, .cropBox, .bleedBox, .trimBox, .artBox] {
-                values.append(NSStringFromRect(page.bounds(for: box)))
-            }
-            for annotation in page.annotations {
-                values.append(annotation.type ?? "")
-                values.append(NSStringFromRect(annotation.bounds))
-                values.append(annotation.contents ?? "")
-                values.append(annotation.userName ?? "")
-                values.append(annotation.modificationDate.map { String($0.timeIntervalSince1970) } ?? "")
-                values.append(colorVersion(annotation.color))
-                values.append(colorVersion(annotation.interiorColor))
-                values.append(annotation.font?.fontName ?? "")
-                values.append(String(describing: annotation.font?.pointSize ?? 0))
-                values.append(colorVersion(annotation.fontColor))
-                values.append(String(annotation.alignment.rawValue))
-                values.append(String(describing: annotation.border?.lineWidth ?? 0))
-                values.append(String(annotation.border?.style.rawValue ?? 0))
-                values.append(annotation.border?.dashPattern?.map { String(describing: $0) }.joined(separator: ",") ?? "")
-                values.append(annotation.quadrilateralPoints?.map { NSStringFromPoint($0.pointValue) }.joined(separator: ",") ?? "")
-                values.append(annotation.paths?.map { path in
-                    var parts: [String] = []
-                    for element in 0..<path.elementCount {
-                        var points = [NSPoint](repeating: .zero, count: 3)
-                        let kind = path.element(at: element, associatedPoints: &points)
-                        let count = kind == .cubicCurveTo ? 3 : (kind == .quadraticCurveTo ? 2 : (kind == .closePath ? 0 : 1))
-                        parts.append("\(kind.rawValue):" + points.prefix(count).map(NSStringFromPoint).joined(separator: ","))
-                    }
-                    return parts.joined(separator: ";")
-                }.joined(separator: "|") ?? "")
-            }
-        }
-        let encoded = values.map { "\($0.utf8.count):\($0)" }.joined()
-        return SHA256.hash(data: Data(encoded.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func colorVersion(_ color: NSColor?) -> String {
-        guard let color = color?.usingColorSpace(.deviceRGB) else { return "" }
-        return "\(color.redComponent),\(color.greenComponent),\(color.blueComponent),\(color.alphaComponent)"
+        PDFDocumentContentVersion.value(of: document)
     }
 
     private static func sha256(_ data: Data) -> String {

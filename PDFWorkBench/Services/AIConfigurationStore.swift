@@ -285,7 +285,7 @@ final class AIConfigurationStore: ObservableObject {
             hasKeychainAPIKey = true
             isAPIKeyConfigured = true
             try persistConfiguration()
-            connectionStatus = "API key saved in macOS Keychain."
+            connectionStatus = AIKeychainPlatformText.saved
         }
     }
 
@@ -504,8 +504,8 @@ final class AIConfigurationStore: ObservableObject {
             connectionStatus = key.isEmpty
                 ? (hasKeychainAPIKey
                     ? "Saved Keychain storage selected."
-                    : "New keys will be stored in macOS Keychain.")
-                : "API key moved from the local configuration file to macOS Keychain."
+                    : AIKeychainPlatformText.newKeys)
+                : AIKeychainPlatformText.moved
         } catch {
             isApplyingTransaction = true
             configuration = previousConfiguration

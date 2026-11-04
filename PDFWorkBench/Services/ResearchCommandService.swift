@@ -27,6 +27,8 @@ nonisolated struct ResearchWorkspaceViewState: Codable, Equatable, Sendable {
 
 nonisolated enum ResearchZoomCommand: Equatable, Sendable {
     case fit
+    /// Native reader intent; the provider's existing "fit" contract is unchanged.
+    case fitWidth
     case percent(Double)
 }
 
@@ -436,7 +438,7 @@ final class ResearchCommandExecutor: AIToolExecuting {
         self.definitions = definitions
     }
 
-    func execute(_ invocation: AIToolInvocation) async throws -> AIToolExecutionResult {
+    nonisolated func execute(_ invocation: AIToolInvocation) async throws -> AIToolExecutionResult {
         try await service.execute(invocation, requestID: requestID)
     }
 }

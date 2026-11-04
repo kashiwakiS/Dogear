@@ -28,7 +28,6 @@ struct PDFKitView: NSViewRepresentable {
     let onToggleDogearAtPage: (Int) -> Void
     let onSelectMarginAnnotation: (PDFAnnotationItem.ID) -> Void
     let onSelectMarginText: (String, Int) -> Void
-    let onHighlightCreated: (FeedbackTrigger) -> Void
     let onHighlightRemoved: (FeedbackTrigger) -> Void
     let onAnnotationChanged: () -> Void
     let onUndoableAnnotationMutation: (String) -> Void
@@ -41,6 +40,9 @@ struct PDFKitView: NSViewRepresentable {
     var onUserInteraction: (() -> Void)? = nil
     var onReadingPositionChanged: ((PDFNavigationTarget) -> Void)? = nil
     var canCommitFreeText: (PDFDocument) -> Bool = { _ in false }
+    var onPrepareFreeTextDraft: (PDFDocument, PDFPage, CGRect) -> FreeTextEditDraft? = { _, _, _ in nil }
+    var onCommitFreeText: (FreeTextEditDraft, FreeTextEditValues) -> Bool = { _, _ in false }
+    var onCommitHighlight: (PDFDocument, PDFSelection, FeedbackTrigger) -> Bool = { _, _, _ in false }
 
     @Environment(\.locale) private var locale
 
@@ -60,6 +62,9 @@ struct PDFKitView: NSViewRepresentable {
         let pdfView = container.pdfView
         pdfView.workspaceUndoManager = documentUndoManager
         pdfView.canCommitFreeText = canCommitFreeText
+        pdfView.onPrepareFreeTextDraft = onPrepareFreeTextDraft
+        pdfView.onCommitFreeText = onCommitFreeText
+        pdfView.onCommitHighlight = onCommitHighlight
         // PDFKit's data detectors add temporary Link annotations for addresses,
         // URLs, dates, and phone numbers. They duplicate the app's link layer
         // and can add non-interactive dotted menus over wrapped PDF links.
@@ -71,7 +76,6 @@ struct PDFKitView: NSViewRepresentable {
         pdfView.displayDirection = .vertical
         pdfView.displaysAsBook = displayStyle.displaysAsBook
         pdfView.shortcutSet = shortcutSet
-        pdfView.onHighlightCreated = onHighlightCreated
         pdfView.onHighlightRemoved = onHighlightRemoved
         pdfView.onAnnotationChanged = onAnnotationChanged
         pdfView.onUndoableAnnotationMutation = onUndoableAnnotationMutation
@@ -114,6 +118,9 @@ struct PDFKitView: NSViewRepresentable {
         defer { context.coordinator.endViewUpdate(in: container) }
         pdfView.workspaceUndoManager = documentUndoManager
         pdfView.canCommitFreeText = canCommitFreeText
+        pdfView.onPrepareFreeTextDraft = onPrepareFreeTextDraft
+        pdfView.onCommitFreeText = onCommitFreeText
+        pdfView.onCommitHighlight = onCommitHighlight
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onScaleChanged = onScaleChanged
         context.coordinator.onSelectionChanged = onSelectionChanged
@@ -147,7 +154,6 @@ struct PDFKitView: NSViewRepresentable {
             }
         }
         pdfView.shortcutSet = shortcutSet
-        pdfView.onHighlightCreated = onHighlightCreated
         pdfView.onHighlightRemoved = onHighlightRemoved
         pdfView.onAnnotationChanged = onAnnotationChanged
         pdfView.onUndoableAnnotationMutation = onUndoableAnnotationMutation
@@ -311,35 +317,18 @@ struct PDFKitView: NSViewRepresentable {
                 object: pdfView,
                 queue: .main
             ) { [weak self, weak pdfView] _ in
-                guard let self else { return }
-                guard let pdfView,
-                      let document = pdfView.document,
-                      let selection = pdfView.currentSelection,
-                      let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !text.isEmpty
-                else {
-                    self.onSelectionChanged(nil)
-                    return
-                }
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    guard let pdfView,
+                          let document = pdfView.document,
+                          let selection = pdfView.currentSelection
+                    else {
+                        self.onSelectionChanged(nil)
+                        return
+                    }
 
-                let pages = selection.pages
-                    .map { document.index(for: $0) }
-                    .filter { $0 != NSNotFound }
-                    .map { $0 + 1 }
-                self.onSelectionChanged(
-                    PDFTextSelectionSnapshot(
-                        text: text,
-                        pageNumbers: Array(Set(pages)).sorted(),
-                        passages: selection.pages.compactMap { page in
-                            let index = document.index(for: page)
-                            guard index != NSNotFound else { return nil }
-                            let lines = selection.selectionsByLine().filter { $0.pages.contains { $0 === page } }
-                            let selectedText = lines.compactMap(\.string).joined(separator: "\n")
-                            return PDFSelectedPassage(pageNumber: index + 1,
-                                text: selectedText.isEmpty ? text : selectedText, bounds: selection.bounds(for: page))
-                        }
-                    )
-                )
+                    self.onSelectionChanged(PDFTextSelectionService.snapshot(of: selection, in: document))
+                }
             }
         }
 
@@ -628,71 +617,6 @@ struct PDFKitView: NSViewRepresentable {
             }
         }
     }
-}
-
-enum PDFReadingDisplayStyle: String, CaseIterable, Identifiable {
-    case singlePage
-    case continuous
-    case twoUp
-
-    var id: String {
-        rawValue
-    }
-
-    var title: String {
-        switch self {
-        case .singlePage:
-            return "Single"
-        case .continuous:
-            return "Continuous"
-        case .twoUp:
-            return "Two-Up"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .singlePage:
-            return "doc"
-        case .continuous:
-            return "doc.text"
-        case .twoUp:
-            return "square.split.2x1"
-        }
-    }
-
-    var pdfDisplayMode: PDFDisplayMode {
-        switch self {
-        case .singlePage:
-            return .singlePage
-        case .continuous:
-            return .singlePageContinuous
-        case .twoUp:
-            return .twoUpContinuous
-        }
-    }
-
-    var displaysAsBook: Bool {
-        // PDFKit's book layout shows the first page as a cover and can leave
-        // the final page stranded outside the scrollable document in
-        // continuous two-up mode. Keep normal page pairing (1-2, 3-4, ...).
-        false
-    }
-}
-
-struct PDFZoomCommand: Equatable {
-    let id: Int
-    let action: PDFZoomAction
-}
-
-enum PDFZoomAction: Equatable {
-    case zoomIn
-    case zoomOut
-    case actualSize
-    case fitWidth
-    case fitPage
-    /// A percentage (125 means 125%), bounded to the native reader's range.
-    case custom(Double)
 }
 
 struct PDFReadingShortcutSet: Equatable {
@@ -1260,12 +1184,14 @@ final class HighlightingPDFView: PDFView, NSUserInterfaceValidations {
 
     var onUserInteraction: (() -> Void)?
     var shortcutSet: PDFReadingShortcutSet = .defaultReading
-    var onHighlightCreated: ((FeedbackTrigger) -> Void)?
     var onHighlightRemoved: ((FeedbackTrigger) -> Void)?
     var onAnnotationChanged: (() -> Void)?
     var onUndoableAnnotationMutation: ((String) -> Void)?
     var onFreeTextShortcut: (() -> Void)?
     var canCommitFreeText: (PDFDocument) -> Bool = { _ in false }
+    var onPrepareFreeTextDraft: (PDFDocument, PDFPage, CGRect) -> FreeTextEditDraft? = { _, _, _ in nil }
+    var onCommitFreeText: (FreeTextEditDraft, FreeTextEditValues) -> Bool = { _, _ in false }
+    var onCommitHighlight: (PDFDocument, PDFSelection, FeedbackTrigger) -> Bool = { _, _, _ in false }
     var onDogearShortcut: (() -> Void)?
     var onShortcutActivated: ((PDFReadingShortcutAction, String) -> Void)?
     var onAnnotatedHighlightPressed: ((PDFAnnotation) -> Bool)?
@@ -1787,17 +1713,11 @@ final class HighlightingPDFView: PDFView, NSUserInterfaceValidations {
         guard let window, window.attachedSheet == nil, let document,
               canCommitFreeText(document),
               let page = currentPage ?? document.page(at: 0) else { return }
-        let note = PDFAnnotation(bounds: defaultFreeTextBounds(on: page), forType: .freeText, withProperties: nil)
-        note.font = FreeTextAnnotationEditing.defaultFont
-        note.fontColor = Self.freeTextForegroundColor
-        note.alignment = .left
-        note.shouldDisplay = false
-        note.shouldPrint = true
-        note.border = PDFBorder()
-        note.border?.lineWidth = 0
-        note.removeValue(forAnnotationKey: .color)
-        note.removeValue(forAnnotationKey: .interiorColor)
-        let draft = FreeTextEditDraft(document: document, page: page, annotation: note, isNew: true)
+        guard let draft = onPrepareFreeTextDraft(document, page, defaultFreeTextBounds(on: page)),
+              draft.isNew, draft.document === document, draft.page === page,
+              draft.annotation.page == nil else { return }
+        // Mac draws note text in its existing margin/reader overlay.
+        draft.annotation.shouldDisplay = false
         let panel = NSPanel(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
         panel.title = L10n.string("Add Free Text Note")
         panel.isReleasedWhenClosed = false
@@ -1823,106 +1743,27 @@ final class HighlightingPDFView: PDFView, NSUserInterfaceValidations {
               canCommitFreeText(draft.document),
               draft.annotation.page == nil,
               FreeTextAnnotationEditing.validationMessage(values, draft: draft) == nil else { return false }
-        FreeTextAnnotationEditing.apply(values, draft: draft)
-        draft.page.addAnnotation(draft.annotation)
-        registerAnnotationPresenceUndo(
-            [AnnotationUndoRecord(page: draft.page, annotation: draft.annotation)],
-            restoringPresence: false,
-            actionName: "Add Free Text Note"
-        )
+        guard onCommitFreeText(draft, values) else { return false }
         refreshDisplay(for: draft.page)
-        onAnnotationChanged?()
         return true
     }
 
     @discardableResult
     func addHighlightToCurrentSelection(trigger: FeedbackTrigger) -> Bool {
-        guard let selection = currentSelection,
+        guard let document, let selection = currentSelection,
               selection.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         else {
             NSSound.beep()
             return false
         }
 
-        var pageGeometries: [PageHighlightGeometry] = []
-
-        for lineSelection in selection.selectionsByLine() {
-            for page in lineSelection.pages {
-                let bounds = lineSelection.bounds(for: page)
-
-                guard !bounds.isEmpty else {
-                    continue
-                }
-
-                let highlightBounds = bounds.insetBy(dx: -1, dy: -1)
-                let selectedText = lineSelection.string?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if let geometryIndex = pageGeometries.firstIndex(where: { $0.page === page }) {
-                    pageGeometries[geometryIndex].lineBounds.append(highlightBounds)
-                    if !selectedText.isEmpty {
-                        pageGeometries[geometryIndex].textFragments.append(selectedText)
-                    }
-                } else {
-                    pageGeometries.append(
-                        PageHighlightGeometry(
-                            page: page,
-                            lineBounds: [highlightBounds],
-                            textFragments: selectedText.isEmpty ? [] : [selectedText]
-                        )
-                    )
-                }
-            }
-        }
-
-        var records: [AnnotationUndoRecord] = []
-        for geometry in pageGeometries {
-            guard let annotationBounds = geometry.lineBounds.reduce(nil, { partialBounds, lineBounds in
-                partialBounds?.union(lineBounds) ?? lineBounds
-            }) else {
-                continue
-            }
-
-            let highlight = PDFAnnotation(
-                bounds: annotationBounds,
-                forType: .highlight,
-                withProperties: nil
-            )
-            highlight.color = Self.highlightColor
-            highlight.quadrilateralPoints = geometry.lineBounds.flatMap {
-                quadrilateralPoints(for: $0, relativeTo: annotationBounds.origin)
-            }
-            AnnotationExtractor.storeExactHighlightText(
-                geometry.textFragments.joined(separator: "\n"),
-                in: highlight
-            )
-            // Keep contents empty so PDFKit does not show highlight note popovers.
-            geometry.page.addAnnotation(highlight)
-            records.append(AnnotationUndoRecord(page: geometry.page, annotation: highlight))
-        }
-
-        clearSelection()
-        setNeedsDisplay(bounds)
-        guard !records.isEmpty else {
+        guard onCommitHighlight(document, selection, trigger) else {
             NSSound.beep()
             return false
         }
-
-        registerAnnotationPresenceUndo(
-            records,
-            restoringPresence: false,
-            actionName: "Add Highlight"
-        )
-        onHighlightCreated?(trigger)
+        clearSelection()
+        setNeedsDisplay(bounds)
         return true
-    }
-
-    private func quadrilateralPoints(for bounds: NSRect, relativeTo origin: NSPoint) -> [NSValue] {
-        [
-            NSValue(point: NSPoint(x: bounds.minX - origin.x, y: bounds.maxY - origin.y)),
-            NSValue(point: NSPoint(x: bounds.maxX - origin.x, y: bounds.maxY - origin.y)),
-            NSValue(point: NSPoint(x: bounds.minX - origin.x, y: bounds.minY - origin.y)),
-            NSValue(point: NSPoint(x: bounds.maxX - origin.x, y: bounds.minY - origin.y))
-        ]
     }
 
     private func highlightAnnotation(at event: NSEvent) -> PDFAnnotation? {
@@ -2499,26 +2340,12 @@ final class HighlightingPDFView: PDFView, NSUserInterfaceValidations {
         let annotation: PDFAnnotation
     }
 
-    private struct PageHighlightGeometry {
-        let page: PDFPage
-        var lineBounds: [NSRect]
-        var textFragments: [String]
-    }
-
     private enum QuietLinkKind {
         case documentReference
         case citation
         case backReference
         case external
         case internalLink
-    }
-
-    private static var highlightColor: NSColor {
-        NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.24, alpha: 1.0)
-    }
-
-    private static var freeTextForegroundColor: NSColor {
-        NSColor(calibratedRed: 0.84, green: 0.05, blue: 0.07, alpha: 1.0)
     }
 
     deinit {

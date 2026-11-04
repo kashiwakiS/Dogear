@@ -1,4 +1,6 @@
+#if os(macOS)
 import Accelerate
+#endif
 import CryptoKit
 import Foundation
 
@@ -15,6 +17,7 @@ nonisolated struct AIRetrievalSelection: Sendable {
     static let packageDefaultsKey = "PDFWorkBench.AIEmbeddingPackage"
 
     static func capture(from defaults: UserDefaults) throws -> Self {
+        #if os(macOS)
         let raw = defaults.string(forKey: AIRetrievalMode.defaultsKey) ?? AIRetrievalMode.scheme1Lexical.rawValue
         guard let mode = AIRetrievalMode(rawValue: raw) else { throw AIRetrievalError.invalidSelection }
         if mode == .scheme1Lexical { return .lexical }
@@ -23,6 +26,10 @@ nonisolated struct AIRetrievalSelection: Sendable {
             throw AIRetrievalError.modelMissing
         }
         return Self(mode: mode, packageID: id)
+        #else
+        // iPad currently supports the actual BM25 workflow only.
+        return .lexical
+        #endif
     }
 }
 
@@ -73,6 +80,7 @@ nonisolated struct AILexicalEvidenceRetriever: AIEvidenceRetrieving {
     }
 }
 
+#if os(macOS)
 nonisolated struct AIEmbeddingChunk: Codable, Equatable, Sendable {
     let anchorID: AISegmentID
     let ids: [AISegmentID]
@@ -145,6 +153,8 @@ nonisolated struct AIEmbeddingChunk: Codable, Equatable, Sendable {
     }
 }
 
+#endif
+
 nonisolated enum AIRetrievalHash {
     static func data(_ value: Data) -> String { SHA256.hash(data: value).map { String(format: "%02x", $0) }.joined() }
     static func file(_ url: URL) throws -> String {
@@ -158,6 +168,7 @@ nonisolated enum AIRetrievalHash {
     }
 }
 
+#if os(macOS)
 actor AIHybridEvidenceRetriever: AIEvidenceRetrieving {
     private let registry: AISegmentRegistry
     private let embedder: any AIQueryEmbedding
@@ -247,6 +258,8 @@ actor AIHybridEvidenceRetriever: AIEvidenceRetrieving {
     }
 }
 
+#endif
+
 /// One canonical (D001) index per file; this adapter alone maps request ordinals.
 nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
     struct Source: Sendable {
@@ -268,12 +281,16 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
         self.mode = mode
         self.registry = registry
         if mode == .scheme2EvidenceRAG {
+            #if os(macOS)
             guard globalLexicalIndex == nil,
                   sources.allSatisfy({ $0.retriever is AIHybridEvidenceRetriever }) else {
                 throw AIRetrievalError.invalidSelection
             }
             self.globalLexicalSearcher = nil
             return
+            #else
+            throw AIRetrievalError.invalidSelection
+            #endif
         }
         guard let registry else {
             self.globalLexicalSearcher = nil
@@ -308,6 +325,7 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
             let localRequest = AISegmentSearchRequest(query: request.query,
                 scope: localScope, topK: request.topK, strategy: request.strategy)
             if mode == .scheme2EvidenceRAG {
+                #if os(macOS)
                 guard let hybrid = source.retriever as? AIHybridEvidenceRetriever else {
                     throw AIRetrievalError.invalidSelection
                 }
@@ -325,6 +343,9 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
                     limit: localLimit,
                     strategy: request.strategy
                 ))
+                #else
+                throw AIRetrievalError.invalidSelection
+                #endif
             } else {
                 let results = try await source.retriever.search(localRequest)
                 rankings.append(results.map { result in
@@ -369,6 +390,7 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
             ), in: registry)
                 .prefix(pool))
         } else {
+            #if os(macOS)
             denseCandidates.sort { $0.score == $1.score ? $0.id < $1.id : $0.score > $1.score }
             let dense = Array(denseCandidates.prefix(pool))
             // Scheme 2 constructs and queries only the dense channel. Keeping
@@ -377,6 +399,9 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
                 lexical: [],
                 dense: dense.map(\.id)
             )
+            #else
+            throw AIRetrievalError.invalidSelection
+            #endif
         }
         var byID = Dictionary(uniqueKeysWithValues: ranked.map { ($0.id, $0) })
         for candidate in rankings.flatMap({ $0 }) where byID[candidate.id] == nil {
@@ -391,6 +416,7 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
         }
         let sourceRankings = order.compactMap { documentNumber -> [AISegmentSearchResult]? in
             guard let candidates = grouped[documentNumber] else { return nil }
+            #if os(macOS)
             guard mode == .scheme2EvidenceRAG,
                   request.strategy == .overviewSalience else {
                 return candidates
@@ -403,6 +429,9 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
                 candidates,
                 limit: candidates.count
             )
+            #else
+            return candidates
+            #endif
         }
         return Self.balance(sourceRankings, limit: limit)
     }
@@ -425,6 +454,7 @@ nonisolated struct AIMultiSourceEvidenceRetriever: AIEvidenceRetrieving {
     }
 }
 
+#if os(macOS)
 nonisolated protocol AIQueryEmbedding: Sendable {
     func embedQuery(_ text: String) async throws -> [Float]
 }
@@ -444,6 +474,8 @@ actor AICachedQueryEmbedder: AIQueryEmbedding {
         return value
     }
 }
+
+#endif
 
 nonisolated struct AIMultiSourceCoverage: Sendable, Equatable {
     struct Skipped: Sendable, Equatable {
@@ -468,7 +500,9 @@ nonisolated struct AIMultiSourceRetrievalPreparation: Sendable {
     let coverage: AIMultiSourceCoverage
 }
 
+#if os(macOS)
 nonisolated protocol AITextEmbedding: AIQueryEmbedding {
     var tokenizer: AIBertWordPieceTokenizer { get }
     func embed(tokens: [Int32]) async throws -> [Float]
 }
+#endif

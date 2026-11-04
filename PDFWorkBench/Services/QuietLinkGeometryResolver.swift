@@ -2,7 +2,7 @@ import Foundation
 import PDFKit
 
 enum QuietLinkGeometryResolver {
-    static func rects(for annotation: PDFAnnotation, on page: PDFPage) -> [NSRect] {
+    static func rects(for annotation: PDFAnnotation, on page: PDFPage) -> [CGRect] {
         let fallback = [annotation.bounds]
         guard annotation.type == "Link",
               let url = (annotation.action as? PDFActionURL)?.url ?? annotation.url,
@@ -110,7 +110,7 @@ enum QuietLinkGeometryResolver {
         return targetIndex == targetText.length ? matchedIndices : nil
     }
 
-    private static func lineRects(for characterIndices: [Int], on page: PDFPage) -> [NSRect] {
+    private static func lineRects(for characterIndices: [Int], on page: PDFPage) -> [CGRect] {
         guard let firstCharacterIndex = characterIndices.first,
               let lastCharacterIndex = characterIndices.last,
               let matchedSelection = page.selection(

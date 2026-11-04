@@ -27,17 +27,21 @@ struct ResearchPanelView: View {
     @State private var localError: String?
     @State private var showingImageImporter = false
     @State private var imageImportRequest: ResearchImageImportRequest?
+    @StateObject private var composerEditing: ResearchComposerEditingSession
+    @StateObject private var composerCommands = ResearchTextEditingCommands()
 
     init(store: ResearchStore? = nil, runtime: ResearchRuntime? = nil, library: LibraryStore,
          sessionID: Binding<UUID?>, currentFileID: UUID?, mainStore: PDFDocumentStore?, viewID: UUID,
          compact: Bool, onAddSelection: @escaping () -> Void, onCaptureRegion: @escaping () -> Void,
          onViewEvidence: @escaping (ResearchEvidence) -> Void, onShowLibrary: @escaping () -> Void,
          onToggleWide: @escaping () -> Void) {
-        self.store = store ?? .shared; self.runtime = runtime ?? .shared; self.library = library
+        let resolvedStore = store ?? ResearchStore.shared
+        self.store = resolvedStore; self.runtime = runtime ?? .shared; self.library = library
         _sessionID = sessionID
         self.currentFileID = currentFileID; self.mainStore = mainStore; self.viewID = viewID
         self.compact = compact; self.onAddSelection = onAddSelection; self.onCaptureRegion = onCaptureRegion
         self.onViewEvidence = onViewEvidence; self.onShowLibrary = onShowLibrary; self.onToggleWide = onToggleWide
+        _composerEditing = StateObject(wrappedValue: ResearchComposerEditingSession(store: resolvedStore, editorID: viewID))
     }
 
     private var session: ResearchSession? { sessionID.flatMap { store.session(id: $0) } }
@@ -78,7 +82,12 @@ struct ResearchPanelView: View {
             }
         }
         .onDrop(of: [UTType.image.identifier, UTType.fileURL.identifier], isTargeted: $isDropTarget, perform: receiveDrop)
-        .onAppear { if sessionID == nil { createSession() } }
+        .onAppear { if sessionID == nil { createSession() }; bindComposer() }
+        .onChange(of: sessionID) { _, _ in bindComposer() }
+        .onChange(of: store.composerEditorOwners) { _, _ in
+            if let sessionID, store.composerOwner(sessionID: sessionID) == nil { bindComposer() }
+        }
+        .onDisappear { _ = composerEditing.release() }
         .sheet(item: $attachmentPreview) { attachment in
             ResearchAttachmentPreview(attachment: attachment, store: store)
                 .environment(\.locale, languageStore.locale)
@@ -103,7 +112,7 @@ struct ResearchPanelView: View {
                 Button("New research session", systemImage: "plus", action: createSession)
                 Divider()
                 ForEach(store.sessions) { item in
-                    Button { sessionID = item.id } label: {
+                    Button { selectSession(item.id) } label: {
                         if item.id == sessionID { Label(item.title, systemImage: "checkmark") }
                         else { Text(item.title) }
                     }
@@ -324,6 +333,29 @@ struct ResearchPanelView: View {
 
     private func composer(_ session: ResearchSession) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !composerEditing.ownsEditor {
+                HStack {
+                    Text("This input is being edited in another window.").font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Button("Edit here") { _ = composerEditing.takeOver() }.controlSize(.small)
+                }
+            }
+            if let error = composerEditing.error {
+                HStack {
+                    Text(verbatim: error).font(.caption).foregroundStyle(.orange)
+                    Button("Retry save") { _ = composerEditing.retrySave() }.controlSize(.small)
+                }
+            }
+            let conflicts = store.composerConflicts.filter { $0.sessionID == session.id && !$0.isResolved }
+            if !conflicts.isEmpty {
+                Menu("Recover input", systemImage: "arrow.uturn.backward") {
+                    ForEach(conflicts) { record in
+                        Button { _ = composerEditing.restoreConflict(record.id) } label: {
+                            Text(verbatim: String(record.text.prefix(80)))
+                        }
+                    }
+                }.disabled(!composerEditing.ownsEditor).controlSize(.small)
+            }
             if !store.saveFailures.isEmpty || !store.loadWarnings.isEmpty
                 || runtime.jobs[session.id] != nil || runtime.errors[session.id] != nil {
                 // Short status messages use only their natural height. Long
@@ -350,9 +382,12 @@ struct ResearchPanelView: View {
                     .padding(.top, 6)
                 }
                 ResearchComposerLayout(text: draft.text, maximumHeight: compact ? 132 : 164) {
-                    ResearchTextEditor(text: Binding(get: { draft.text }, set: { text in mutateDraft { $0.text = text } }),
+                    ResearchTextEditor(text: composerTextBinding(sessionID: session.id),
+                        isEditable: composerEditing.ownsEditor,
                         placeholder: L10n.string("Ask a question, or leave empty for an outline…"),
-                        onSubmit: { send() }, onPasteImage: importImage)
+                        onSubmit: { send() }, onPasteImage: importImage,
+                        commands: composerCommands, identity: session.id,
+                        composerEditing: composerEditing)
                         .id(session.id)
                 }
                 .frame(maxWidth: .infinity)
@@ -414,7 +449,7 @@ struct ResearchPanelView: View {
                 Spacer(minLength: 0)
                 if imagesNeedConfirmation {
                     Button("Send text only") { send(textOnly: true) }
-                        .buttonStyle(.borderless).font(.caption).disabled(running)
+                        .buttonStyle(.borderless).font(.caption).disabled(!composerEditing.ownsEditor || running)
                 }
                 Button(action: { send() }) {
                     if draft.isEmpty {
@@ -429,7 +464,7 @@ struct ResearchPanelView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
                 .help(LocalizedStringKey(draft.isEmpty ? (runtime.cloudAvailable ? "Create outline" : "Local outline") : "Send"))
                 .accessibilityLabel(LocalizedStringKey(draft.isEmpty ? (runtime.cloudAvailable ? "Create outline" : "Local outline") : "Send"))
-                .disabled(running || imagesNeedConfirmation || (sourceIDs.isEmpty && draft.attachmentIDs.isEmpty))
+                .disabled(!composerEditing.ownsEditor || running || imagesNeedConfirmation || (sourceIDs.isEmpty && draft.attachmentIDs.isEmpty))
             }
         }
     }
@@ -537,11 +572,36 @@ struct ResearchPanelView: View {
         }
     }
     private func createSession() {
+        guard composerEditing.prepareForTransition(), composerEditing.release() else { return }
         sessionID = store.createSession(title: L10n.string("New research"), sourceSelection: ResearchSourceSelection(fileIDs: currentFileID.map { [$0] } ?? []))
     }
     private func send(textOnly: Bool = false) {
-        guard let sessionID, !running, textOnly || !imagesNeedConfirmation else { return }
+        guard let sessionID, !running, textOnly || !imagesNeedConfirmation,
+              composerEditing.sessionID == sessionID, composerEditing.ownsEditor,
+              composerEditing.prepareForTransition() else { return }
         runtime.send(sessionID: sessionID, library: library, mainStore: mainStore, viewID: viewID, textOnly: textOnly)
+    }
+
+    private func bindComposer() {
+        guard let sessionID else { return }
+        let commands = composerCommands
+        _ = composerEditing.bind(sessionID: sessionID, prepareNativeInput: {
+            commands.finishEditing(identity: sessionID)
+        })
+    }
+
+    private func selectSession(_ id: UUID) {
+        guard composerEditing.prepareForTransition(), composerEditing.release() else { return }
+        sessionID = id
+    }
+
+    private func composerTextBinding(sessionID: UUID) -> Binding<String> {
+        Binding(get: {
+            composerEditing.sessionID == sessionID ? composerEditing.text : store.session(id: sessionID)?.draft.text ?? ""
+        }, set: { text in
+            guard composerEditing.sessionID == sessionID else { return }
+            _ = composerEditing.acceptNativeText(text)
+        })
     }
     private func appendDiscussion(_ text: String, message: ResearchMessage) {
         let evidence = ResearchEvidence(source: nil, kind: .discussion, excerpt: text, messageID: message.id)

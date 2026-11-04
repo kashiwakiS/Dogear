@@ -91,7 +91,7 @@ actor AIHighlightTraceRecorder {
         if fileURL == nil, let bookmark = defaults.data(forKey: Self.debugDirectoryBookmarkKey) {
             do {
                 var stale = false
-                let url = try URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI],
+                let url = try URL(resolvingBookmarkData: bookmark, options: Self.debugBookmarkResolutionOptions,
                                   bookmarkDataIsStale: &stale)
                 guard !stale, url.startAccessingSecurityScopedResource() else {
                     throw CocoaError(.fileReadNoPermission)
@@ -107,6 +107,21 @@ actor AIHighlightTraceRecorder {
 
     deinit { scopedDirectory?.stopAccessingSecurityScopedResource() }
 
+    private nonisolated static var debugBookmarkResolutionOptions: URL.BookmarkResolutionOptions {
+        #if os(macOS)
+        [.withSecurityScope, .withoutUI]
+        #else
+        []
+        #endif
+    }
+    private nonisolated static var debugBookmarkCreationOptions: URL.BookmarkCreationOptions {
+        #if os(macOS)
+        [.withSecurityScope]
+        #else
+        []
+        #endif
+    }
+
     nonisolated static func debugFileURL(in directory: URL) -> URL {
         directory.appendingPathComponent("DogearDiagnostics", isDirectory: true)
             .appendingPathComponent("trace-v1.jsonl")
@@ -117,7 +132,7 @@ actor AIHighlightTraceRecorder {
         guard activeWorkflows.isEmpty else { throw CocoaError(.fileWriteFileExists) }
         let accessed = directory.startAccessingSecurityScopedResource()
         do {
-            let bookmark = try directory.bookmarkData(options: [.withSecurityScope],
+            let bookmark = try directory.bookmarkData(options: Self.debugBookmarkCreationOptions,
                 includingResourceValuesForKeys: nil, relativeTo: nil)
             let destination = Self.debugFileURL(in: directory)
             try prepareFile(at: destination)

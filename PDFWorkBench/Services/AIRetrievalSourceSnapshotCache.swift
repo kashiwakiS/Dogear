@@ -66,7 +66,7 @@ actor AIRetrievalSourceSnapshotCache {
         diagnosticInitializationFailure: Bool = false
     ) {
         self.databaseURL = databaseURL
-            ?? AILocalEmbeddingModels.root
+            ?? AIRetrievalCachePaths.root
                 .appendingPathComponent("Sources", isDirectory: true)
                 .appendingPathComponent("source-snapshots-v2.sqlite3")
         self.persistenceEnabled = persistenceEnabled

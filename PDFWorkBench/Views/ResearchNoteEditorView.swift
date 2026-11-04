@@ -212,17 +212,7 @@ struct ResearchNoteEditorView: View {
     }
 
     private func citationSources(for provenance: [ResearchNoteProvenance]) -> [ResearchSourceSnapshot] {
-        // D001-style citations refer to a frozen request catalog. Combining
-        // evidence or live Group members would silently change their meaning.
-        let catalogs = provenance.compactMap { item -> [ResearchSourceSnapshot]? in
-            guard let sessionID = item.sessionID, let messageID = item.messageID,
-                  let message = store.session(id: sessionID)?.messages.first(where: { $0.id == messageID })
-            else { return nil }
-            return message.sourceSnapshot.filter { $0.fingerprint != "pending" }
-        }
-        guard catalogs.count == provenance.count, let catalog = catalogs.first,
-              catalogs.allSatisfy({ $0 == catalog }) else { return [] }
-        return catalog
+        ResearchNoteEvidenceContext(provenance: provenance, store: store).sources
     }
 
     private func edit(_ mutation: (inout ResearchNote) -> Void) {
@@ -234,8 +224,7 @@ struct ResearchNoteEditorView: View {
         uniqueEvidence(note.provenance)
     }
     private func uniqueEvidence(_ provenance: [ResearchNoteProvenance]) -> [ResearchEvidence] {
-        var seen = Set<UUID>()
-        return provenance.flatMap(\.evidence).filter { seen.insert($0.id).inserted }
+        ResearchNoteEvidenceContext(provenance: provenance, store: store).evidence
     }
     private func quote(_ text: String) { quote(text, revision: note?.revision ?? 1) }
     private func quote(_ text: String, revision: Int) {

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -193,6 +194,240 @@ enum ResearchTextEditorDiagnostics {
         }
         check(opened == page7.id, "Native citation clicks did not route through the existing evidence action")
         return Report(checks: checks, failures: failures)
+    }
+
+    /// Exercises the production representable, including its deferred native
+    /// installation and actual dismantle. The two windows stay unshown and do
+    /// not change the user's key window or clipboard.
+    static func runComposerNative() async -> Report {
+        var checks = 0
+        var failures: [String] = []
+        func check(_ value: Bool, _ message: String) {
+            checks += 1
+            if !value { failures.append(message) }
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("DogearMacComposer-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ResearchStore(rootURL: root)
+        let sessionA = store.createSession(title: "Native A")
+        let sessionB = store.createSession(title: "Native B")
+        for (id, text) in [(sessionA, "A baseline"), (sessionB, "B baseline")] {
+            if var draft = store.session(id: id)?.draft { draft.text = text; _ = store.saveDraft(draft, sessionID: id) }
+        }
+        let editing = ResearchComposerEditingSession(store: store)
+        let commands = ResearchTextEditingCommands()
+        check(editing.bind(sessionID: sessionA, prepareNativeInput: { true }), "The native Mac fixture binds its actual shared composer owner.")
+        let firstState = ComposerFixtureState(editing: editing, commands: commands, identity: sessionA)
+        let secondState = ComposerFixtureState(editing: editing, commands: commands, identity: sessionA)
+        let firstHost = NSHostingView(rootView: ComposerFixture(state: firstState))
+        let firstWindow = composerWindow(), secondWindow = composerWindow()
+        defer { firstWindow.close(); secondWindow.close() }
+        firstWindow.contentView = firstHost
+        await settleComposer(firstHost)
+        guard let first = nativeEditor(in: firstHost), let firstInstallation = editing.nativeInstallationID else {
+            check(false, "The production Mac composer did not attach its actual window-ready NSTextView.")
+            return Report(checks: checks, failures: failures)
+        }
+        check(first.window === firstWindow && first.isEditable && editing.ownsEditor && first.editorIdentity == sessionA,
+            "Only the exact window-ready native composer becomes editable.")
+        firstWindow.makeFirstResponder(first)
+        first.setSelectedRange(NSRange(location: (first.string as NSString).length, length: 0))
+        first.insertText(" typed", replacementRange: NSRange(location: NSNotFound, length: 0))
+        check(store.session(id: sessionA)?.draft.text == first.string && first.undoManager?.canUndo == true,
+            "Actual NSTextView typing writes its captured composer and retains independent native Undo.")
+        first.setMarkedText("中文候选", selectedRange: NSRange(location: 4, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0))
+        check(first.hasMarkedText(), "A same-object remount begins with actual Mac marked Chinese input.")
+        let secondHost = NSHostingView(rootView: ComposerFixture(state: secondState))
+        secondWindow.contentView = secondHost
+        await settleComposer(secondHost)
+        guard let second = nativeEditor(in: secondHost), let secondInstallation = editing.nativeInstallationID else {
+            check(false, "The replacement native Mac composer did not attach.")
+            return Report(checks: checks, failures: failures)
+        }
+        let preparedText = first.string
+        check(firstInstallation != secondInstallation && !first.hasMarkedText()
+            && preparedText.contains("中文候选") && store.session(id: sessionA)?.draft.text == preparedText
+            && second.string == preparedText && second.isEditable && editing.ownsEditor,
+            "A real same-StateObject remount prepares old composition before granting the new immutable installation.")
+        secondWindow.makeFirstResponder(second)
+        second.setSelectedRange(NSRange(location: (second.string as NSString).length, length: 0))
+        second.insertText(" newer", replacementRange: NSRange(location: NSNotFound, length: 0))
+        await settleComposer(secondHost)
+        await settleComposer(firstHost)
+        let canonical = store.composerSnapshot(sessionID: sessionA)
+        let currentLease = editing.lease
+        let currentText = editing.localText, currentError = editing.error
+        check(canonical?.text == second.string && canonical?.text.hasSuffix(" newer") == true
+            && first.string == preparedText && !first.isEditable,
+            "The superseded host cannot receive a new binding echo or remain editable under the replacement lease.")
+        first.commitCurrentText()
+        check(store.composerSnapshot(sessionID: sessionA) == canonical && editing.nativeInstallationID == secondInstallation
+            && editing.lease == currentLease && editing.localText == currentText && editing.error == currentError
+            && store.composerConflicts.contains(where: { $0.id == firstInstallation && $0.sessionID == sessionA && $0.text == preparedText }),
+            "A real old native commit archives its original session text without borrowing the fresh host's lease.")
+        firstState.isMounted = false
+        await settleComposer(firstHost)
+        check(first.delegate == nil && first.onCommitCurrentText == nil && editing.nativeInstallationID == secondInstallation
+            && editing.lease == currentLease && editing.ownsEditor && second.isEditable,
+            "Dismantling the old representable detaches only its installation and preserves the fresh native owner.")
+        second.setMarkedText("新输入", selectedRange: NSRange(location: 3, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0))
+        check(commands.finishEditing(identity: sessionA) && !second.hasMarkedText()
+            && store.session(id: sessionA)?.draft.text == second.string && second.string.contains("新输入"),
+            "The command adapter remains attached to the actual replacement editor after old teardown.")
+        check(editing.bind(sessionID: sessionB, prepareNativeInput: { true }),
+            "The same shared editing object can bind a genuinely different Research session.")
+        let thirdState = ComposerFixtureState(editing: editing, commands: commands, identity: sessionB)
+        let thirdHost = NSHostingView(rootView: ComposerFixture(state: thirdState))
+        let thirdWindow = composerWindow(); defer { thirdWindow.close() }
+        thirdWindow.contentView = thirdHost
+        await settleComposer(thirdHost)
+        guard let third = nativeEditor(in: thirdHost), let thirdInstallation = editing.nativeInstallationID else {
+            check(false, "The different-session native Mac composer did not attach.")
+            return Report(checks: checks, failures: failures)
+        }
+        let beforeB = store.composerSnapshot(sessionID: sessionB)
+        let beforeBLease = editing.lease, beforeBLocal = editing.localText, beforeBError = editing.error
+        let beforeA = store.composerSnapshot(sessionID: sessionA)
+        // Model a text-system result delivered after the native host became
+        // read-only. It changes the actual old NSTextStorage, then uses the
+        // production commit callback; it never writes through a Binding.
+        second.textStorage?.append(NSAttributedString(string: " late A"))
+        let lateAText = second.string
+        second.commitCurrentText()
+        await settleComposer(secondHost)
+        check(editing.sessionID == sessionB && editing.nativeInstallationID == thirdInstallation
+            && store.composerSnapshot(sessionID: sessionB) == beforeB && editing.lease == beforeBLease
+            && editing.localText == beforeBLocal && editing.error == beforeBError && third.string == "B baseline"
+            && store.composerSnapshot(sessionID: sessionA) == beforeA && lateAText.hasSuffix(" late A")
+            && store.composerConflicts.contains(where: { $0.id == secondInstallation && $0.sessionID == sessionA && $0.text == lateAText }),
+            "A captured late native callback cannot redirect old A text into the current B composer.")
+        check(second.editorIdentity == sessionA && second.string.contains("新输入") && !second.isEditable,
+            "The old A view does not apply the reused editing object's B binding getter as an A echo.")
+        secondState.isMounted = false
+        await settleComposer(secondHost)
+        check(editing.nativeInstallationID == thirdInstallation && editing.ownsEditor,
+            "Late dismantle from another Research UUID cannot detach the current composer.")
+
+        let delayedEditing = ResearchComposerEditingSession(store: store)
+        let delayedID = store.createSession(title: "Deferred native")
+        check(delayedEditing.bind(sessionID: delayedID, prepareNativeInput: { true }),
+            "The deferred native fixture has an independent real shared owner.")
+        let delayedState = ComposerFixtureState(editing: delayedEditing, commands: ResearchTextEditingCommands(), identity: delayedID)
+        let delayedHost = NSHostingView(rootView: ComposerFixture(state: delayedState))
+        delayedHost.frame = NSRect(x: 0, y: 0, width: 400, height: 260)
+        await settleComposer(delayedHost)
+        check(delayedEditing.nativeInstallationID == nil, "A windowless native view does not claim an editing installation.")
+        delayedState.isActive = false
+        await settleComposer(delayedHost)
+        let delayedWindow = composerWindow(); defer { delayedWindow.close() }
+        delayedWindow.contentView = delayedHost
+        await settleComposer(delayedHost)
+        check(delayedEditing.nativeInstallationID == nil && nativeEditor(in: delayedHost)?.isEditable == false,
+            "An inactive host rejects its late window-ready attachment.")
+        delayedState.isActive = true
+        await settleComposer(delayedHost)
+        check(delayedEditing.nativeInstallationID != nil && nativeEditor(in: delayedHost)?.isEditable == true,
+            "A still-current native installation can attach when its presentation becomes active.")
+
+        let reservedID = store.createSession(title: "Never-attached host")
+        let reservedEditing = ResearchComposerEditingSession(store: store)
+        check(reservedEditing.bind(sessionID: reservedID, prepareNativeInput: { true }),
+            "The late-window fixture binds a real shared composer independently.")
+        let reservedCommands = ResearchTextEditingCommands()
+        let oldReservedState = ComposerFixtureState(editing: reservedEditing, commands: reservedCommands, identity: reservedID)
+        let oldReservedHost = NSHostingView(rootView: ComposerFixture(state: oldReservedState))
+        oldReservedHost.frame = NSRect(x: 0, y: 0, width: 400, height: 260)
+        await settleComposer(oldReservedHost)
+        check(nativeEditor(in: oldReservedHost) != nil && reservedEditing.nativeInstallationID == nil,
+            "The old reservation belongs to an actual mounted, windowless NSTextView.")
+        let freshReservedState = ComposerFixtureState(editing: reservedEditing, commands: reservedCommands, identity: reservedID)
+        let freshReservedHost = NSHostingView(rootView: ComposerFixture(state: freshReservedState))
+        let freshReservedWindow = composerWindow(), oldReservedWindow = composerWindow()
+        defer { freshReservedWindow.close(); oldReservedWindow.close() }
+        freshReservedWindow.contentView = freshReservedHost
+        await settleComposer(freshReservedHost)
+        guard let freshReserved = nativeEditor(in: freshReservedHost),
+              let reservedInstallation = reservedEditing.nativeInstallationID else {
+            check(false, "The newer reservation did not attach its actual native window.")
+            return Report(checks: checks, failures: failures)
+        }
+        freshReservedWindow.makeFirstResponder(freshReserved)
+        freshReserved.insertText("latest native host", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let reservedSnapshot = store.composerSnapshot(sessionID: reservedID)
+        let reservedLease = reservedEditing.lease
+        oldReservedWindow.contentView = oldReservedHost
+        await settleComposer(oldReservedHost)
+        check(reservedEditing.nativeInstallationID == reservedInstallation && reservedEditing.lease == reservedLease
+            && reservedEditing.ownsEditor && freshReserved.isEditable
+            && nativeEditor(in: oldReservedHost)?.isEditable == false
+            && store.composerSnapshot(sessionID: reservedID) == reservedSnapshot,
+            "A never-attached old host cannot claim the latest reservation when its window arrives late.")
+        freshReserved.setMarkedText("新宿主", selectedRange: NSRange(location: 3, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0))
+        oldReservedState.isMounted = false
+        await settleComposer(oldReservedHost)
+        check(reservedCommands.finishEditing(identity: reservedID) && !freshReserved.hasMarkedText()
+            && reservedEditing.nativeInstallationID == reservedInstallation && reservedEditing.ownsEditor
+            && store.session(id: reservedID)?.draft.text == freshReserved.string,
+            "Late old-host teardown preserves the fresh command target and captured Chinese composition.")
+        freshReservedState.isMounted = false
+        await settleComposer(freshReservedHost)
+        thirdState.isMounted = false; delayedState.isMounted = false
+        await settleComposer(thirdHost); await settleComposer(delayedHost)
+        check(editing.nativeInstallationID == nil && delayedEditing.nativeInstallationID == nil
+            && !editing.ownsEditor && !delayedEditing.ownsEditor,
+            "Actual current-host dismantle releases only its exact native editing owners.")
+        return Report(checks: checks, failures: failures)
+    }
+
+    private static func composerWindow() -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 260),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+
+    private static func settleComposer(_ view: NSView) async {
+        for _ in 0..<5 {
+            view.needsLayout = true; view.layoutSubtreeIfNeeded()
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    private static func nativeEditor(in view: NSView) -> ResearchNativeTextView? {
+        if let value = view as? ResearchNativeTextView { return value }
+        for child in view.subviews { if let value = nativeEditor(in: child) { return value } }
+        return nil
+    }
+
+    private final class ComposerFixtureState: ObservableObject {
+        let editing: ResearchComposerEditingSession
+        let commands: ResearchTextEditingCommands
+        let identity: UUID
+        @Published var isActive = true
+        @Published var isMounted = true
+        init(editing: ResearchComposerEditingSession, commands: ResearchTextEditingCommands, identity: UUID) {
+            self.editing = editing; self.commands = commands; self.identity = identity
+        }
+    }
+
+    private struct ComposerFixture: View {
+        @ObservedObject var state: ComposerFixtureState
+        @ObservedObject var editing: ResearchComposerEditingSession
+        init(state: ComposerFixtureState) { self.state = state; editing = state.editing }
+        var body: some View {
+            Group {
+                if state.isMounted {
+                    ResearchTextEditor(text: Binding(get: { editing.text }, set: { _ = editing.acceptNativeText($0) }),
+                        commands: state.commands, identity: state.identity,
+                        composerEditing: editing, composerIsActive: state.isActive)
+                        .id(state.identity)
+                } else { Color.clear }
+            }.frame(width: 400, height: 260)
+        }
     }
 
     private static func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags, window: NSWindow) -> NSEvent? {

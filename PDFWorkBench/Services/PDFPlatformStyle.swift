@@ -24,6 +24,14 @@ enum PDFPlatformStyle {
         #endif
     }
 
+    static func alphaComponent(of color: PDFPlatformColor) -> CGFloat {
+        #if canImport(AppKit)
+        color.alphaComponent
+        #else
+        color.cgColor.alpha
+        #endif
+    }
+
     static func resizedFont(_ font: PDFPlatformFont, size: CGFloat) -> PDFPlatformFont {
         #if canImport(AppKit)
         NSFont(descriptor: font.fontDescriptor, size: size) ?? font
@@ -55,6 +63,14 @@ enum PDFPlatformStyle {
         NSValue(point: point)
         #else
         NSValue(cgPoint: point)
+        #endif
+    }
+
+    static func point(from value: NSValue) -> CGPoint {
+        #if canImport(AppKit)
+        value.pointValue
+        #else
+        value.cgPointValue
         #endif
     }
 
